@@ -16,18 +16,28 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-# --- AYARLAR ---
+# ==========================================
+# --- AYARLAR (BURADAN DEĞİŞTİREBİLİRSİN) ---
+# ==========================================
 BOT_TOKEN = "9293651278:AAGdGb6Nr1gBX5-Er6YAb62ZNyUQEG4yxZg"
 CHAT_ID = 5066109900
 TIMEZONE = pytz.timezone("Europe/Istanbul")
 SYMBOLS = ["F_XU0301224"]
 
-RSI_PERIOD = 8
-RSI_SHORT = 75
-RSI_LONG = 25
-ST_PERIOD = 10
-ST_MULTIPLIER = 3.0
+RSI_PERIOD = 8       # RSI Periyodu
+RSI_SHORT = 75       # Short için RSI eşiği
+RSI_LONG = 25        # Long için RSI eşiği
+
+ST_PERIOD = 10       # SuperTrend Periyodu
+ST_MULTIPLIER = 3.0  # SuperTrend Çarpanı
+
+# Stop ve Hedef Çarpanları (ATR'ye göre)
+SL_MULTIPLIER = 1.5  # Stop-Loss mesafesi
+TP1_MULTIPLIER = 2.0 # 1. Hedef mesafesi (Kısmi kâr al)
+TP2_MULTIPLIER = 4.0 # 2. Hedef mesafesi (Ana kâr al)
+
 TIME_FRAMES = ["1h", "2h", "4h"]
+# ==========================================
 
 def is_market_open(now=None):
     now = now or datetime.now(TIMEZONE)
@@ -58,7 +68,6 @@ def fetch_ohlc(symbol, interval, limit=300):
 def fetch_all_tfs(symbol):
     return {tf: fetch_ohlc(symbol, tf) for tf in set(TIME_FRAMES) | {"15m"}}
 
-# --- MANUEL İNDİKATÖRLER ---
 def get_rsi(series, period=8):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -98,7 +107,11 @@ def get_supertrend(df, period=10, multiplier=3.0):
         else:
             supertrend.iloc[i] = upperband.iloc[i]
             
-    return {"dir": int(direction.iloc[-1]), "line": float(supertrend.iloc[-1])}
+    return {
+        "dir": int(direction.iloc[-1]), 
+        "line": float(supertrend.iloc[-1]),
+        "atr": float(atr.iloc[-1])
+    }
 
 class State(Enum): IDLE="IDLE"; SHORT="SHORT"; LONG="LONG"
 states = {}
@@ -118,27 +131,60 @@ def process_signals(symbol, dfs):
         
         r_now, r_prev = float(rsi.iloc[-1]), float(rsi.iloc[-2])
         sti = get_supertrend(df, period=ST_PERIOD, multiplier=ST_MULTIPLIER)
-        st_dir = sti["dir"] if sti else 0
+        
+        if not sti: continue
+        
+        st_dir = sti["dir"]
+        atr = sti["atr"]
+        close_price = float(df["close"].iloc[-1])
+        
         st = states.setdefault((symbol, tf), {"state": State.IDLE, "last_bar": None})
         bar_time = df.index[-1]
         
         if st["last_bar"] == bar_time: continue
         st["last_bar"] = bar_time
         
+        # --- SHORT SİNYALİ ---
         if r_prev <= RSI_SHORT < r_now:
             onay = "✅ ONAYLI" if st_dir == -1 else "⚠️ ZAYIF"
-            msg = f"🔴 <b>{symbol}</b> — SHORT [{tf.upper()}] {onay}\nRSI: {r_prev:.1f} → {r_now:.1f}\n"
-            if sti: msg += f"🧭 ST Çizgi: {sti['line']:,.2f}\n"
+            msg = f"🔴 <b>{symbol}</b> — SHORT [{tf.upper()}] {onay}\n"
+            msg += f"RSI: {r_prev:.1f} → {r_now:.1f}\n"
+            msg += f"🧭 ST Çizgi: {sti['line']:,.2f}\n"
+            
+            # Stop ve Çift Hedef Hesaplaması
+            sl_price = close_price + (atr * SL_MULTIPLIER)
+            tp1_price = close_price - (atr * TP1_MULTIPLIER)
+            tp2_price = close_price - (atr * TP2_MULTIPLIER)
+            
+            msg += f"🛑 <b>Stop-Loss:</b> {sl_price:,.2f}\n"
+            msg += f"🎯 <b>Hedef 1:</b> {tp1_price:,.2f} (Kısmi kâr)\n"
+            msg += f"🏆 <b>Hedef 2:</b> {tp2_price:,.2f} (Ana kâr)\n"
+            
             if ctx["ema50"]: msg += f"📈 EMA50: {ctx['ema50']:,.2f}\n"
             msg += get_earnings_note(symbol)
             msgs.append(msg); st["state"] = State.SHORT
+            
+        # --- LONG SİNYALİ ---
         elif r_prev >= RSI_LONG > r_now:
             onay = "✅ ONAYLI" if st_dir == 1 else "⚠️ ZAYIF"
-            msg = f"🟢 <b>{symbol}</b> — LONG [{tf.upper()}] {onay}\nRSI: {r_prev:.1f} → {r_now:.1f}\n"
-            if sti: msg += f"🧭 ST Çizgi: {sti['line']:,.2f}\n"
+            msg = f"🟢 <b>{symbol}</b> — LONG [{tf.upper()}] {onay}\n"
+            msg += f"RSI: {r_prev:.1f} → {r_now:.1f}\n"
+            msg += f"🧭 ST Çizgi: {sti['line']:,.2f}\n"
+            
+            # Stop ve Çift Hedef Hesaplaması
+            sl_price = close_price - (atr * SL_MULTIPLIER)
+            tp1_price = close_price + (atr * TP1_MULTIPLIER)
+            tp2_price = close_price + (atr * TP2_MULTIPLIER)
+            
+            msg += f"🛑 <b>Stop-Loss:</b> {sl_price:,.2f}\n"
+            msg += f"🎯 <b>Hedef 1:</b> {tp1_price:,.2f} (Kısmi kâr)\n"
+            msg += f"🏆 <b>Hedef 2:</b> {tp2_price:,.2f} (Ana kâr)\n"
+            
             if ctx["ema50"]: msg += f"📈 EMA50: {ctx['ema50']:,.2f}\n"
             msg += get_earnings_note(symbol)
             msgs.append(msg); st["state"] = State.LONG
+            
+        # --- EXIT SİNYALLERİ ---
         elif st["state"] == State.SHORT and r_now < RSI_SHORT:
             msgs.append(f"⚪ {symbol} SHORT_EXIT [{tf.upper()}]"); st["state"] = State.IDLE
         elif st["state"] == State.LONG and r_now > RSI_LONG:
