@@ -1,0 +1,7 @@
+pandas
+pandas-ta
+borsapy
+python-telegram-bot
+apscheduler
+holidays
+pytz
