@@ -1,5 +1,5 @@
 pandas
-pandas-ta
+numpy
 borsapy
 python-telegram-bot
 apscheduler
