@@ -23,7 +23,6 @@ BOT_TOKEN = "9293651278:AAGdGb6Nr1gBX5-Er6YAb62ZNyUQEG4yxZg"
 CHAT_ID = 5066109900
 TIMEZONE = pytz.timezone("Europe/Istanbul")
 
-# 44 Hisselik Güncel Liste
 SYMBOLS = [
     "TOASO", "TRALT", "ASTOR", "GUBRF", "TRMET",
     "TCELL", "GARAN", "YKBNK", "TAVHL", "ENKAI",
@@ -40,14 +39,17 @@ RSI_PERIOD = 8
 RSI_SHORT = 75
 RSI_LONG = 25
 
-ST_PERIOD = 10
-ST_MULTIPLIER = 3.0
+# EMA TREND FİLTRESİ
+EMA_PERIOD = 200
+CONTEXT_TF = "30m" # 30 dakikalık grafik trend yönünü belirler
 
+# Stop ve Hedef Çarpanları (ATR'ye göre)
 SL_MULTIPLIER = 1.5  
 TP1_MULTIPLIER = 2.0 
 TP2_MULTIPLIER = 4.0 
 
-TIME_FRAMES = ["1h", "2h", "4h"]
+# 30M, 1H ve 4H taranacak
+TIME_FRAMES = ["30m", "1h", "4h"] 
 # ==========================================
 
 def is_market_open(now=None):
@@ -75,12 +77,16 @@ def get_earnings_note(symbol):
 def fetch_ohlc(symbol, interval, limit=300):
     try:
         df = bp.Ticker(symbol).history(period=f"{limit + 2} bar", interval=interval)
-        return df.iloc[:-1]
+        if df is not None and not df.empty:
+            df.columns = [str(c).lower() for c in df.columns]
+            return df.iloc[:-1]
+        return None
     except:
         return None
 
 def fetch_all_tfs(symbol):
-    return {tf: fetch_ohlc(symbol, tf) for tf in set(TIME_FRAMES) | {"15m"}}
+    tfs = set(TIME_FRAMES) | {CONTEXT_TF, "15m"}
+    return {tf: fetch_ohlc(symbol, tf) for tf in tfs}
 
 def get_rsi(series, period=8):
     delta = series.diff()
@@ -89,45 +95,22 @@ def get_rsi(series, period=8):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def get_supertrend(df, period=10, multiplier=3.0):
+def calculate_atr(df, period=10):
     if df is None or len(df) < period + 1: return None
-    hl2 = (df['high'] + df['low']) / 2
     tr1 = df['high'] - df['low']
     tr2 = (df['high'] - df['close'].shift()).abs()
     tr3 = (df['low'] - df['close'].shift()).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=period).mean()
-    
-    upperband = hl2 + (multiplier * atr)
-    lowerband = hl2 - (multiplier * atr)
-    
-    supertrend = pd.Series(np.nan, index=df.index, dtype=float)
-    direction = pd.Series(1, index=df.index, dtype=int)
-    
-    for i in range(period, len(df)):
-        if df['close'].iloc[i] > upperband.iloc[i-1]:
-            direction.iloc[i] = 1
-        elif df['close'].iloc[i] < lowerband.iloc[i-1]:
-            direction.iloc[i] = -1
-        else:
-            direction.iloc[i] = direction.iloc[i-1]
-            if direction.iloc[i] == 1 and lowerband.iloc[i] < lowerband.iloc[i-1]:
-                lowerband.iloc[i] = lowerband.iloc[i-1]
-            if direction.iloc[i] == -1 and upperband.iloc[i] > upperband.iloc[i-1]:
-                upperband.iloc[i] = upperband.iloc[i-1]
-        
-        if direction.iloc[i] == 1:
-            supertrend.iloc[i] = lowerband.iloc[i]
-        else:
-            supertrend.iloc[i] = upperband.iloc[i]
-            
-    return {
-        "dir": int(direction.iloc[-1]), 
-        "line": float(supertrend.iloc[-1]),
-        "atr": float(atr.iloc[-1])
-    }
+    return float(atr.iloc[-1])
 
-# --- RSI UYUMSUZLUK (DIVERGENCE) KONTROLÜ ---
+def get_ema_trend(df, period=200):
+    if df is None or len(df) < period: return 0
+    ema = df['close'].ewm(span=period, adjust=False).mean()
+    close_price = float(df['close'].iloc[-1])
+    ema_val = float(ema.iloc[-1])
+    return 1 if close_price > ema_val else -1 
+
 def check_divergence(df, rsi_series):
     if df is None or len(df) < 20: return None
     recent_df = df.tail(20).copy()
@@ -135,18 +118,15 @@ def check_divergence(df, rsi_series):
 
     high1_idx = recent_df['high'].iloc[:10].idxmax()
     high2_idx = recent_df['high'].iloc[10:].idxmax()
-    
     if recent_df.loc[high2_idx, 'high'] > recent_df.loc[high1_idx, 'high']:
         if recent_rsi.loc[high2_idx] < recent_rsi.loc[high1_idx]:
             return "BEARISH" 
 
     low1_idx = recent_df['low'].iloc[:10].idxmin()
     low2_idx = recent_df['low'].iloc[10:].idxmin()
-
     if recent_df.loc[low2_idx, 'low'] < recent_df.loc[low1_idx, 'low']:
         if recent_rsi.loc[low2_idx] > recent_rsi.loc[low1_idx]:
             return "BULLISH" 
-
     return None
 
 class State(Enum): IDLE="IDLE"; SHORT="SHORT"; LONG="LONG"
@@ -159,22 +139,24 @@ def process_signals(symbol, dfs):
     if ctx_df is not None and len(ctx_df) > 50:
         ctx["ema50"] = float(ctx_df["close"].ewm(span=50, adjust=False).mean().iloc[-1])
 
+    # 30m EMA 200 Trend Yönü
+    trend_30m = get_ema_trend(dfs.get(CONTEXT_TF), EMA_PERIOD)
+    # 4H EMA 200 Trend Yönü
+    trend_4h = get_ema_trend(dfs.get("4h"), EMA_PERIOD)
+
     for tf in TIME_FRAMES:
         df = dfs.get(tf)
-        if df is None or len(df) < 20: continue
+        if df is None or len(df) < 30: continue
         rsi = get_rsi(df["close"], period=RSI_PERIOD)
         if rsi is None or len(rsi) < 2: continue
         
         r_now, r_prev = float(rsi.iloc[-1]), float(rsi.iloc[-2])
-        sti = get_supertrend(df, period=ST_PERIOD, multiplier=ST_MULTIPLIER)
+        atr = calculate_atr(df, period=10)
         div_type = check_divergence(df, rsi)
         
-        if not sti: continue
+        if not atr: continue
         
-        st_dir = sti["dir"]
-        atr = sti["atr"]
         close_price = float(df["close"].iloc[-1])
-        
         st = states.setdefault((symbol, tf), {"state": State.IDLE, "last_bar": None})
         bar_time = df.index[-1]
         
@@ -183,20 +165,24 @@ def process_signals(symbol, dfs):
         
         # --- SHORT SİNYALİ ---
         if r_prev <= RSI_SHORT < r_now:
-            onay = "✅ ONAYLI" if st_dir == -1 else "⚠️ ZAYIF"
-            msg = f"🔴 <b>{symbol}</b> — SHORT [{tf.upper()}] {onay}\n"
+            if trend_30m != -1: continue # 30m EMA 200 altındaysa
+            
+            msg = f"🔴 <b>{symbol}</b> — SHORT [{tf.upper()}] ✅ EMA 200 ONAYLI\n"
+            # 30m veya 1H sinyali + 4H aynı yöndeyse Süper Sinyal
+            if tf in ["30m", "1h"] and trend_4h == -1:
+                msg = f"🔥 <b>SÜPER SİNYAL ({tf.upper()} + 4H EMA UYUMU)</b> 🔥\n" + msg
+                
             msg += f"RSI: {r_prev:.1f} → {r_now:.1f}\n"
-            msg += f"🧭 ST Çizgi: {sti['line']:,.2f}\n"
             
             sl_price = close_price + (atr * SL_MULTIPLIER)
             tp1_price = close_price - (atr * TP1_MULTIPLIER)
             tp2_price = close_price - (atr * TP2_MULTIPLIER)
             
             msg += f"🛑 <b>Stop-Loss:</b> {sl_price:,.2f}\n"
-            msg += f"🎯 <b>Hedef 1:</b> {tp1_price:,.2f} (Kısmi kâr)\n"
-            msg += f"🏆 <b>Hedef 2:</b> {tp2_price:,.2f} (Ana kâr)\n"
+            msg += f"🎯 <b>Hedef 1:</b> {tp1_price:,.2f}\n"
+            msg += f"🏆 <b>Hedef 2:</b> {tp2_price:,.2f}\n"
             
-            if ctx["ema50"]: msg += f"📈 EMA50: {ctx['ema50']:,.2f}\n"
+            if ctx["ema50"]: msg += f"📈 15m EMA50: {ctx['ema50']:,.2f}\n"
             msg += get_earnings_note(symbol)
             
             if div_type == "BEARISH":
@@ -206,20 +192,23 @@ def process_signals(symbol, dfs):
             
         # --- LONG SİNYALİ ---
         elif r_prev >= RSI_LONG > r_now:
-            onay = "✅ ONAYLI" if st_dir == 1 else "⚠️ ZAYIF"
-            msg = f"🟢 <b>{symbol}</b> — LONG [{tf.upper()}] {onay}\n"
+            if trend_30m != 1: continue # 30m EMA 200 üstündeyse
+            
+            msg = f"🟢 <b>{symbol}</b> — LONG [{tf.upper()}] ✅ EMA 200 ONAYLI\n"
+            if tf in ["30m", "1h"] and trend_4h == 1:
+                msg = f"🔥 <b>SÜPER SİNYAL ({tf.upper()} + 4H EMA UYUMU)</b> 🔥\n" + msg
+                
             msg += f"RSI: {r_prev:.1f} → {r_now:.1f}\n"
-            msg += f"🧭 ST Çizgi: {sti['line']:,.2f}\n"
             
             sl_price = close_price - (atr * SL_MULTIPLIER)
             tp1_price = close_price + (atr * TP1_MULTIPLIER)
             tp2_price = close_price + (atr * TP2_MULTIPLIER)
             
             msg += f"🛑 <b>Stop-Loss:</b> {sl_price:,.2f}\n"
-            msg += f"🎯 <b>Hedef 1:</b> {tp1_price:,.2f} (Kısmi kâr)\n"
-            msg += f"🏆 <b>Hedef 2:</b> {tp2_price:,.2f} (Ana kâr)\n"
+            msg += f"🎯 <b>Hedef 1:</b> {tp1_price:,.2f}\n"
+            msg += f"🏆 <b>Hedef 2:</b> {tp2_price:,.2f}\n"
             
-            if ctx["ema50"]: msg += f"📈 EMA50: {ctx['ema50']:,.2f}\n"
+            if ctx["ema50"]: msg += f"📈 15m EMA50: {ctx['ema50']:,.2f}\n"
             msg += get_earnings_note(symbol)
             
             if div_type == "BULLISH":
@@ -240,7 +229,7 @@ async def send_message(text):
     await bot_app.bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML")
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE): 
-    await update.message.reply_text("✅ Sistem çalışıyor. Sinyaller buraya düşecek.")
+    await update.message.reply_text("✅ Sistem 30m, 1H ve 4H EMA 200 filtreli olarak çalışıyor.")
 
 bot_app.add_handler(CommandHandler("start", cmd_start))
 
@@ -256,7 +245,7 @@ async def tick(force=False):
 
 async def market_open_scan():
     if not is_market_open(): return
-    await send_message("🟢 Seans açıldı, tarama başladı.")
+    await send_message("🟢 Seans açıldı, 30m/1H/4H EMA 200 filtreli tarama başladı.")
     await tick(force=True)
 
 class DummyHandler(BaseHTTPRequestHandler):
