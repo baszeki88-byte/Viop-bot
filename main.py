@@ -22,7 +22,15 @@ from apscheduler.triggers.cron import CronTrigger
 BOT_TOKEN = "9293651278:AAGdGb6Nr1gBX5-Er6YAb62ZNyUQEG4yxZg"
 CHAT_ID = 5066109900
 TIMEZONE = pytz.timezone("Europe/Istanbul")
-SYMBOLS = ["F_XU0301224"]
+SYMBOLS = ["TOASO", "TRALT", "ASTOR", "GUBRF", "TRMET",
+    "TCELL", "GARAN", "YKBNK", "TAVHL", "ENKAI",
+    "TTKOM", "SAHOL", "SASA", "AEFES", "ASELS",
+    "MGROS", "TUPRS", "AKBNK", "KCHOL", "KRDMD",
+    "ISCTR", "THYAO", "BIMAS", "EREGL", "EKGYO",
+    "PGSUS", "FROTO", "SISE", "VAKBN", "ALARK", 
+    "AKSEN", "ARCLK", "BRSAN", "CIMSA", "DOAS", 
+    "DOHOL", "ENJSA", "OYAKC", "PETKM", "SOKM", 
+    "TKFEN", "ULKER", "VESTL", "XU030"]
 
 RSI_PERIOD = 8       # RSI Periyodu
 RSI_SHORT = 75       # Short için RSI eşiği
