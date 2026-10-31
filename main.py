@@ -17,7 +17,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 # ==========================================
-# --- AYARLAR (BURADAN DEĞİŞTİREBİLİRSİN) ---
+# --- AYARLAR ---
 # ==========================================
 BOT_TOKEN = "9293651278:AAGdGb6Nr1gBX5-Er6YAb62ZNyUQEG4yxZg"
 CHAT_ID = 5066109900
@@ -39,16 +39,13 @@ RSI_PERIOD = 8
 RSI_SHORT = 75
 RSI_LONG = 25
 
-# EMA TREND FİLTRESİ
 EMA_PERIOD = 200
-CONTEXT_TF = "30m" # 30 dakikalık grafik trend yönünü belirler
 
-# Stop ve Hedef Çarpanları (ATR'ye göre)
 SL_MULTIPLIER = 1.5  
 TP1_MULTIPLIER = 2.0 
-TP2_MULTIPLIER = 4.0 
+TP2_MULTIPLIER = 3.0 
 
-# 30M, 1H ve 4H taranacak
+# 30m, 1H ve 4H artık tetikleyici olarak taranıyor
 TIME_FRAMES = ["30m", "1h", "4h"] 
 # ==========================================
 
@@ -85,7 +82,7 @@ def fetch_ohlc(symbol, interval, limit=300):
         return None
 
 def fetch_all_tfs(symbol):
-    tfs = set(TIME_FRAMES) | {CONTEXT_TF, "15m"}
+    tfs = set(TIME_FRAMES) | {"15m"}
     return {tf: fetch_ohlc(symbol, tf) for tf in tfs}
 
 def get_rsi(series, period=8):
@@ -139,10 +136,11 @@ def process_signals(symbol, dfs):
     if ctx_df is not None and len(ctx_df) > 50:
         ctx["ema50"] = float(ctx_df["close"].ewm(span=50, adjust=False).mean().iloc[-1])
 
-    # 30m EMA 200 Trend Yönü
-    trend_30m = get_ema_trend(dfs.get(CONTEXT_TF), EMA_PERIOD)
-    # 4H EMA 200 Trend Yönü
+    # 4H EMA 200 Trend Yönü (MUTLAK FİLTRE)
     trend_4h = get_ema_trend(dfs.get("4h"), EMA_PERIOD)
+
+    # Sinyalleri geçici olarak toplayacağımız sözlük
+    current_signals = {"LONG": [], "SHORT": []}
 
     for tf in TIME_FRAMES:
         df = dfs.get(tf)
@@ -165,62 +163,98 @@ def process_signals(symbol, dfs):
         
         # --- SHORT SİNYALİ ---
         if r_prev <= RSI_SHORT < r_now:
-            if trend_30m != -1: continue # 30m EMA 200 altındaysa
-            
-            msg = f"🔴 <b>{symbol}</b> — SHORT [{tf.upper()}] ✅ EMA 200 ONAYLI\n"
-            # 30m veya 1H sinyali + 4H aynı yöndeyse Süper Sinyal
-            if tf in ["30m", "1h"] and trend_4h == -1:
-                msg = f"🔥 <b>SÜPER SİNYAL ({tf.upper()} + 4H EMA UYUMU)</b> 🔥\n" + msg
-                
-            msg += f"RSI: {r_prev:.1f} → {r_now:.1f}\n"
-            
-            sl_price = close_price + (atr * SL_MULTIPLIER)
-            tp1_price = close_price - (atr * TP1_MULTIPLIER)
-            tp2_price = close_price - (atr * TP2_MULTIPLIER)
-            
-            msg += f"🛑 <b>Stop-Loss:</b> {sl_price:,.2f}\n"
-            msg += f"🎯 <b>Hedef 1:</b> {tp1_price:,.2f}\n"
-            msg += f"🏆 <b>Hedef 2:</b> {tp2_price:,.2f}\n"
-            
-            if ctx["ema50"]: msg += f"📈 15m EMA50: {ctx['ema50']:,.2f}\n"
-            msg += get_earnings_note(symbol)
-            
-            if div_type == "BEARISH":
-                msg += f"\n⚠️ <b>({tf.upper()} RSI AYI UYUMSUZLUĞU VAR!)</b>"
-                
-            msgs.append(msg); st["state"] = State.SHORT
+            if trend_4h != -1: continue 
+            current_signals["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now, "atr": atr, "price": close_price, "div": div_type})
+            st["state"] = State.SHORT
             
         # --- LONG SİNYALİ ---
         elif r_prev >= RSI_LONG > r_now:
-            if trend_30m != 1: continue # 30m EMA 200 üstündeyse
-            
-            msg = f"🟢 <b>{symbol}</b> — LONG [{tf.upper()}] ✅ EMA 200 ONAYLI\n"
-            if tf in ["30m", "1h"] and trend_4h == 1:
-                msg = f"🔥 <b>SÜPER SİNYAL ({tf.upper()} + 4H EMA UYUMU)</b> 🔥\n" + msg
-                
-            msg += f"RSI: {r_prev:.1f} → {r_now:.1f}\n"
-            
-            sl_price = close_price - (atr * SL_MULTIPLIER)
-            tp1_price = close_price + (atr * TP1_MULTIPLIER)
-            tp2_price = close_price + (atr * TP2_MULTIPLIER)
-            
-            msg += f"🛑 <b>Stop-Loss:</b> {sl_price:,.2f}\n"
-            msg += f"🎯 <b>Hedef 1:</b> {tp1_price:,.2f}\n"
-            msg += f"🏆 <b>Hedef 2:</b> {tp2_price:,.2f}\n"
-            
-            if ctx["ema50"]: msg += f"📈 15m EMA50: {ctx['ema50']:,.2f}\n"
-            msg += get_earnings_note(symbol)
-            
-            if div_type == "BULLISH":
-                msg += f"\n⚠️ <b>({tf.upper()} RSI BOĞA UYUMSUZLUĞU VAR!)</b>"
-                
-            msgs.append(msg); st["state"] = State.LONG
+            if trend_4h != 1: continue 
+            current_signals["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now, "atr": atr, "price": close_price, "div": div_type})
+            st["state"] = State.LONG
             
         # --- EXIT SİNYALLERİ ---
         elif st["state"] == State.SHORT and r_now < RSI_SHORT:
             msgs.append(f"⚪ {symbol} SHORT_EXIT [{tf.upper()}]"); st["state"] = State.IDLE
         elif st["state"] == State.LONG and r_now > RSI_LONG:
             msgs.append(f"⚪ {symbol} LONG_EXIT [{tf.upper()}]"); st["state"] = State.IDLE
+
+    # --- MESAJLARI OLUŞTURMA KISMI ---
+    
+    for direction in ["SHORT", "LONG"]:
+        sigs = current_signals[direction]
+        if not sigs: continue
+        
+        # Çakışan zaman dilimlerini sırala (30m, 1h, 4h)
+        tfs = [s["tf"] for s in sigs]
+        tfs_sorted = sorted(tfs, key=lambda x: ["30m", "1h", "4h"].index(x))
+        tf_str = " + ".join([t.upper() for t in tfs_sorted])
+        
+        # En son (en büyük zaman dilimindeki) sinyalin verilerini baz al
+        last_sig = sigs[-1]
+        
+        if direction == "SHORT":
+            # Başlık Belirleme
+            if len(tfs) == 3:
+                msg = f"🌟👑 <b>EFSANE SİNYAL: {tf_str} TAM UYUM (MÜKEMMEL FIRSAT!)</b> 👑🌟\n"
+            elif len(tfs) == 2:
+                msg = f"🚀🔥 <b>SÜPER SİNYAL: {tf_str} UYUMU (PARA KAZANMA ZAMANI!)</b> 🔥🚀\n"
+            else:
+                if tfs[0] == "30m":
+                    msg = f"⚠️ <b>SADECE 30M SİNYALİDİR, LÜTFEN GRAFİK İNCELEMEDEN İŞLEM ALMAYIN!</b>\n\n"
+                else:
+                    msg = ""
+                    
+            msg += f"🔴 <b>{symbol}</b> — SHORT [{tf_str}] ✅ 4H EMA 200 ONAYLI\n"
+            msg += f"RSI: {last_sig['prev']:.1f} → {last_sig['now']:.1f}\n"
+            
+            sl_price = last_sig["price"] + (last_sig["atr"] * SL_MULTIPLIER)
+            tp1_price = last_sig["price"] - (last_sig["atr"] * TP1_MULTIPLIER)
+            tp2_price = last_sig["price"] - (last_sig["atr"] * TP2_MULTIPLIER)
+            
+            msg += f"🛑 <b>Stop-Loss:</b> {sl_price:,.2f}\n"
+            msg += f"🎯 <b>Hedef 1:</b> {tp1_price:,.2f}\n"
+            msg += f"🏆 <b>Hedef 2:</b> {tp2_price:,.2f}\n"
+            
+            if ctx["ema50"]: msg += f"📈 15m EMA50: {ctx['ema50']:,.2f}\n"
+            msg += get_earnings_note(symbol)
+            
+            if any(s["div"] == "BEARISH" for s in sigs):
+                msg += f"\n⚠️ <b>(RSI AYI UYUMSUZLUĞU VAR!)</b>"
+                
+            msgs.append(msg)
+
+        elif direction == "LONG":
+            # Başlık Belirleme
+            if len(tfs) == 3:
+                msg = f"🌟👑 <b>EFSANE SİNYAL: {tf_str} TAM UYUM (MÜKEMMEL FIRSAT!)</b> 👑🌟\n"
+            elif len(tfs) == 2:
+                msg = f"🚀🔥 <b>SÜPER SİNYAL: {tf_str} UYUMU (PARA KAZANMA ZAMANI!)</b> 🔥🚀\n"
+            else:
+                if tfs[0] == "30m":
+                    msg = f"⚠️ <b>SADECE 30M SİNYALİDİR, LÜTFEN GRAFİK İNCELEMEDEN İŞLEM ALMAYIN!</b>\n\n"
+                else:
+                    msg = ""
+                    
+            msg += f"🟢 <b>{symbol}</b> — LONG [{tf_str}] ✅ 4H EMA 200 ONAYLI\n"
+            msg += f"RSI: {last_sig['prev']:.1f} → {last_sig['now']:.1f}\n"
+            
+            sl_price = last_sig["price"] - (last_sig["atr"] * SL_MULTIPLIER)
+            tp1_price = last_sig["price"] + (last_sig["atr"] * TP1_MULTIPLIER)
+            tp2_price = last_sig["price"] + (last_sig["atr"] * TP2_MULTIPLIER)
+            
+            msg += f"🛑 <b>Stop-Loss:</b> {sl_price:,.2f}\n"
+            msg += f"🎯 <b>Hedef 1:</b> {tp1_price:,.2f}\n"
+            msg += f"🏆 <b>Hedef 2:</b> {tp2_price:,.2f}\n"
+            
+            if ctx["ema50"]: msg += f"📈 15m EMA50: {ctx['ema50']:,.2f}\n"
+            msg += get_earnings_note(symbol)
+            
+            if any(s["div"] == "BULLISH" for s in sigs):
+                msg += f"\n⚠️ <b>(RSI BOĞA UYUMSUZLUĞU VAR!)</b>"
+                
+            msgs.append(msg)
+
     return msgs
 
 bot_app = Application.builder().token(BOT_TOKEN).build()
@@ -229,7 +263,7 @@ async def send_message(text):
     await bot_app.bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML")
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE): 
-    await update.message.reply_text("✅ Sistem 30m, 1H ve 4H EMA 200 filtreli olarak çalışıyor.")
+    await update.message.reply_text("✅ Sistem 4H EMA 200 ve Akıllı Çoklu Zaman Dilimi uyumluluk filtresiyle çalışıyor.")
 
 bot_app.add_handler(CommandHandler("start", cmd_start))
 
@@ -245,7 +279,7 @@ async def tick(force=False):
 
 async def market_open_scan():
     if not is_market_open(): return
-    await send_message("🟢 Seans açıldı, 30m/1H/4H EMA 200 filtreli tarama başladı.")
+    await send_message("🟢 Seans açıldı, 4H EMA 200 uyumlu tarama başladı.")
     await tick(force=True)
 
 class DummyHandler(BaseHTTPRequestHandler):
