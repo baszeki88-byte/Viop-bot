@@ -22,7 +22,10 @@ from apscheduler.triggers.cron import CronTrigger
 BOT_TOKEN = "9293651278:AAGdGb6Nr1gBX5-Er6YAb62ZNyUQEG4yxZg"
 CHAT_ID = 5066109900
 TIMEZONE = pytz.timezone("Europe/Istanbul")
-SYMBOLS = ["TOASO", "TRALT", "ASTOR", "GUBRF", "TRMET",
+
+# 44 Hisselik Güncel Liste
+SYMBOLS = [
+    "TOASO", "TRALT", "ASTOR", "GUBRF", "TRMET",
     "TCELL", "GARAN", "YKBNK", "TAVHL", "ENKAI",
     "TTKOM", "SAHOL", "SASA", "AEFES", "ASELS",
     "MGROS", "TUPRS", "AKBNK", "KCHOL", "KRDMD",
@@ -30,19 +33,19 @@ SYMBOLS = ["TOASO", "TRALT", "ASTOR", "GUBRF", "TRMET",
     "PGSUS", "FROTO", "SISE", "VAKBN", "ALARK", 
     "AKSEN", "ARCLK", "BRSAN", "CIMSA", "DOAS", 
     "DOHOL", "ENJSA", "OYAKC", "PETKM", "SOKM", 
-    "TKFEN", "ULKER", "VESTL", "XU030"]
+    "TKFEN", "ULKER", "VESTL", "XU030"
+]
 
-RSI_PERIOD = 8       # RSI Periyodu
-RSI_SHORT = 75       # Short için RSI eşiği
-RSI_LONG = 25        # Long için RSI eşiği
+RSI_PERIOD = 8
+RSI_SHORT = 75
+RSI_LONG = 25
 
-ST_PERIOD = 10       # SuperTrend Periyodu
-ST_MULTIPLIER = 3.0  # SuperTrend Çarpanı
+ST_PERIOD = 10
+ST_MULTIPLIER = 3.0
 
-# Stop ve Hedef Çarpanları (ATR'ye göre)
-SL_MULTIPLIER = 1.5  # Stop-Loss mesafesi
-TP1_MULTIPLIER = 2.0 # 1. Hedef mesafesi (Kısmi kâr al)
-TP2_MULTIPLIER = 4.0 # 2. Hedef mesafesi (Ana kâr al)
+SL_MULTIPLIER = 1.5  
+TP1_MULTIPLIER = 2.0 
+TP2_MULTIPLIER = 4.0 
 
 TIME_FRAMES = ["1h", "2h", "4h"]
 # ==========================================
@@ -70,8 +73,11 @@ def get_earnings_note(symbol):
     return ""
 
 def fetch_ohlc(symbol, interval, limit=300):
-    df = bp.Ticker(symbol).history(period=f"{limit + 2} bar", interval=interval)
-    return df.iloc[:-1]
+    try:
+        df = bp.Ticker(symbol).history(period=f"{limit + 2} bar", interval=interval)
+        return df.iloc[:-1]
+    except:
+        return None
 
 def fetch_all_tfs(symbol):
     return {tf: fetch_ohlc(symbol, tf) for tf in set(TIME_FRAMES) | {"15m"}}
@@ -84,7 +90,7 @@ def get_rsi(series, period=8):
     return 100 - (100 / (1 + rs))
 
 def get_supertrend(df, period=10, multiplier=3.0):
-    if len(df) < period + 1: return None
+    if df is None or len(df) < period + 1: return None
     hl2 = (df['high'] + df['low']) / 2
     tr1 = df['high'] - df['low']
     tr2 = (df['high'] - df['close'].shift()).abs()
@@ -121,6 +127,28 @@ def get_supertrend(df, period=10, multiplier=3.0):
         "atr": float(atr.iloc[-1])
     }
 
+# --- RSI UYUMSUZLUK (DIVERGENCE) KONTROLÜ ---
+def check_divergence(df, rsi_series):
+    if df is None or len(df) < 20: return None
+    recent_df = df.tail(20).copy()
+    recent_rsi = rsi_series.tail(20)
+
+    high1_idx = recent_df['high'].iloc[:10].idxmax()
+    high2_idx = recent_df['high'].iloc[10:].idxmax()
+    
+    if recent_df.loc[high2_idx, 'high'] > recent_df.loc[high1_idx, 'high']:
+        if recent_rsi.loc[high2_idx] < recent_rsi.loc[high1_idx]:
+            return "BEARISH" 
+
+    low1_idx = recent_df['low'].iloc[:10].idxmin()
+    low2_idx = recent_df['low'].iloc[10:].idxmin()
+
+    if recent_df.loc[low2_idx, 'low'] < recent_df.loc[low1_idx, 'low']:
+        if recent_rsi.loc[low2_idx] > recent_rsi.loc[low1_idx]:
+            return "BULLISH" 
+
+    return None
+
 class State(Enum): IDLE="IDLE"; SHORT="SHORT"; LONG="LONG"
 states = {}
 
@@ -139,6 +167,7 @@ def process_signals(symbol, dfs):
         
         r_now, r_prev = float(rsi.iloc[-1]), float(rsi.iloc[-2])
         sti = get_supertrend(df, period=ST_PERIOD, multiplier=ST_MULTIPLIER)
+        div_type = check_divergence(df, rsi)
         
         if not sti: continue
         
@@ -159,7 +188,6 @@ def process_signals(symbol, dfs):
             msg += f"RSI: {r_prev:.1f} → {r_now:.1f}\n"
             msg += f"🧭 ST Çizgi: {sti['line']:,.2f}\n"
             
-            # Stop ve Çift Hedef Hesaplaması
             sl_price = close_price + (atr * SL_MULTIPLIER)
             tp1_price = close_price - (atr * TP1_MULTIPLIER)
             tp2_price = close_price - (atr * TP2_MULTIPLIER)
@@ -170,6 +198,10 @@ def process_signals(symbol, dfs):
             
             if ctx["ema50"]: msg += f"📈 EMA50: {ctx['ema50']:,.2f}\n"
             msg += get_earnings_note(symbol)
+            
+            if div_type == "BEARISH":
+                msg += f"\n⚠️ <b>({tf.upper()} RSI AYI UYUMSUZLUĞU VAR!)</b>"
+                
             msgs.append(msg); st["state"] = State.SHORT
             
         # --- LONG SİNYALİ ---
@@ -179,7 +211,6 @@ def process_signals(symbol, dfs):
             msg += f"RSI: {r_prev:.1f} → {r_now:.1f}\n"
             msg += f"🧭 ST Çizgi: {sti['line']:,.2f}\n"
             
-            # Stop ve Çift Hedef Hesaplaması
             sl_price = close_price - (atr * SL_MULTIPLIER)
             tp1_price = close_price + (atr * TP1_MULTIPLIER)
             tp2_price = close_price + (atr * TP2_MULTIPLIER)
@@ -190,6 +221,10 @@ def process_signals(symbol, dfs):
             
             if ctx["ema50"]: msg += f"📈 EMA50: {ctx['ema50']:,.2f}\n"
             msg += get_earnings_note(symbol)
+            
+            if div_type == "BULLISH":
+                msg += f"\n⚠️ <b>({tf.upper()} RSI BOĞA UYUMSUZLUĞU VAR!)</b>"
+                
             msgs.append(msg); st["state"] = State.LONG
             
         # --- EXIT SİNYALLERİ ---
@@ -201,16 +236,23 @@ def process_signals(symbol, dfs):
 
 bot_app = Application.builder().token(BOT_TOKEN).build()
 
-async def send_message(text): await bot_app.bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML")
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("✅ Sistem çalışıyor.")
+async def send_message(text): 
+    await bot_app.bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML")
+
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE): 
+    await update.message.reply_text("✅ Sistem çalışıyor. Sinyaller buraya düşecek.")
+
 bot_app.add_handler(CommandHandler("start", cmd_start))
 
 async def tick(force=False):
     if not force and not is_market_open(): return
     for sym in SYMBOLS:
         try:
-            for msg in process_signals(sym, fetch_all_tfs(sym)): await send_message(msg)
-        except Exception as e: print(f"Hata: {e}")
+            dfs = fetch_all_tfs(sym)
+            for msg in process_signals(sym, dfs): 
+                await send_message(msg)
+        except Exception as e: 
+            print(f"Hata ({sym}): {e}")
 
 async def market_open_scan():
     if not is_market_open(): return
