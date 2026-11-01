@@ -17,7 +17,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 # ==========================================
-# --- AYARLAR (FİNAL SÜRÜM) ---
+# --- AYARLAR (3'LÜ ÇOK KATMANLI SİSTEM) ---
 # ==========================================
 BOT_TOKEN = "9293651278:AAGdGb6Nr1gBX5-Er6YAb62ZNyUQEG4yxZg"
 CHAT_ID = 5066109900
@@ -139,12 +139,17 @@ states = {}
 def process_signals(symbol, dfs):
     msgs = []
     ctx_df = dfs.get("15m")
-    ctx = {"ema50": None}
-    if ctx_df is not None and len(ctx_df) > 50:
+    ctx = {"ema50": None, "ema200_15m": 0}
+    if ctx_df is not None and len(ctx_df) > 200:
         ctx["ema50"] = float(ctx_df["close"].ewm(span=50, adjust=False).mean().iloc[-1])
+        ctx["ema200_15m"] = get_ema_trend(ctx_df, EMA_PERIOD)
 
     trend_4h = get_ema_trend(dfs.get("4h"), EMA_PERIOD)
-    current_signals = {"LONG": [], "SHORT": []}
+    trend_15m = ctx["ema200_15m"]
+    
+    sniper_signals = {"LONG": [], "SHORT": []}
+    standard_signals = {"LONG": [], "SHORT": []}
+    rsi_alerts = {"LONG": [], "SHORT": []}
 
     for tf in TIME_FRAMES:
         df = dfs.get(tf)
@@ -152,7 +157,6 @@ def process_signals(symbol, dfs):
         rsi = get_rsi(df["close"], period=RSI_PERIOD)
         if rsi is None or len(rsi) < 2: continue
         
-        # MACD Hesaplaması
         macd_line, macd_sig_line = get_macd(df["close"])
         macd_now, macd_sig_now = float(macd_line.iloc[-1]), float(macd_sig_line.iloc[-1])
         
@@ -171,20 +175,36 @@ def process_signals(symbol, dfs):
         
         # --- SHORT SİNYALİ ---
         if r_prev <= RSI_SHORT < r_now:
-            if trend_4h != -1: continue 
-            # MACD YÖN ONAYI: SHORT için MACD çizgisi sinyalin ALTINDA olmalı
-            if macd_now >= macd_sig_now: continue
+            ema_4h_ok = (trend_4h == -1)
+            macd_ok = (macd_now < macd_sig_now)
+            ema_15m_ok = (trend_15m == -1)
             
-            current_signals["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now, "atr": atr, "price": close_price, "div": div_type})
+            if ema_4h_ok and macd_ok:
+                sig_data = {"tf": tf, "prev": r_prev, "now": r_now, "atr": atr, "price": close_price, "div": div_type}
+                if ema_15m_ok:
+                    sniper_signals["SHORT"].append(sig_data)
+                else:
+                    standard_signals["SHORT"].append(sig_data)
+            else:
+                rsi_alerts["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
+            
             st["state"] = State.SHORT
             
         # --- LONG SİNYALİ ---
         elif r_prev >= RSI_LONG > r_now:
-            if trend_4h != 1: continue 
-            # MACD YÖN ONAYI: LONG için MACD çizgisi sinyalin ÜSTÜNDE olmalı
-            if macd_now <= macd_sig_now: continue
+            ema_4h_ok = (trend_4h == 1)
+            macd_ok = (macd_now > macd_sig_now)
+            ema_15m_ok = (trend_15m == 1)
             
-            current_signals["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now, "atr": atr, "price": close_price, "div": div_type})
+            if ema_4h_ok and macd_ok:
+                sig_data = {"tf": tf, "prev": r_prev, "now": r_now, "atr": atr, "price": close_price, "div": div_type}
+                if ema_15m_ok:
+                    sniper_signals["LONG"].append(sig_data)
+                else:
+                    standard_signals["LONG"].append(sig_data)
+            else:
+                rsi_alerts["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
+                
             st["state"] = State.LONG
             
         # --- EXIT SİNYALLERİ ---
@@ -193,70 +213,117 @@ def process_signals(symbol, dfs):
         elif st["state"] == State.LONG and r_now > RSI_LONG:
             msgs.append(f"⚪ {symbol} LONG_EXIT [{tf.upper()}]"); st["state"] = State.IDLE
 
-    # --- MESAJLARI OLUŞTURMA KISMI ---
+    # --- 1. KESKİN NİŞANCI SİNYALLERİ ---
     for direction in ["SHORT", "LONG"]:
-        sigs = current_signals[direction]
+        sigs = sniper_signals[direction]
         if not sigs: continue
         
         tfs = [s["tf"] for s in sigs]
         tfs_sorted = sorted(tfs, key=lambda x: ["1h", "4h"].index(x))
         tf_str = " + ".join([t.upper() for t in tfs_sorted])
-        
         last_sig = sigs[-1]
         
-        if direction == "SHORT":
-            if len(tfs) >= 2:
-                msg = f"🌟👑 <b>EFSANE SİNYAL: {tf_str} TAM UYUM (MÜKEMMEL FIRSAT!)</b> 👑🌟\n"
-            else:
-                msg = ""
-                    
-            msg += f"🔴 <b>{symbol}</b> — SHORT [{tf_str}] ✅ MACD & EMA 200 ONAYLI\n"
-            msg += f"RSI: {last_sig['prev']:.1f} → {last_sig['now']:.1f}\n"
+        header = f"🔥🎯 <b>KESKİN NİŞANCI SİNYALİ (%66 Başarı) 🎯🔥</b>\n"
+        if len(tfs) >= 2:
+            header += f"🌟👑 <b>EFSANE UYUM: {tf_str} TAM UYUM</b> 👑🌟\n"
             
+        msg = header
+        if direction == "SHORT":
+            msg += f"🔴 <b>{symbol}</b> — SHORT [{tf_str}] ✅ MACD & 4H EMA 200 ONAYLI\n"
+        else:
+            msg += f"🟢 <b>{symbol}</b> — LONG [{tf_str}] ✅ MACD & 4H EMA 200 ONAYLI\n"
+            
+        msg += f"RSI: {last_sig['prev']:.1f} → {last_sig['now']:.1f}\n"
+        
+        if direction == "SHORT":
             sl_price = last_sig["price"] + (last_sig["atr"] * SL_MULTIPLIER)
             tp1_price = last_sig["price"] - (last_sig["atr"] * TP1_MULTIPLIER)
             tp2_price = last_sig["price"] - (last_sig["atr"] * TP2_MULTIPLIER)
             tp3_price = last_sig["price"] - (last_sig["atr"] * TP3_MULTIPLIER)
-            
-            msg += f"🛑 <b>Stop-Loss:</b> {sl_price:,.2f}\n"
-            msg += f"🎯 <b>Hedef 1:</b> {tp1_price:,.2f}\n"
-            msg += f"🏆 <b>Hedef 2:</b> {tp2_price:,.2f}\n"
-            msg += f"🚀 <b>Hedef 3:</b> {tp3_price:,.2f}\n"
-            
-            if ctx["ema50"]: msg += f"📈 15m EMA50: {ctx['ema50']:,.2f}\n"
-            msg += get_earnings_note(symbol)
-            
-            if any(s["div"] == "BEARISH" for s in sigs):
-                msg += f"\n⚠️ <b>(RSI AYI UYUMSUZLUĞU VAR!)</b>"
-                
-            msgs.append(msg)
-
-        elif direction == "LONG":
-            if len(tfs) >= 2:
-                msg = f"🌟👑 <b>EFSANE SİNYAL: {tf_str} TAM UYUM (MÜKEMMEL FIRSAT!)</b> 👑🌟\n"
-            else:
-                msg = ""
-                    
-            msg += f"🟢 <b>{symbol}</b> — LONG [{tf_str}] ✅ MACD & EMA 200 ONAYLI\n"
-            msg += f"RSI: {last_sig['prev']:.1f} → {last_sig['now']:.1f}\n"
-            
+        else:
             sl_price = last_sig["price"] - (last_sig["atr"] * SL_MULTIPLIER)
             tp1_price = last_sig["price"] + (last_sig["atr"] * TP1_MULTIPLIER)
             tp2_price = last_sig["price"] + (last_sig["atr"] * TP2_MULTIPLIER)
             tp3_price = last_sig["price"] + (last_sig["atr"] * TP3_MULTIPLIER)
             
-            msg += f"🛑 <b>Stop-Loss:</b> {sl_price:,.2f}\n"
-            msg += f"🎯 <b>Hedef 1:</b> {tp1_price:,.2f}\n"
-            msg += f"🏆 <b>Hedef 2:</b> {tp2_price:,.2f}\n"
-            msg += f"🚀 <b>Hedef 3:</b> {tp3_price:,.2f}\n"
+        msg += f"🛑 <b>Stop-Loss:</b> {sl_price:,.2f}\n"
+        msg += f"🎯 <b>Hedef 1:</b> {tp1_price:,.2f}\n"
+        msg += f"🏆 <b>Hedef 2:</b> {tp2_price:,.2f}\n"
+        msg += f"🚀 <b>Hedef 3:</b> {tp3_price:,.2f}\n"
+        
+        if ctx["ema50"]: msg += f"📈 15m EMA50: {ctx['ema50']:,.2f}\n"
+        msg += get_earnings_note(symbol)
+        
+        if any(s["div"] == ("BEARISH" if direction == "SHORT" else "BULLISH") for s in sigs):
+            msg += f"\n⚠️ <b>(RSI UYUMSUZLUĞU VAR!)</b>"
             
-            if ctx["ema50"]: msg += f"📈 15m EMA50: {ctx['ema50']:,.2f}\n"
-            msg += get_earnings_note(symbol)
+        msgs.append(msg)
+
+    # --- 2. STANDART SİNYALLERİ ---
+    for direction in ["SHORT", "LONG"]:
+        sigs = standard_signals[direction]
+        if not sigs: continue
+        
+        tfs = [s["tf"] for s in sigs]
+        tfs_sorted = sorted(tfs, key=lambda x: ["1h", "4h"].index(x))
+        tf_str = " + ".join([t.upper() for t in tfs_sorted])
+        last_sig = sigs[-1]
+        
+        header = f"⚡ <b>STANDART SİNYAL (%55 Başarı) ⚡</b>\n"
+        if len(tfs) >= 2:
+            header += f"🌟 <b>UYUM: {tf_str} TAM UYUM</b> 🌟\n"
             
-            if any(s["div"] == "BULLISH" for s in sigs):
-                msg += f"\n⚠️ <b>(RSI BOĞA UYUMSUZLUĞU VAR!)</b>"
-                
-            msgs.append(msg)
+        msg = header
+        if direction == "SHORT":
+            msg += f"🔴 <b>{symbol}</b> — SHORT [{tf_str}] ✅ MACD & 4H EMA 200 ONAYLI\n"
+        else:
+            msg += f"🟢 <b>{symbol}</b> — LONG [{tf_str}] ✅ MACD & 4H EMA 200 ONAYLI\n"
+            
+        msg += f"RSI: {last_sig['prev']:.1f} → {last_sig['now']:.1f}\n"
+        
+        if direction == "SHORT":
+            sl_price = last_sig["price"] + (last_sig["atr"] * SL_MULTIPLIER)
+            tp1_price = last_sig["price"] - (last_sig["atr"] * TP1_MULTIPLIER)
+            tp2_price = last_sig["price"] - (last_sig["atr"] * TP2_MULTIPLIER)
+            tp3_price = last_sig["price"] - (last_sig["atr"] * TP3_MULTIPLIER)
+        else:
+            sl_price = last_sig["price"] - (last_sig["atr"] * SL_MULTIPLIER)
+            tp1_price = last_sig["price"] + (last_sig["atr"] * TP1_MULTIPLIER)
+            tp2_price = last_sig["price"] + (last_sig["atr"] * TP2_MULTIPLIER)
+            tp3_price = last_sig["price"] + (last_sig["atr"] * TP3_MULTIPLIER)
+            
+        msg += f"🛑 <b>Stop-Loss:</b> {sl_price:,.2f}\n"
+        msg += f"🎯 <b>Hedef 1:</b> {tp1_price:,.2f}\n"
+        msg += f"🏆 <b>Hedef 2:</b> {tp2_price:,.2f}\n"
+        msg += f"🚀 <b>Hedef 3:</b> {tp3_price:,.2f}\n"
+        
+        if ctx["ema50"]: msg += f"📈 15m EMA50: {ctx['ema50']:,.2f}\n"
+        msg += get_earnings_note(symbol)
+        
+        if any(s["div"] == ("BEARISH" if direction == "SHORT" else "BULLISH") for s in sigs):
+            msg += f"\n⚠️ <b>(RSI UYUMSUZLUĞU VAR!)</b>"
+            
+        msgs.append(msg)
+
+    # --- 3. SADECE RSI UYARILARI ---
+    for direction in ["SHORT", "LONG"]:
+        sigs = rsi_alerts[direction]
+        if not sigs: continue
+        
+        tfs = [s["tf"] for s in sigs]
+        tfs_sorted = sorted(tfs, key=lambda x: ["1h", "4h"].index(x))
+        tf_str = " + ".join([t.upper() for t in tfs_sorted])
+        last_sig = sigs[-1]
+        
+        msg = f"⚠️ <b>{symbol}</b> — SADECE RSI UYARISI [{tf_str}]\n"
+        if direction == "SHORT":
+            msg += f"RSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (75 üstü)\n"
+        else:
+            msg += f"RSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (25 altı)\n"
+            
+        msg += f"👀 <b>Grafiği kontrol edin. İşlem alacaksanız kendiniz değerlendirin.</b>\n"
+        msg += f"(Not: Bu sinyal MACD veya EMA 200 onayı içermez, Stop/TP hesaplanmamıştır.)"
+        msgs.append(msg)
 
     return msgs
 
@@ -266,7 +333,7 @@ async def send_message(text):
     await bot_app.bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML")
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE): 
-    await update.message.reply_text("✅ Sistem MACD ve EMA 200 onaylı olarak çalışıyor.")
+    await update.message.reply_text("✅ Sistem 3 Katmanlı (Sniper, Standart, RSI Alarm) çalışıyor.")
 
 bot_app.add_handler(CommandHandler("start", cmd_start))
 
@@ -282,7 +349,7 @@ async def tick(force=False):
 
 async def market_open_scan():
     if not is_market_open(): return
-    await send_message("🟢 Seans açıldı, RSI + MACD + EMA 200 filtreli tarama başladı.")
+    await send_message("🟢 Seans açıldı, 3 Katmanlı tarama başladı.")
     await tick(force=True)
 
 class DummyHandler(BaseHTTPRequestHandler):
