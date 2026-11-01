@@ -54,7 +54,8 @@ def is_market_open(now=None):
     if now.weekday() > 4: return False
     tr_holidays = holidays.Turkey()
     if now.date() in tr_holidays: return False
-    return time(9, 30) <= now.time() <= time(18, 0)
+    # GÜNCELLEME BURADA: Spot piyasa açılış saati 09:55 olarak değiştirildi.
+    return time(9, 55) <= now.time() <= time(18, 0)
 
 def get_earnings_note(symbol):
     try:
@@ -333,7 +334,7 @@ async def send_message(text):
     await bot_app.bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML")
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE): 
-    await update.message.reply_text("✅ Sistem 3 Katmanlı (Sniper, Standart, RSI Alarm) çalışıyor.")
+    await update.message.reply_text("✅ Sistem 3 Katmanlı (Sniper, Standart, RSI Alarm) ve Spot Piyasa (09:55) saatlerine göre çalışıyor.")
 
 bot_app.add_handler(CommandHandler("start", cmd_start))
 
@@ -362,8 +363,11 @@ async def main():
     threading.Thread(target=run_dummy_server, daemon=True).start()
     await bot_app.initialize(); await bot_app.start(); await bot_app.updater.start_polling()
     sched = AsyncIOScheduler(timezone=TIMEZONE)
-    sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=30, timezone=TIMEZONE))
-    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="9-17", minute="0,30", timezone=TIMEZONE))
+    
+    # GÜNCELLEME BURADA: Açılış taraması 09:55'e alındı. Normal taramalar 10:00'da başlıyor.
+    sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
+    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="0,30", timezone=TIMEZONE))
+    
     sched.start()
     print("✅ Bot çalışıyor.")
     while True: await asyncio.sleep(3600)
