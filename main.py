@@ -41,12 +41,14 @@ EMA_PERIOD = 200
 SL_MULTIPLIER = 1.5  
 TIME_FRAMES = ["1h", "4h"] 
 
-# --- KISA VADE AYARLARI (SAF SİSTEM) ---
+# --- KISA VADE AYARLARI (GÜNCELLENDİ: EMA 13-34) ---
 KV_RSI_PERIOD = 14
 KV_RSI_LONG = 60
 KV_RSI_SHORT = 40
 KV_TP1_PCT = 5
 KV_SL_MULT = 3.0
+KV_EMA_FAST = 13
+KV_EMA_SLOW = 34 # 21'den 34'e çıkarıldı
 
 # Aktif işlemleri tutacağımız sözlük
 active_trades = {}
@@ -221,20 +223,20 @@ def process_signals(symbol, dfs):
         msg += f"💡 <b>Strateji:</b> %3 kârda yarısını kapat, kalanı 30m EMA50 ile takip et."
         msgs.append({"text": msg, "df": last_sig["df"], "symbol": symbol, "tf": last_sig["tf"], "direction": direction, "price": last_sig["price"], "sl": sl_price, "type": "standard"})
 
-    # --- 2. KATMAN: 30M KISA VADE (SAF SİSTEM) ---
+    # --- 2. KATMAN: 30M KISA VADE (EMA 13-34 SAF SİSTEM) ---
     df_30m = dfs.get("30m")
-    if df_30m is not None and len(df_30m) > 25:
+    if df_30m is not None and len(df_30m) > KV_EMA_SLOW + 10:
         df_30m = df_30m.copy()
-        df_30m['ema13'] = df_30m['close'].ewm(span=13, adjust=False).mean()
-        df_30m['ema21'] = df_30m['close'].ewm(span=21, adjust=False).mean()
+        df_30m['ema_fast'] = df_30m['close'].ewm(span=KV_EMA_FAST, adjust=False).mean()
+        df_30m['ema_slow'] = df_30m['close'].ewm(span=KV_EMA_SLOW, adjust=False).mean()
         df_30m['rsi14'] = get_rsi(df_30m['close'], KV_RSI_PERIOD)
         df_30m = calculate_psar(df_30m)
         
         trend_4h_50 = get_ema_trend(dfs.get("4h"), 50)
         
         i = len(df_30m) - 1
-        cross_up = (df_30m['ema13'].iloc[i-1] <= df_30m['ema21'].iloc[i-1]) and (df_30m['ema13'].iloc[i] > df_30m['ema21'].iloc[i])
-        cross_down = (df_30m['ema13'].iloc[i-1] >= df_30m['ema21'].iloc[i-1]) and (df_30m['ema13'].iloc[i] < df_30m['ema21'].iloc[i])
+        cross_up = (df_30m['ema_fast'].iloc[i-1] <= df_30m['ema_slow'].iloc[i-1]) and (df_30m['ema_fast'].iloc[i] > df_30m['ema_slow'].iloc[i])
+        cross_down = (df_30m['ema_fast'].iloc[i-1] >= df_30m['ema_slow'].iloc[i-1]) and (df_30m['ema_fast'].iloc[i] < df_30m['ema_slow'].iloc[i])
         
         atr = calculate_atr(df_30m, 10)
         close_price = float(df_30m['close'].iloc[i])
@@ -297,13 +299,12 @@ async def check_active_trades():
         
         t_type = trade["type"]
         
-        # --- KISA VADE (SAF SİSTEM) TAKİBİ ---
+        # --- KISA VADE TAKİBİ ---
         if trade.get("signal_type") == "kisa_vade":
             tp_hit = trade.get("tp_hit", False)
             init_sl = trade["sl"]
             entry_price = trade["entry"]
             
-            # 1. Stop Kontrolü (Her durumda geçerli, ilk girişe göre 3 ATR)
             if (t_type == "LONG" and current_low <= init_sl) or (t_type == "SHORT" and current_high >= init_sl):
                 msg = f"🛑 <b>STOP OLDU - {sym}</b>\n"
                 msg += f"İlk Stop Seviyesine ({init_sl:,.2f}) değdi. Pozisyonu kapatın."
@@ -311,7 +312,6 @@ async def check_active_trades():
                 del active_trades[trade_key]
                 continue
 
-            # 2. TP Kontrolü
             target_tp = trade["tp"]
             if not tp_hit:
                 if (t_type == "LONG" and current_high >= target_tp) or (t_type == "SHORT" and current_low <= target_tp):
@@ -324,7 +324,6 @@ async def check_active_trades():
                     await bot_app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="HTML", reply_to_message_id=trade["msg_id"])
                     continue
 
-            # 3. EMA 50 Çıkış Kontrolü (TP vurulduysa)
             if tp_hit:
                 if (t_type == "LONG" and current_price <= current_ema50) or (t_type == "SHORT" and current_price >= current_ema50):
                     msg = f"⚪ <b>EMA 50 ÇIKIŞI - {sym}</b>\n"
@@ -332,9 +331,8 @@ async def check_active_trades():
                     await bot_app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="HTML", reply_to_message_id=trade["msg_id"])
                     del active_trades[trade_key]
         
-        # --- STANDART/SNIPER TAKİBİ (ESKİ SİSTEM) ---
+        # --- STANDART/SNIPER TAKİBİ ---
         else:
-            # TP1 (%3) ve BE Mantığı
             if not trade.get("hit_3pct", False):
                 if (t_type == "LONG" and current_high >= trade["entry"] * 1.03) or (t_type == "SHORT" and current_low <= trade["entry"] * 0.97):
                     trade["hit_3pct"] = True
@@ -345,7 +343,6 @@ async def check_active_trades():
                     msg = f"⚪ <b>EMA 50 ÇIKIŞI - {sym}</b>\n👉 <b>Kalan pozisyonu kapatın.</b>"
                     await bot_app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="HTML", reply_to_message_id=trade["msg_id"])
                     del active_trades[trade_key]
-
 
 bot_app = Application.builder().token(BOT_TOKEN).build()
 
@@ -380,7 +377,7 @@ async def send_signal_message(msg_data):
         active_trades[trade_key] = trade_info
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE): 
-    await update.message.reply_text("✅ Sistem 4 Katmanlı (Sniper, Standart, RSI, Kısa Vade Saf) çalışıyor.")
+    await update.message.reply_text("✅ Sistem 4 Katmanlı (Sniper, Standart, RSI, Kısa Vade EMA 13-34) çalışıyor.")
 
 bot_app.add_handler(CommandHandler("start", cmd_start))
 
