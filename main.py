@@ -23,7 +23,10 @@ from apscheduler.triggers.cron import CronTrigger
 # --- AYARLAR ---
 # ==========================================
 BOT_TOKEN = "9293651278:AAGdGb6Nr1gBX5-Er6YAb62ZNyUQEG4yxZg"
-CHAT_ID = 5066109900
+
+# ÇOKLU KULLANICI: Senin ID'n ve Kardeşinin ID'si
+CHAT_IDS = [5066109900, 8776376951] 
+
 TIMEZONE = pytz.timezone("Europe/Istanbul")
 
 SYMBOLS = [
@@ -41,14 +44,14 @@ EMA_PERIOD = 200
 SL_MULTIPLIER = 1.5  
 TIME_FRAMES = ["1h", "4h"] 
 
-# --- KISA VADE AYARLARI (GÜNCELLENDİ: EMA 13-34) ---
+# --- KISA VADE AYARLARI (EMA 13-34 SAF SİSTEM) ---
 KV_RSI_PERIOD = 14
 KV_RSI_LONG = 60
 KV_RSI_SHORT = 40
 KV_TP1_PCT = 5
 KV_SL_MULT = 3.0
 KV_EMA_FAST = 13
-KV_EMA_SLOW = 34 # 21'den 34'e çıkarıldı
+KV_EMA_SLOW = 34
 
 # Aktif işlemleri tutacağımız sözlük
 active_trades = {}
@@ -281,7 +284,7 @@ def process_signals(symbol, dfs):
 
     return msgs
 
-# --- İŞLEM TAKİP SİSTEMİ (SAF SİSTEM) ---
+# --- İŞLEM TAKİP SİSTEMİ (ÇOKLU KULLANICI DESTEKLİ) ---
 async def check_active_trades():
     global active_trades
     if not active_trades: return
@@ -306,9 +309,11 @@ async def check_active_trades():
             entry_price = trade["entry"]
             
             if (t_type == "LONG" and current_low <= init_sl) or (t_type == "SHORT" and current_high >= init_sl):
-                msg = f"🛑 <b>STOP OLDU - {sym}</b>\n"
-                msg += f"İlk Stop Seviyesine ({init_sl:,.2f}) değdi. Pozisyonu kapatın."
-                await bot_app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="HTML", reply_to_message_id=trade["msg_id"])
+                msg = f"🛑 <b>STOP OLDU - {sym}</b>\nİlk Stop Seviyesine ({init_sl:,.2f}) değdi. Pozisyonu kapatın."
+                for cid in CHAT_IDS:
+                    reply_id = trade.get("msg_ids", {}).get(str(cid))
+                    try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                    except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                 del active_trades[trade_key]
                 continue
 
@@ -316,19 +321,20 @@ async def check_active_trades():
             if not tp_hit:
                 if (t_type == "LONG" and current_high >= target_tp) or (t_type == "SHORT" and current_low <= target_tp):
                     trade["tp_hit"] = True
-                    
-                    msg = f"🎯 <b>TP1 VURULDU (%5 Kâr) - {sym}</b>\n"
-                    msg += f"👉 <b>Pozisyonun yarısını (%50) kapatın.</b>\n"
-                    msg += f"🛑 <b>Stop-Loss'u maliyete çekin: {entry_price:,.2f}</b>\n"
-                    msg += f"⏳ <i>Kalan yarıyı 30m EMA50 kırılımına kadar tutun.</i>"
-                    await bot_app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="HTML", reply_to_message_id=trade["msg_id"])
+                    msg = f"🎯 <b>TP1 VURULDU (%5 Kâr) - {sym}</b>\n👉 <b>Pozisyonun yarısını (%50) kapatın.</b>\n🛑 <b>Stop-Loss'u maliyete çekin: {entry_price:,.2f}</b>\n⏳ <i>Kalan yarıyı 30m EMA50 kırılımına kadar tutun.</i>"
+                    for cid in CHAT_IDS:
+                        reply_id = trade.get("msg_ids", {}).get(str(cid))
+                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                        except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                     continue
 
             if tp_hit:
                 if (t_type == "LONG" and current_price <= current_ema50) or (t_type == "SHORT" and current_price >= current_ema50):
-                    msg = f"⚪ <b>EMA 50 ÇIKIŞI - {sym}</b>\n"
-                    msg += f"👉 <b>Kalan pozisyonu kapatın.</b>"
-                    await bot_app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="HTML", reply_to_message_id=trade["msg_id"])
+                    msg = f"⚪ <b>EMA 50 ÇIKIŞI - {sym}</b>\n👉 <b>Kalan pozisyonu kapatın.</b>"
+                    for cid in CHAT_IDS:
+                        reply_id = trade.get("msg_ids", {}).get(str(cid))
+                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                        except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                     del active_trades[trade_key]
         
         # --- STANDART/SNIPER TAKİBİ ---
@@ -337,11 +343,17 @@ async def check_active_trades():
                 if (t_type == "LONG" and current_high >= trade["entry"] * 1.03) or (t_type == "SHORT" and current_low <= trade["entry"] * 0.97):
                     trade["hit_3pct"] = True
                     msg = f"🎯 <b>TP1 VURULDU (3% Kâr) - {sym}</b>\n👉 <b>Yarısını kapat, stopu maliyete çek ({trade['entry']:,.2f}).</b>"
-                    await bot_app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="HTML", reply_to_message_id=trade["msg_id"])
+                    for cid in CHAT_IDS:
+                        reply_id = trade.get("msg_ids", {}).get(str(cid))
+                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                        except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
             else:
                 if (t_type == "LONG" and current_price <= current_ema50) or (t_type == "SHORT" and current_price >= current_ema50):
                     msg = f"⚪ <b>EMA 50 ÇIKIŞI - {sym}</b>\n👉 <b>Kalan pozisyonu kapatın.</b>"
-                    await bot_app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="HTML", reply_to_message_id=trade["msg_id"])
+                    for cid in CHAT_IDS:
+                        reply_id = trade.get("msg_ids", {}).get(str(cid))
+                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                        except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                     del active_trades[trade_key]
 
 bot_app = Application.builder().token(BOT_TOKEN).build()
@@ -352,23 +364,28 @@ async def send_signal_message(msg_data):
     symbol = msg_data["symbol"]
     tf = msg_data["tf"]
     
-    sent_msg = None
+    buf = None
     if df is not None:
         buf = create_chart_image(df, symbol, tf)
-        if buf:
-            try:
-                sent_msg = await bot_app.bot.send_photo(chat_id=CHAT_ID, photo=buf, caption=text, parse_mode="HTML")
-            except Exception:
-                pass
     
-    if not sent_msg:
-        sent_msg = await bot_app.bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML")
+    msg_ids = {}
+    for cid in CHAT_IDS:
+        try:
+            if buf:
+                buf.seek(0) # Her kullanıcı için resim okuma imlecini başa al
+                sent = await bot_app.bot.send_photo(chat_id=cid, photo=buf, caption=text, parse_mode="HTML")
+            else:
+                sent = await bot_app.bot.send_message(chat_id=cid, text=text, parse_mode="HTML")
+            msg_ids[str(cid)] = sent.message_id
+        except Exception as e:
+            print(f"Mesaj gönderme hatası ({cid}): {e}")
     
     if "direction" in msg_data and msg_data["type"] in ["standard", "kisa_vade"]:
         trade_key = f"{symbol}_{msg_data['direction']}_{msg_data['type']}"
         trade_info = {
             "symbol": symbol, "type": msg_data["direction"], "entry": msg_data["price"], 
-            "msg_id": sent_msg.message_id, "signal_type": msg_data["type"],
+            "msg_ids": msg_ids, # Her kullanıcı için mesaj ID'si tutuluyor
+            "signal_type": msg_data["type"],
             "hit_3pct": False, "tp_hit": False, "sl": msg_data.get("sl")
         }
         if msg_data["type"] == "kisa_vade":
@@ -377,7 +394,7 @@ async def send_signal_message(msg_data):
         active_trades[trade_key] = trade_info
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE): 
-    await update.message.reply_text("✅ Sistem 4 Katmanlı (Sniper, Standart, RSI, Kısa Vade EMA 13-34) çalışıyor.")
+    await update.message.reply_text("✅ Sistem 4 Katmanlı olarak çalışıyor. Sinyaller aktif.")
 
 bot_app.add_handler(CommandHandler("start", cmd_start))
 
@@ -397,7 +414,9 @@ async def tracker_tick():
 
 async def market_open_scan():
     if not is_market_open(): return
-    await bot_app.bot.send_message(chat_id=CHAT_ID, text="🟢 Seans açıldı, 4 Katmanlı tarama ve takip başladı.", parse_mode="HTML")
+    for cid in CHAT_IDS:
+        try: await bot_app.bot.send_message(chat_id=cid, text="🟢 Seans açıldı, 4 Katmanlı tarama ve takip başladı.", parse_mode="HTML")
+        except: pass
     await tick(force=True)
 
 class DummyHandler(BaseHTTPRequestHandler):
@@ -414,7 +433,7 @@ async def main():
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="0,30", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="15,45", timezone=TIMEZONE)) 
     sched.start()
-    print("✅ Bot çalışıyor.")
+    print("✅ Bot çoklu kullanıcı modunda çalışıyor.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__": asyncio.run(main())
