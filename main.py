@@ -35,6 +35,28 @@ SYMBOLS = [
     "TKFEN", "ULKER", "VESTL", "XU030", "XU100", "XAUUSD", "XAGUSD"
 ]
 
+# Piyasa genişliği hesaplarken endeks ve emtiaları çıkarıp sadece hisseleri alacağız
+BIST_STOCKS = [s for s in SYMBOLS if not s.startswith("XU") and not s.endswith("USD")]
+
+# --- SEKTÖR AYRIMI ---
+SECTORS = {
+    "🏦 Bankacılık": ["GARAN", "YKBNK", "AKBNK", "ISCTR", "VAKBN"],
+    "🏢 Holdingler": ["SAHOL", "KCHOL", "ALARK", "DOHOL"],
+    "✈️ Havacılık": ["THYAO", "PGSUS", "TAVHL"],
+    "⚡ Enerji": ["TUPRS", "AKSEN", "ENJSA", "ASTOR"],
+    "🔩 Demir-Çelik & Metal": ["EREGL", "KRDMD", "BRSAN", "TRMET", "TRALT"],
+    "🚗 Otomotiv": ["TOASO", "FROTO", "DOAS"],
+    "🧪 Kimya": ["PETKM", "SASA", "GUBRF"],
+    "🛒 Perakende": ["BIMAS", "MGROS", "SOKM"],
+    "🏗️ İnşaat & Çimento": ["ENKAI", "TKFEN", "CIMSA", "OYAKC"],
+    "📡 Telekomünikasyon": ["TCELL", "TTKOM"],
+    "🛡️ Savunma": ["ASELS"],
+    "🥤 Gıda & İçecek": ["AEFES", "ULKER"],
+    "📺 Beyaz Eşya": ["ARCLK", "VESTL"],
+    "🪟 Cam": ["SISE"],
+    "🏘️ GYO": ["EKGYO"],
+}
+
 RSI_PERIOD = 8
 RSI_SHORT_STD = 75
 RSI_LONG_STD = 25
@@ -172,7 +194,6 @@ states = {}
 
 def process_signals(symbol, dfs):
     msgs = []
-    
     ctx_df = dfs.get("15m")
     trend_4h = get_ema_trend(dfs.get("4h"), EMA_PERIOD)
     trend_15m = get_ema_trend(ctx_df, EMA_PERIOD) if ctx_df is not None else 0
@@ -196,7 +217,6 @@ def process_signals(symbol, dfs):
         
         close_price = float(df["close"].iloc[-1])
         
-        # --- 1. KATMAN: SNIPER & STANDART ---
         st = states.setdefault((symbol, tf), {"state": State.IDLE, "last_bar": None})
         bar_time = df.index[-1]
         if st["last_bar"] != bar_time:
@@ -214,13 +234,11 @@ def process_signals(symbol, dfs):
                 st["state"] = State.LONG
             st["last_bar"] = bar_time
 
-        # --- 2. KATMAN: ANINDA RSI UYARISI (İlk uyarı 81/25) ---
         if r_prev <= INSTANT_SHORT < r_now:
             rsi_alerts_instant["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
         elif r_prev >= INSTANT_LONG > r_now:
             rsi_alerts_instant["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
 
-        # --- 3. KATMAN: TEYİTLİ RSI UYARISI (State Machine) ---
         alarm_key = f"{symbol}_{tf}"
         if alarm_key not in rsi_alarm_states:
             rsi_alarm_states[alarm_key] = {"state": "IDLE", "peak_rsi": 0, "peak_price": 0, "low_rsi": 100, "low_price": 0}
@@ -238,7 +256,6 @@ def process_signals(symbol, dfs):
             if r_now > alarm_data["peak_rsi"]:
                 alarm_data["peak_rsi"] = r_now
                 alarm_data["peak_price"] = close_price
-                
             if r_now <= ALARM_SHORT_LOWER:
                 rsi_alerts_confirmed["SHORT"].append({
                     "tf": tf, "prev": r_prev, "now": r_now, "price": close_price,
@@ -252,7 +269,6 @@ def process_signals(symbol, dfs):
             if r_now < alarm_data["low_rsi"]:
                 alarm_data["low_rsi"] = r_now
                 alarm_data["low_price"] = close_price
-                
             if r_now >= ALARM_LONG_UPPER:
                 rsi_alerts_confirmed["LONG"].append({
                     "tf": tf, "prev": r_prev, "now": r_now, "price": close_price,
@@ -262,7 +278,6 @@ def process_signals(symbol, dfs):
             elif r_now > ALARM_SHORT_UPPER:
                 rsi_alarm_states[alarm_key] = {"state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": close_price, "low_rsi": 100, "low_price": 0}
 
-    # Sinyal mesajları aynı...
     for direction, sig_list, title, emoji in [
         ("SHORT", sniper_signals["SHORT"], "🔥🎯 KESKİN NİŞANCI SİNYALİ", "🔴"),
         ("LONG", sniper_signals["LONG"], "🔥🎯 KESKİN NİŞANCI SİNYALİ", "🟢"),
@@ -307,7 +322,6 @@ def process_signals(symbol, dfs):
             msg = f"⚡ <b>30M KISA VADE SİNYALİ (SHORT)</b>\n🔴 <b>{symbol}</b> — SHORT [30M] ✅ PSAR & 4H EMA50 ONAYLI\n\n💰 <b>Giriş Fiyatı:</b> {close_price:,.2f}\n🛑 <b>İlk Stop:</b> {sl_price:,.2f} (3 ATR)\n🎯 <b>1. Hedef (TP1):</b> {tp_price:,.2f} (%{KV_TP1_PCT} Kâr)\n💡 <b>Çıkış:</b> TP1'de yarısını kapat, stopu maliyete çek, kalanı 30m EMA50 ile takip et."
             msgs.append({"text": msg, "df": df_30m, "symbol": symbol, "tf": "30m", "direction": "SHORT", "price": close_price, "sl": sl_price, "tp": tp_price, "atr": atr, "type": "kisa_vade"})
 
-    # RSI Büyüsü mesajları...
     for direction, sig_list in [("SHORT", rsi_alerts_instant["SHORT"]), ("LONG", rsi_alerts_instant["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
@@ -328,9 +342,150 @@ def process_signals(symbol, dfs):
 
     return msgs
 
-# --- KOMUT İLE HİSSE ANALİZİ FONKSİYONU (GÜNCELLENDİ) ---
+# --- PİYASA ÖZETİ FONKSİYONU (SEKTÖR ANALİZLİ) ---
+async def generate_market_summary(session_name):
+    try:
+        df_30m = fetch_ohlc("XU030", "30m", limit=250)
+        df_1h = fetch_ohlc("XU030", "1h", limit=250)
+        
+        if df_30m is None or df_1h is None: return
+        
+        today = datetime.now(TIMEZONE).date()
+        df_today = df_30m[df_30m.index.date == today]
+        
+        if df_today.empty: return
+
+        if "Sabah" in session_name:
+            session_df = df_today.between_time('09:55', '14:00')
+            time_str = "09:55 - 14:00"
+        else:
+            session_df = df_today.between_time('14:01', '17:54')
+            time_str = "14:01 - 17:54"
+
+        if session_df.empty: return
+
+        open_price = session_df['open'].iloc[0]
+        close_price = session_df['close'].iloc[-1]
+        high_price = session_df['high'].max()
+        low_price = session_df['low'].min()
+        pct_change = ((close_price - open_price) / open_price) * 100
+        
+        dist_to_high = ((high_price - close_price) / high_price) * 100
+        dist_to_low = ((close_price - low_price) / low_price) * 100
+        
+        if dist_to_high < 0.2:
+            close_status = "🟢 Zirvede Kapattı (Güçlü)"
+        elif dist_to_low < 0.2:
+            close_status = "🔴 Dipte Kapattı (Zayıf)"
+        else:
+            close_status = "⚪ Orta Bölgede Kapattı"
+
+        session_vol = session_df['volume'].sum()
+        past_vols = []
+        for i in range(1, 4):
+            past_date = today - timedelta(days=i)
+            past_df = df_30m[df_30m.index.date == past_date]
+            if not past_df.empty:
+                if "Sabah" in session_name:
+                    p_vol = past_df.between_time('09:55', '14:00')['volume'].sum()
+                else:
+                    p_vol = past_df.between_time('14:01', '17:54')['volume'].sum()
+                past_vols.append(p_vol)
+                
+        avg_3d_vol = sum(past_vols) / len(past_vols) if past_vols else session_vol
+        vol_change = ((session_vol - avg_3d_vol) / avg_3d_vol) * 100
+        
+        if vol_change > 10:
+            vol_status = f"🟢 Son 3 günün %{vol_change:.1f} ÜZERİNDE (Hacimli)"
+        elif vol_change < -10:
+            vol_status = f"🔴 Son 3 günün %{abs(vol_change):.1f} ALTINDA (Sessiz)"
+        else:
+            vol_status = "⚪ Normal Seviyede"
+
+        # --- HİSSE BAZLI DEĞİŞİM VE SEKTÖR ANALİZİ ---
+        stock_changes = {}
+        green_count = 0
+        red_count = 0
+        
+        for sym in BIST_STOCKS:
+            try:
+                t = bp.Ticker(sym)
+                h = t.history(period="5d", interval="1d")
+                if len(h) >= 2:
+                    prev_close = h['Close'].iloc[-2]
+                    last_close = h['Close'].iloc[-1]
+                    change = ((last_close - prev_close) / prev_close) * 100
+                    stock_changes[sym] = change
+                    if change > 0:
+                        green_count += 1
+                    else:
+                        red_count += 1
+            except:
+                pass
+        
+        # Sektör bazlı özet
+        sector_lines = []
+        for sector_name, stocks in SECTORS.items():
+            sector_stocks = [s for s in stocks if s in stock_changes]
+            if not sector_stocks:
+                continue
+            greens = sum(1 for s in sector_stocks if stock_changes[s] > 0)
+            reds = len(sector_stocks) - greens
+            avg_chg = sum(stock_changes[s] for s in sector_stocks) / len(sector_stocks)
+            
+            if greens > reds:
+                emoji = "🟢"
+            elif reds > greens:
+                emoji = "🔴"
+            else:
+                emoji = "⚪"
+                
+            sector_lines.append((avg_chg, f"{emoji} {sector_name}: {greens}Y/{reds}K (Ort: %{avg_chg:+.2f})"))
+        
+        # En iyi ve en kötü sektörleri vurgulamak için ortalamaya göre sırala
+        sector_lines.sort(key=lambda x: x[0], reverse=True)
+        sector_text = "\n".join([line for _, line in sector_lines])
+
+        # Trend & Momentum
+        rsi_1h = get_rsi(df_1h['close'], RSI_PERIOD).iloc[-1]
+        ema50_30m = df_30m['close'].ewm(span=50).mean().iloc[-1]
+        trend_status = "🟢 EMA 50 Üzerinde" if close_price > ema50_30m else "🔴 EMA 50 Altında"
+
+        # Yorum
+        yorum = ""
+        best_sector = sector_lines[0][1].split(":")[0] if sector_lines else ""
+        worst_sector = sector_lines[-1][1].split(":")[0] if sector_lines else ""
+        
+        if pct_change > 0 and vol_change > 0 and green_count > red_count:
+            yorum = f"Alıcılar baskın. Özellikle {best_sector} sektörü öne çıkıyor. Long işlemler ön planda olabilir."
+        elif pct_change < 0 and vol_change > 0 and red_count > green_count:
+            yorum = f"Satıcılar baskın. {best_sector} sektörü direniyor ama genel görünüm zayıf. Short işlemler düşünülebilir."
+        elif green_count > red_count and pct_change < 0:
+            yorum = f"Endeks düşse de hisselerin çoğu yeşil. {best_sector} öne çıkıyor. Dönüş sinyali olabilir."
+        elif red_count > green_count and pct_change > 0:
+            yorum = f"Endeks yükselse de hisselerin çoğu kırmızı. {worst_sector} zayıf. Yükseliş inandırıcı değil."
+        else:
+            yorum = "Piyasa kararsız. Yön netleşene kadar beklemede kalmak mantıklı."
+
+        msg = f"🏛️ <b>BIST 30 (XU030) — {session_name} Özeti</b>\n"
+        msg += f"⏱ ({time_str} Arası)\n\n"
+        msg += f"📈 <b>Fiyat:</b> {close_price:,.2f} (%{pct_change:+.2f})\n"
+        msg += f"📍 <b>Kapanış:</b> {close_status}\n\n"
+        msg += f"📊 <b>Hacim:</b> {vol_status}\n\n"
+        msg += f"🌡️ <b>Piyasa Genişliği:</b> {green_count} Yeşil / {red_count} Kırmızı\n\n"
+        msg += f"🧭 <b>Trend:</b> 1H RSI: {rsi_1h:.1f} | 30m EMA 50: {ema50_30m:,.2f} ({trend_status})\n\n"
+        msg += f"🏭 <b>Sektör Performansı:</b>\n{sector_text}\n\n"
+        msg += f"💡 <b>Yorum:</b> {yorum}"
+        
+        for cid in CHAT_IDS:
+            try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+            except: pass
+
+    except Exception as e:
+        print(f"Piyasa Özeti Hatası: {e}")
+
+# --- KOMUT İLE HİSSE ANALİZİ FONKSİYONU ---
 async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # Gelen mesajın metnini al (örn: "/ASELS" veya "ASELS")
     text = update.message.text.upper().replace("/", "").strip()
     
     if text not in SYMBOLS:
@@ -340,7 +495,6 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🔍 {text} analiz ediliyor, lütfen bekleyin...")
     
     try:
-        # Verileri çek (30m verisini de ekledik)
         df_30m = fetch_ohlc(text, "30m", limit=250)
         df_1h = fetch_ohlc(text, "1h", limit=250)
         df_4h = fetch_ohlc(text, "4h", limit=250)
@@ -351,11 +505,8 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
             
         msg = f"🤖 <b>{text} — Kapsamlı Analiz</b>\n"
-        
-        # Fiyat (1H kapanışı baz alıyoruz)
         price = df_1h['close'].iloc[-1]
         
-        # 1H Analizi
         rsi_1h = get_rsi(df_1h['close'], RSI_PERIOD).iloc[-1]
         ema200_1h = df_1h['close'].ewm(span=200).mean().iloc[-1]
         trend_1h = "🟢 Yukarı" if price > ema200_1h else "🔴 Aşağı"
@@ -365,7 +516,6 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         msg += f"• RSI(8): {rsi_1h:.1f}\n"
         msg += f"• Trend: {trend_1h} (EMA 200)\n"
         
-        # 4H Analizi
         rsi_4h = get_rsi(df_4h['close'], RSI_PERIOD).iloc[-1]
         ema200_4h = df_4h['close'].ewm(span=200).mean().iloc[-1]
         trend_4h = "🟢 Yukarı" if price > ema200_4h else "🔴 Aşağı"
@@ -374,22 +524,18 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         msg += f"• RSI(8): {rsi_4h:.1f}\n"
         msg += f"• Trend: {trend_4h} (EMA 200)\n"
         
-        # 1D Analizi
         if df_1d is not None:
             rsi_1d = get_rsi(df_1d['close'], 14).iloc[-1]
             msg += f"\n📊 <b>Günlük (1D)</b>\n"
             msg += f"• RSI(14): {rsi_1d:.1f}\n"
             
-        # 30M Destek/Direnç Seviyesi
         ema50_30m = 0
         if df_30m is not None:
             ema50_30m = df_30m['close'].ewm(span=50).mean().iloc[-1]
             msg += f"\n⚓ <b>30 Dakikalık (30M)</b>\n"
             msg += f"• EMA 50: {ema50_30m:,.2f}\n"
 
-        # YORUM VE RAKAMSAL SEVİYELER
         msg += f"\n💡 <b>Yorum ve Strateji:</b>\n"
-        
         if trend_4h == "🟢 Yukarı":
             msg += f"Ana trend YUKARI. Alım yönlü işlemler düşünülebilir.\n"
             if df_30m is not None:
@@ -540,7 +686,7 @@ bot_app.add_handler(CommandHandler("start", cmd_start))
 bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyze_symbol))
 bot_app.add_handler(MessageHandler(filters.COMMAND & ~filters.Regex(r'^/start$'), analyze_symbol))
 
-
+# --- ZAMANLAYICILAR ---
 async def tick(force=False):
     if not force and not is_market_open(): return
     for sym in SYMBOLS:
@@ -562,6 +708,12 @@ async def market_open_scan():
         except: pass
     await tick(force=True)
 
+async def task_morning_summary():
+    await generate_market_summary("Sabah")
+
+async def task_afternoon_summary():
+    await generate_market_summary("Öğleden Sonra")
+
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers(); self.wfile.write(b"Alive")
@@ -572,9 +724,14 @@ async def main():
     threading.Thread(target=run_dummy_server, daemon=True).start()
     await bot_app.initialize(); await bot_app.start(); await bot_app.updater.start_polling()
     sched = AsyncIOScheduler(timezone=TIMEZONE)
+    
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="0,30", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="15,45", timezone=TIMEZONE)) 
+    
+    sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=1, timezone=TIMEZONE))
+    sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=17, minute=55, timezone=TIMEZONE))
+    
     sched.start()
     print("✅ Bot çalışıyor.")
     while True: await asyncio.sleep(3600)
