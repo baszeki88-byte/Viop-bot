@@ -38,8 +38,15 @@ SYMBOLS = [
 ]
 
 RSI_PERIOD = 8
-RSI_SHORT = 75
-RSI_LONG = 25
+
+# 1. KATMAN (Sniper/Standart) İçin Standart RSI Eşikleri
+RSI_SHORT_STD = 75
+RSI_LONG_STD = 25
+
+# 3. KATMAN (Sadece RSI Alarm) İçin Güncellenmiş RSI Eşikleri
+RSI_SHORT_ALARM = 81  # Senin istediğin güncelleme
+RSI_LONG_ALARM = 25
+
 EMA_PERIOD = 200
 SL_MULTIPLIER = 1.5  
 TIME_FRAMES = ["1h", "4h"] 
@@ -192,23 +199,27 @@ def process_signals(symbol, dfs):
         if st["last_bar"] == bar_time: continue
         st["last_bar"] = bar_time
         
-        if r_prev <= RSI_SHORT < r_now:
+        # Sniper/Standart için Standart Eşikler (75/25)
+        if r_prev <= RSI_SHORT_STD < r_now:
             if trend_4h == -1 and macd_now < macd_sig_now:
                 sig_data = {"tf": tf, "price": close_price, "atr": atr, "df": df}
                 if trend_15m == -1: sniper_signals["SHORT"].append(sig_data)
                 else: standard_signals["SHORT"].append(sig_data)
-            else:
-                rsi_alerts["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now})
             st["state"] = State.SHORT
             
-        elif r_prev >= RSI_LONG > r_now:
+        elif r_prev >= RSI_LONG_STD > r_now:
             if trend_4h == 1 and macd_now > macd_sig_now:
                 sig_data = {"tf": tf, "price": close_price, "atr": atr, "df": df}
                 if trend_15m == 1: sniper_signals["LONG"].append(sig_data)
                 else: standard_signals["LONG"].append(sig_data)
-            else:
-                rsi_alerts["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now})
             st["state"] = State.LONG
+
+        # RSI Alarm (3. Katman) İçin Güncellenmiş Eşikler (81/25)
+        # Sadece alarm üretir, Sniper/Standart'ı etkilemez.
+        if r_prev <= RSI_SHORT_ALARM < r_now:
+            rsi_alerts["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now})
+        elif r_prev >= RSI_LONG_ALARM > r_now:
+            rsi_alerts["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now})
 
     # Sniper ve Standart Mesajları
     for direction, sig_list, title, emoji in [
@@ -250,30 +261,15 @@ def process_signals(symbol, dfs):
         if is_kv_long and atr:
             sl_price = close_price - (atr * KV_SL_MULT)
             tp_price = close_price * (1 + KV_TP1_PCT/100)
-            
-            msg = f"⚡ <b>30M KISA VADE SİNYALİ (LONG)</b>\n"
-            msg += f"🟢 <b>{symbol}</b> — LONG [30M] ✅ PSAR & 4H EMA50 ONAYLI\n\n"
-            msg += f"💰 <b>Giriş Fiyatı:</b> {close_price:,.2f}\n"
-            msg += f"🛑 <b>İlk Stop:</b> {sl_price:,.2f} (3 ATR)\n"
-            msg += f"🎯 <b>1. Hedef (TP1):</b> {tp_price:,.2f} (%{KV_TP1_PCT} Kâr)\n"
-            msg += f"💡 <b>Çıkış:</b> TP1'de yarısını kapat, stopu maliyete çek, kalanı 30m EMA50 ile takip et."
-            
+            msg = f"⚡ <b>30M KISA VADE SİNYALİ (LONG)</b>\n🟢 <b>{symbol}</b> — LONG [30M] ✅ PSAR & 4H EMA50 ONAYLI\n\n💰 <b>Giriş Fiyatı:</b> {close_price:,.2f}\n🛑 <b>İlk Stop:</b> {sl_price:,.2f} (3 ATR)\n🎯 <b>1. Hedef (TP1):</b> {tp_price:,.2f} (%{KV_TP1_PCT} Kâr)\n💡 <b>Çıkış:</b> TP1'de yarısını kapat, stopu maliyete çek, kalanı 30m EMA50 ile takip et."
             msgs.append({"text": msg, "df": df_30m, "symbol": symbol, "tf": "30m", "direction": "LONG", "price": close_price, "sl": sl_price, "tp": tp_price, "atr": atr, "type": "kisa_vade"})
-            
         elif is_kv_short and atr:
             sl_price = close_price + (atr * KV_SL_MULT)
             tp_price = close_price * (1 - KV_TP1_PCT/100)
-            
-            msg = f"⚡ <b>30M KISA VADE SİNYALİ (SHORT)</b>\n"
-            msg += f"🔴 <b>{symbol}</b> — SHORT [30M] ✅ PSAR & 4H EMA50 ONAYLI\n\n"
-            msg += f"💰 <b>Giriş Fiyatı:</b> {close_price:,.2f}\n"
-            msg += f"🛑 <b>İlk Stop:</b> {sl_price:,.2f} (3 ATR)\n"
-            msg += f"🎯 <b>1. Hedef (TP1):</b> {tp_price:,.2f} (%{KV_TP1_PCT} Kâr)\n"
-            msg += f"💡 <b>Çıkış:</b> TP1'de yarısını kapat, stopu maliyete çek, kalanı 30m EMA50 ile takip et."
-            
+            msg = f"⚡ <b>30M KISA VADE SİNYALİ (SHORT)</b>\n🔴 <b>{symbol}</b> — SHORT [30M] ✅ PSAR & 4H EMA50 ONAYLI\n\n💰 <b>Giriş Fiyatı:</b> {close_price:,.2f}\n🛑 <b>İlk Stop:</b> {sl_price:,.2f} (3 ATR)\n🎯 <b>1. Hedef (TP1):</b> {tp_price:,.2f} (%{KV_TP1_PCT} Kâr)\n💡 <b>Çıkış:</b> TP1'de yarısını kapat, stopu maliyete çek, kalanı 30m EMA50 ile takip et."
             msgs.append({"text": msg, "df": df_30m, "symbol": symbol, "tf": "30m", "direction": "SHORT", "price": close_price, "sl": sl_price, "tp": tp_price, "atr": atr, "type": "kisa_vade"})
 
-    # RSI Alarmları (Sadece bilgi)
+    # --- 3. KATMAN: SADECE RSI UYARISI (Hedef/Stop Yok) ---
     for direction, sig_list in [("SHORT", rsi_alerts["SHORT"]), ("LONG", rsi_alerts["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
@@ -302,7 +298,6 @@ async def check_active_trades():
         
         t_type = trade["type"]
         
-        # --- KISA VADE TAKİBİ ---
         if trade.get("signal_type") == "kisa_vade":
             tp_hit = trade.get("tp_hit", False)
             init_sl = trade["sl"]
@@ -337,7 +332,6 @@ async def check_active_trades():
                         except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                     del active_trades[trade_key]
         
-        # --- STANDART/SNIPER TAKİBİ ---
         else:
             if not trade.get("hit_3pct", False):
                 if (t_type == "LONG" and current_high >= trade["entry"] * 1.03) or (t_type == "SHORT" and current_low <= trade["entry"] * 0.97):
@@ -372,29 +366,28 @@ async def send_signal_message(msg_data):
     for cid in CHAT_IDS:
         try:
             if buf:
-                buf.seek(0) # Her kullanıcı için resim okuma imlecini başa al
+                buf.seek(0) 
                 sent = await bot_app.bot.send_photo(chat_id=cid, photo=buf, caption=text, parse_mode="HTML")
             else:
                 sent = await bot_app.bot.send_message(chat_id=cid, text=text, parse_mode="HTML")
             msg_ids[str(cid)] = sent.message_id
         except Exception as e:
-            print(f"Mesaj gönderme hatası ({cid}): {e}")
+            pass
     
     if "direction" in msg_data and msg_data["type"] in ["standard", "kisa_vade"]:
         trade_key = f"{symbol}_{msg_data['direction']}_{msg_data['type']}"
         trade_info = {
             "symbol": symbol, "type": msg_data["direction"], "entry": msg_data["price"], 
-            "msg_ids": msg_ids, # Her kullanıcı için mesaj ID'si tutuluyor
+            "msg_ids": msg_ids,
             "signal_type": msg_data["type"],
             "hit_3pct": False, "tp_hit": False, "sl": msg_data.get("sl")
         }
         if msg_data["type"] == "kisa_vade":
             trade_info["tp"] = msg_data.get("tp")
-            
         active_trades[trade_key] = trade_info
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE): 
-    await update.message.reply_text("✅ Sistem 4 Katmanlı olarak çalışıyor. Sinyaller aktif.")
+    await update.message.reply_text("✅ Sistem güncellendi. 3. Katman RSI Alarm eşiği 81'e çekildi.")
 
 bot_app.add_handler(CommandHandler("start", cmd_start))
 
@@ -415,7 +408,7 @@ async def tracker_tick():
 async def market_open_scan():
     if not is_market_open(): return
     for cid in CHAT_IDS:
-        try: await bot_app.bot.send_message(chat_id=cid, text="🟢 Seans açıldı, 4 Katmanlı tarama ve takip başladı.", parse_mode="HTML")
+        try: await bot_app.bot.send_message(chat_id=cid, text="🟢 Seans açıldı, tarama ve takip başladı.", parse_mode="HTML")
         except: pass
     await tick(force=True)
 
@@ -433,7 +426,7 @@ async def main():
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="0,30", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="15,45", timezone=TIMEZONE)) 
     sched.start()
-    print("✅ Bot çoklu kullanıcı modunda çalışıyor.")
+    print("✅ Bot çalışıyor.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__": asyncio.run(main())
