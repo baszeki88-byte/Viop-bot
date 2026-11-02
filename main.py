@@ -23,35 +23,37 @@ from apscheduler.triggers.cron import CronTrigger
 # --- AYARLAR ---
 # ==========================================
 BOT_TOKEN = "9293651278:AAGdGb6Nr1gBX5-Er6YAb62ZNyUQEG4yxZg"
-
-# ÇOKLU KULLANICI: Senin ID'n ve Kardeşinin ID'si
 CHAT_IDS = [5066109900, 8776376951] 
 
 TIMEZONE = pytz.timezone("Europe/Istanbul")
 
+# Yeni semboller eklendi
 SYMBOLS = [
     "TOASO", "TRALT", "ASTOR", "GUBRF", "TRMET", "TCELL", "GARAN", "YKBNK", "TAVHL", "ENKAI",
     "TTKOM", "SAHOL", "SASA", "AEFES", "ASELS", "MGROS", "TUPRS", "AKBNK", "KCHOL", "KRDMD",
     "ISCTR", "THYAO", "BIMAS", "EREGL", "EKGYO", "PGSUS", "FROTO", "SISE", "VAKBN", "ALARK", 
     "AKSEN", "ARCLK", "BRSAN", "CIMSA", "DOAS", "DOHOL", "ENJSA", "OYAKC", "PETKM", "SOKM", 
-    "TKFEN", "ULKER", "VESTL", "XU030"
+    "TKFEN", "ULKER", "VESTL", "XU030",
+    "XU100",   # BIST 100 Endeksi
+    "XAUUSD",  # Altın (Ons)
+    "XAGUSD"   # Gümüş (Ons)
 ]
 
 RSI_PERIOD = 8
-
-# 1. KATMAN (Sniper/Standart) İçin Standart RSI Eşikleri
 RSI_SHORT_STD = 75
 RSI_LONG_STD = 25
 
-# 3. KATMAN (Sadece RSI Alarm) İçin Güncellenmiş RSI Eşikleri
-RSI_SHORT_ALARM = 81  # Senin istediğin güncelleme
-RSI_LONG_ALARM = 25
+# 3. KATMAN (SMA'sız State Machine) Eşikleri
+ALARM_SHORT_UPPER = 81
+ALARM_SHORT_LOWER = 65
+ALARM_LONG_LOWER = 25
+ALARM_LONG_UPPER = 45
 
 EMA_PERIOD = 200
 SL_MULTIPLIER = 1.5  
 TIME_FRAMES = ["1h", "4h"] 
 
-# --- KISA VADE AYARLARI (EMA 13-34 SAF SİSTEM) ---
+# --- KISA VADE AYARLARI ---
 KV_RSI_PERIOD = 14
 KV_RSI_LONG = 60
 KV_RSI_SHORT = 40
@@ -60,8 +62,8 @@ KV_SL_MULT = 3.0
 KV_EMA_FAST = 13
 KV_EMA_SLOW = 34
 
-# Aktif işlemleri tutacağımız sözlük
 active_trades = {}
+rsi_alarm_states = {}
 # ==========================================
 
 def is_market_open(now=None):
@@ -194,32 +196,48 @@ def process_signals(symbol, dfs):
         if not atr: continue
         
         close_price = float(df["close"].iloc[-1])
+        
+        # --- SNIPER / STANDART SİNYALLERİ (75 / 25) ---
         st = states.setdefault((symbol, tf), {"state": State.IDLE, "last_bar": None})
         bar_time = df.index[-1]
-        if st["last_bar"] == bar_time: continue
-        st["last_bar"] = bar_time
-        
-        # Sniper/Standart için Standart Eşikler (75/25)
-        if r_prev <= RSI_SHORT_STD < r_now:
-            if trend_4h == -1 and macd_now < macd_sig_now:
-                sig_data = {"tf": tf, "price": close_price, "atr": atr, "df": df}
-                if trend_15m == -1: sniper_signals["SHORT"].append(sig_data)
-                else: standard_signals["SHORT"].append(sig_data)
-            st["state"] = State.SHORT
-            
-        elif r_prev >= RSI_LONG_STD > r_now:
-            if trend_4h == 1 and macd_now > macd_sig_now:
-                sig_data = {"tf": tf, "price": close_price, "atr": atr, "df": df}
-                if trend_15m == 1: sniper_signals["LONG"].append(sig_data)
-                else: standard_signals["LONG"].append(sig_data)
-            st["state"] = State.LONG
+        if st["last_bar"] != bar_time:
+            if r_prev <= RSI_SHORT_STD < r_now:
+                if trend_4h == -1 and macd_now < macd_sig_now:
+                    sig_data = {"tf": tf, "price": close_price, "atr": atr, "df": df}
+                    if trend_15m == -1: sniper_signals["SHORT"].append(sig_data)
+                    else: standard_signals["SHORT"].append(sig_data)
+                st["state"] = State.SHORT
+            elif r_prev >= RSI_LONG_STD > r_now:
+                if trend_4h == 1 and macd_now > macd_sig_now:
+                    sig_data = {"tf": tf, "price": close_price, "atr": atr, "df": df}
+                    if trend_15m == 1: sniper_signals["LONG"].append(sig_data)
+                    else: standard_signals["LONG"].append(sig_data)
+                st["state"] = State.LONG
+            st["last_bar"] = bar_time
 
-        # RSI Alarm (3. Katman) İçin Güncellenmiş Eşikler (81/25)
-        # Sadece alarm üretir, Sniper/Standart'ı etkilemez.
-        if r_prev <= RSI_SHORT_ALARM < r_now:
-            rsi_alerts["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now})
-        elif r_prev >= RSI_LONG_ALARM > r_now:
-            rsi_alerts["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now})
+        # --- 3. KATMAN: SMA'SIZ SAF STATE MACHINE (81-65 / 25-45) ---
+        alarm_key = f"{symbol}_{tf}"
+        alarm_state = rsi_alarm_states.get(alarm_key, "IDLE")
+        
+        if alarm_state == "IDLE":
+            if r_now > ALARM_SHORT_UPPER:
+                rsi_alarm_states[alarm_key] = "SHORT_ARMED"
+            elif r_now < ALARM_LONG_LOWER:
+                rsi_alarm_states[alarm_key] = "LONG_ARMED"
+                
+        elif alarm_state == "SHORT_ARMED":
+            if r_now <= ALARM_SHORT_LOWER:
+                rsi_alerts["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
+                rsi_alarm_states[alarm_key] = "IDLE"
+            elif r_now < ALARM_LONG_LOWER:
+                rsi_alarm_states[alarm_key] = "LONG_ARMED"
+                
+        elif alarm_state == "LONG_ARMED":
+            if r_now >= ALARM_LONG_UPPER:
+                rsi_alerts["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
+                rsi_alarm_states[alarm_key] = "IDLE"
+            elif r_now > ALARM_SHORT_UPPER:
+                rsi_alarm_states[alarm_key] = "SHORT_ARMED"
 
     # Sniper ve Standart Mesajları
     for direction, sig_list, title, emoji in [
@@ -269,13 +287,23 @@ def process_signals(symbol, dfs):
             msg = f"⚡ <b>30M KISA VADE SİNYALİ (SHORT)</b>\n🔴 <b>{symbol}</b> — SHORT [30M] ✅ PSAR & 4H EMA50 ONAYLI\n\n💰 <b>Giriş Fiyatı:</b> {close_price:,.2f}\n🛑 <b>İlk Stop:</b> {sl_price:,.2f} (3 ATR)\n🎯 <b>1. Hedef (TP1):</b> {tp_price:,.2f} (%{KV_TP1_PCT} Kâr)\n💡 <b>Çıkış:</b> TP1'de yarısını kapat, stopu maliyete çek, kalanı 30m EMA50 ile takip et."
             msgs.append({"text": msg, "df": df_30m, "symbol": symbol, "tf": "30m", "direction": "SHORT", "price": close_price, "sl": sl_price, "tp": tp_price, "atr": atr, "type": "kisa_vade"})
 
-    # --- 3. KATMAN: SADECE RSI UYARISI (Hedef/Stop Yok) ---
+    # --- 3. KATMAN: SADECE RSI UYARISI MESAJLARI ---
     for direction, sig_list in [("SHORT", rsi_alerts["SHORT"]), ("LONG", rsi_alerts["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
-        msg = f"⚠️ <b>{symbol}</b> — SADECE RSI UYARISI [{last_sig['tf'].upper()}]\n"
-        msg += f"RSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f}\n"
-        msg += f"👀 <b>Grafiği kontrol edin. İşlem alacaksanız kendiniz değerlendirin.</b>"
+        
+        if direction == "SHORT":
+            msg = f"⚠️ <b>{symbol}</b> — SADECE RSI UYARISI [{last_sig['tf'].upper()}]\n"
+            msg += f"RSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f}\n"
+            msg += f"🔴 <b>Short denenebilir.</b> (Grafiği kontrol edin)\n"
+            msg += f"🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 0.97:,.2f} (%3)\n"
+        else:
+            msg = f"⚠️ <b>{symbol}</b> — SADECE RSI UYARISI [{last_sig['tf'].upper()}]\n"
+            msg += f"RSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f}\n"
+            msg += f"🟢 <b>Long denenebilir.</b> (Grafiği kontrol edin)\n"
+            msg += f"🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 1.03:,.2f} (%3)\n"
+            
+        msg += f"<i>(Stop yoktur, manuel değerlendirme)</i>"
         msgs.append({"text": msg, "df": None, "symbol": symbol, "tf": None, "type": "alert"})
 
     return msgs
@@ -387,7 +415,7 @@ async def send_signal_message(msg_data):
         active_trades[trade_key] = trade_info
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE): 
-    await update.message.reply_text("✅ Sistem güncellendi. 3. Katman RSI Alarm eşiği 81'e çekildi.")
+    await update.message.reply_text("✅ Sistem güncellendi. Yeni semboller ve %3 TP uyarıları aktif.")
 
 bot_app.add_handler(CommandHandler("start", cmd_start))
 
