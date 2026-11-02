@@ -32,17 +32,16 @@ SYMBOLS = [
     "TTKOM", "SAHOL", "SASA", "AEFES", "ASELS", "MGROS", "TUPRS", "AKBNK", "KCHOL", "KRDMD",
     "ISCTR", "THYAO", "BIMAS", "EREGL", "EKGYO", "PGSUS", "FROTO", "SISE", "VAKBN", "ALARK", 
     "AKSEN", "ARCLK", "BRSAN", "CIMSA", "DOAS", "DOHOL", "ENJSA", "OYAKC", "PETKM", "SOKM", 
-    "TKFEN", "ULKER", "VESTL", "XU030",
-    "XU100",   # BIST 100 Endeksi
-    "XAUUSD",  # Altın (Ons)
-    "XAGUSD"   # Gümüş (Ons)
+    "TKFEN", "ULKER", "VESTL", "XU030", "XU100", "XAUUSD", "XAGUSD"
 ]
 
 RSI_PERIOD = 8
 RSI_SHORT_STD = 75
 RSI_LONG_STD = 25
 
-# 3. KATMAN (SMA'sız State Machine) Eşikleri
+INSTANT_SHORT = 81
+INSTANT_LONG = 25
+
 ALARM_SHORT_UPPER = 81
 ALARM_SHORT_LOWER = 65
 ALARM_LONG_LOWER = 25
@@ -62,8 +61,8 @@ KV_EMA_FAST = 13
 KV_EMA_SLOW = 34
 
 active_trades = {}
-# State Machine hafızası artık hem durumu hem de zirve/dip bilgilerini tutacak
 rsi_alarm_states = {}
+last_rsi_alert_msgs = {} 
 # ==========================================
 
 def is_market_open(now=None):
@@ -174,14 +173,14 @@ states = {}
 def process_signals(symbol, dfs):
     msgs = []
     
-    # --- 1. KATMAN: SNIPER & STANDART (1H/4H) ---
     ctx_df = dfs.get("15m")
     trend_4h = get_ema_trend(dfs.get("4h"), EMA_PERIOD)
     trend_15m = get_ema_trend(ctx_df, EMA_PERIOD) if ctx_df is not None else 0
     
     sniper_signals = {"LONG": [], "SHORT": []}
     standard_signals = {"LONG": [], "SHORT": []}
-    rsi_alerts = {"LONG": [], "SHORT": []}
+    rsi_alerts_instant = {"LONG": [], "SHORT": []} 
+    rsi_alerts_confirmed = {"LONG": [], "SHORT": []} 
 
     for tf in TIME_FRAMES:
         df = dfs.get(tf)
@@ -197,7 +196,7 @@ def process_signals(symbol, dfs):
         
         close_price = float(df["close"].iloc[-1])
         
-        # --- SNIPER / STANDART SİNYALLERİ (75 / 25) ---
+        # --- 1. KATMAN: SNIPER & STANDART ---
         st = states.setdefault((symbol, tf), {"state": State.IDLE, "last_bar": None})
         bar_time = df.index[-1]
         if st["last_bar"] != bar_time:
@@ -215,7 +214,13 @@ def process_signals(symbol, dfs):
                 st["state"] = State.LONG
             st["last_bar"] = bar_time
 
-        # --- 3. KATMAN: SMA'SIZ SAF STATE MACHINE (81-65 / 25-45) ---
+        # --- 2. KATMAN: ANINDA RSI UYARISI (İlk uyarı 81/25) ---
+        if r_prev <= INSTANT_SHORT < r_now:
+            rsi_alerts_instant["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
+        elif r_prev >= INSTANT_LONG > r_now:
+            rsi_alerts_instant["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
+
+        # --- 3. KATMAN: TEYİTLİ RSI UYARISI (State Machine) ---
         alarm_key = f"{symbol}_{tf}"
         if alarm_key not in rsi_alarm_states:
             rsi_alarm_states[alarm_key] = {"state": "IDLE", "peak_rsi": 0, "peak_price": 0, "low_rsi": 100, "low_price": 0}
@@ -230,13 +235,12 @@ def process_signals(symbol, dfs):
                 rsi_alarm_states[alarm_key] = {"state": "LONG_ARMED", "peak_rsi": 0, "peak_price": 0, "low_rsi": r_now, "low_price": close_price}
                 
         elif state == "SHORT_ARMED":
-            # Zirveyi güncelle
             if r_now > alarm_data["peak_rsi"]:
                 alarm_data["peak_rsi"] = r_now
                 alarm_data["peak_price"] = close_price
                 
             if r_now <= ALARM_SHORT_LOWER:
-                rsi_alerts["SHORT"].append({
+                rsi_alerts_confirmed["SHORT"].append({
                     "tf": tf, "prev": r_prev, "now": r_now, "price": close_price,
                     "peak_rsi": alarm_data["peak_rsi"], "peak_price": alarm_data["peak_price"]
                 })
@@ -245,13 +249,12 @@ def process_signals(symbol, dfs):
                 rsi_alarm_states[alarm_key] = {"state": "LONG_ARMED", "peak_rsi": 0, "peak_price": 0, "low_rsi": r_now, "low_price": close_price}
                 
         elif state == "LONG_ARMED":
-            # Dibi güncelle
             if r_now < alarm_data["low_rsi"]:
                 alarm_data["low_rsi"] = r_now
                 alarm_data["low_price"] = close_price
                 
             if r_now >= ALARM_LONG_UPPER:
-                rsi_alerts["LONG"].append({
+                rsi_alerts_confirmed["LONG"].append({
                     "tf": tf, "prev": r_prev, "now": r_now, "price": close_price,
                     "low_rsi": alarm_data["low_rsi"], "low_price": alarm_data["low_price"]
                 })
@@ -275,7 +278,7 @@ def process_signals(symbol, dfs):
         msg += f"💡 <b>Strateji:</b> %3 kârda yarısını kapat, kalanı 30m EMA50 ile takip et."
         msgs.append({"text": msg, "df": last_sig["df"], "symbol": symbol, "tf": last_sig["tf"], "direction": direction, "price": last_sig["price"], "sl": sl_price, "type": "standard"})
 
-    # --- 2. KATMAN: 30M KISA VADE (EMA 13-34 SAF SİSTEM) ---
+    # --- 2. KATMAN: 30M KISA VADE ---
     df_30m = dfs.get("30m")
     if df_30m is not None and len(df_30m) > KV_EMA_SLOW + 10:
         df_30m = df_30m.copy()
@@ -307,30 +310,51 @@ def process_signals(symbol, dfs):
             msg = f"⚡ <b>30M KISA VADE SİNYALİ (SHORT)</b>\n🔴 <b>{symbol}</b> — SHORT [30M] ✅ PSAR & 4H EMA50 ONAYLI\n\n💰 <b>Giriş Fiyatı:</b> {close_price:,.2f}\n🛑 <b>İlk Stop:</b> {sl_price:,.2f} (3 ATR)\n🎯 <b>1. Hedef (TP1):</b> {tp_price:,.2f} (%{KV_TP1_PCT} Kâr)\n💡 <b>Çıkış:</b> TP1'de yarısını kapat, stopu maliyete çek, kalanı 30m EMA50 ile takip et."
             msgs.append({"text": msg, "df": df_30m, "symbol": symbol, "tf": "30m", "direction": "SHORT", "price": close_price, "sl": sl_price, "tp": tp_price, "atr": atr, "type": "kisa_vade"})
 
-    # --- 3. KATMAN: SADECE RSI UYARISI MESAJLARI ---
-    for direction, sig_list in [("SHORT", rsi_alerts["SHORT"]), ("LONG", rsi_alerts["LONG"])]:
+    # --- RSI BÜYÜSÜ MESAJLARI ---
+    
+    # A) İlk Uyarı
+    for direction, sig_list in [("SHORT", rsi_alerts_instant["SHORT"]), ("LONG", rsi_alerts_instant["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
         
         if direction == "SHORT":
-            msg = f"⚠️ <b>{symbol}</b> — SADECE RSI UYARISI [{last_sig['tf'].upper()}]\n"
-            msg += f"RSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f}\n"
-            msg += f"🔴 <b>Short denenebilir.</b> (Grafiği kontrol edin)\n"
-            msg += f"📈 <b>Zirve RSI:</b> {last_sig['peak_rsi']:.1f} (O anki Fiyat: {last_sig['peak_price']:,.2f})\n"
-            msg += f"🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 0.97:,.2f} (%3)\n"
+            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n"
+            msg += f"⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\n"
+            msg += f"RSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Alım)\n"
+            msg += f"👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
         else:
-            msg = f"⚠️ <b>{symbol}</b> — SADECE RSI UYARISI [{last_sig['tf'].upper()}]\n"
-            msg += f"RSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f}\n"
-            msg += f"🟢 <b>Long denenebilir.</b> (Grafiği kontrol edin)\n"
-            msg += f"📉 <b>Dip RSI:</b> {last_sig['low_rsi']:.1f} (O anki Fiyat: {last_sig['low_price']:,.2f})\n"
-            msg += f"🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 1.03:,.2f} (%3)\n"
+            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n"
+            msg += f"⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\n"
+            msg += f"RSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Satım)\n"
+            msg += f"👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
             
-        msg += f"<i>(Stop yoktur, manuel değerlendirme)</i>"
-        msgs.append({"text": msg, "df": None, "symbol": symbol, "tf": None, "type": "alert"})
+        msgs.append({"text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'], "type": "alert_instant", "direction": direction})
+
+    # B) Teyitli Sinyal
+    for direction, sig_list in [("SHORT", rsi_alerts_confirmed["SHORT"]), ("LONG", rsi_alerts_confirmed["LONG"])]:
+        if not sig_list: continue
+        last_sig = sig_list[-1]
+        
+        if direction == "SHORT":
+            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n"
+            msg += f"🎯 <b>TEYİTLİ SİNYAL (Short) - {symbol}</b>\n"
+            msg += f"RSI 8 zirveyi ({last_sig['peak_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine geri çekildi.\n"
+            msg += f"📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n"
+            msg += f"🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 0.97:,.2f} (%3)\n"
+            msg += f"👉 <b>Short denenebilir. Grafiği kontrol edin.</b>"
+        else:
+            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n"
+            msg += f"🎯 <b>TEYİTLİ SİNYAL (Long) - {symbol}</b>\n"
+            msg += f"RSI 8 dibi ({last_sig['low_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine yükseldi.\n"
+            msg += f"📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n"
+            msg += f"🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 1.03:,.2f} (%3)\n"
+            msg += f"👉 <b>Long denenebilir. Grafiği kontrol edin.</b>"
+            
+        msgs.append({"text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'], "type": "alert_confirmed", "direction": direction, "ref_tf": last_sig['tf']})
 
     return msgs
 
-# --- İŞLEM TAKİP SİSTEMİ (ÇOKLU KULLANICI DESTEKLİ) ---
+# --- İŞLEM TAKİP SİSTEMİ ---
 async def check_active_trades():
     global active_trades
     if not active_trades: return
@@ -406,7 +430,8 @@ async def send_signal_message(msg_data):
     text = msg_data["text"]
     df = msg_data["df"]
     symbol = msg_data["symbol"]
-    tf = msg_data["tf"]
+    tf = msg_data.get("tf")
+    msg_type = msg_data["type"]
     
     buf = None
     if df is not None:
@@ -415,29 +440,50 @@ async def send_signal_message(msg_data):
     msg_ids = {}
     for cid in CHAT_IDS:
         try:
+            reply_to = None
+            if msg_type == "alert_confirmed":
+                key = f"{symbol}_{msg_data.get('ref_tf')}"
+                if key in last_rsi_alert_msgs and str(cid) in last_rsi_alert_msgs[key]:
+                    reply_to = last_rsi_alert_msgs[key][str(cid)]
+
+            if buf:
+                buf.seek(0) 
+                sent = await bot_app.bot.send_photo(chat_id=cid, photo=buf, caption=text, parse_mode="HTML", reply_to_message_id=reply_to)
+            else:
+                sent = await bot_app.bot.send_message(chat_id=cid, text=text, parse_mode="HTML", reply_to_message_id=reply_to)
+            
+            if msg_type == "alert_instant":
+                key = f"{symbol}_{tf}"
+                if key not in last_rsi_alert_msgs:
+                    last_rsi_alert_msgs[key] = {}
+                last_rsi_alert_msgs[key][str(cid)] = sent.message_id
+
+            if "direction" in msg_data and msg_type in ["standard", "kisa_vade"]:
+                msg_ids[str(cid)] = sent.message_id
+                
+        except Exception as e:
             if buf:
                 buf.seek(0) 
                 sent = await bot_app.bot.send_photo(chat_id=cid, photo=buf, caption=text, parse_mode="HTML")
             else:
                 sent = await bot_app.bot.send_message(chat_id=cid, text=text, parse_mode="HTML")
-            msg_ids[str(cid)] = sent.message_id
-        except Exception as e:
-            pass
+            if "direction" in msg_data and msg_type in ["standard", "kisa_vade"]:
+                msg_ids[str(cid)] = sent.message_id
     
-    if "direction" in msg_data and msg_data["type"] in ["standard", "kisa_vade"]:
-        trade_key = f"{symbol}_{msg_data['direction']}_{msg_data['type']}"
+    if "direction" in msg_data and msg_type in ["standard", "kisa_vade"]:
+        trade_key = f"{symbol}_{msg_data['direction']}_{msg_type}"
         trade_info = {
             "symbol": symbol, "type": msg_data["direction"], "entry": msg_data["price"], 
             "msg_ids": msg_ids,
-            "signal_type": msg_data["type"],
+            "signal_type": msg_type,
             "hit_3pct": False, "tp_hit": False, "sl": msg_data.get("sl")
         }
-        if msg_data["type"] == "kisa_vade":
+        if msg_type == "kisa_vade":
             trade_info["tp"] = msg_data.get("tp")
         active_trades[trade_key] = trade_info
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE): 
-    await update.message.reply_text("✅ Sistem güncellendi. RSI Zirve/Dip fiyat bilgileri eklendi.")
+    await update.message.reply_text("✅ Sistem güncellendi. 'RSI Büyüsü' başlığı eklendi.")
 
 bot_app.add_handler(CommandHandler("start", cmd_start))
 
