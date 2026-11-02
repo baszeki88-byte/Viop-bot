@@ -15,7 +15,7 @@ import pytz
 import holidays
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -262,7 +262,7 @@ def process_signals(symbol, dfs):
             elif r_now > ALARM_SHORT_UPPER:
                 rsi_alarm_states[alarm_key] = {"state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": close_price, "low_rsi": 100, "low_price": 0}
 
-    # Sniper ve Standart Mesajları
+    # Mesaj oluşturma kısımları (Aynı kaldı)
     for direction, sig_list, title, emoji in [
         ("SHORT", sniper_signals["SHORT"], "🔥🎯 KESKİN NİŞANCI SİNYALİ", "🔴"),
         ("LONG", sniper_signals["LONG"], "🔥🎯 KESKİN NİŞANCI SİNYALİ", "🟢"),
@@ -278,7 +278,6 @@ def process_signals(symbol, dfs):
         msg += f"💡 <b>Strateji:</b> %3 kârda yarısını kapat, kalanı 30m EMA50 ile takip et."
         msgs.append({"text": msg, "df": last_sig["df"], "symbol": symbol, "tf": last_sig["tf"], "direction": direction, "price": last_sig["price"], "sl": sl_price, "type": "standard"})
 
-    # --- 2. KATMAN: 30M KISA VADE ---
     df_30m = dfs.get("30m")
     if df_30m is not None and len(df_30m) > KV_EMA_SLOW + 10:
         df_30m = df_30m.copy()
@@ -288,11 +287,9 @@ def process_signals(symbol, dfs):
         df_30m = calculate_psar(df_30m)
         
         trend_4h_50 = get_ema_trend(dfs.get("4h"), 50)
-        
         i = len(df_30m) - 1
         cross_up = (df_30m['ema_fast'].iloc[i-1] <= df_30m['ema_slow'].iloc[i-1]) and (df_30m['ema_fast'].iloc[i] > df_30m['ema_slow'].iloc[i])
         cross_down = (df_30m['ema_fast'].iloc[i-1] >= df_30m['ema_slow'].iloc[i-1]) and (df_30m['ema_fast'].iloc[i] < df_30m['ema_slow'].iloc[i])
-        
         atr = calculate_atr(df_30m, 10)
         close_price = float(df_30m['close'].iloc[i])
         
@@ -310,49 +307,85 @@ def process_signals(symbol, dfs):
             msg = f"⚡ <b>30M KISA VADE SİNYALİ (SHORT)</b>\n🔴 <b>{symbol}</b> — SHORT [30M] ✅ PSAR & 4H EMA50 ONAYLI\n\n💰 <b>Giriş Fiyatı:</b> {close_price:,.2f}\n🛑 <b>İlk Stop:</b> {sl_price:,.2f} (3 ATR)\n🎯 <b>1. Hedef (TP1):</b> {tp_price:,.2f} (%{KV_TP1_PCT} Kâr)\n💡 <b>Çıkış:</b> TP1'de yarısını kapat, stopu maliyete çek, kalanı 30m EMA50 ile takip et."
             msgs.append({"text": msg, "df": df_30m, "symbol": symbol, "tf": "30m", "direction": "SHORT", "price": close_price, "sl": sl_price, "tp": tp_price, "atr": atr, "type": "kisa_vade"})
 
-    # --- RSI BÜYÜSÜ MESAJLARI ---
-    
-    # A) İlk Uyarı
     for direction, sig_list in [("SHORT", rsi_alerts_instant["SHORT"]), ("LONG", rsi_alerts_instant["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
-        
         if direction == "SHORT":
-            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n"
-            msg += f"⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\n"
-            msg += f"RSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Alım)\n"
-            msg += f"👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
+            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Alım)\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
         else:
-            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n"
-            msg += f"⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\n"
-            msg += f"RSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Satım)\n"
-            msg += f"👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
-            
+            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Satım)\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
         msgs.append({"text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'], "type": "alert_instant", "direction": direction})
 
-    # B) Teyitli Sinyal
     for direction, sig_list in [("SHORT", rsi_alerts_confirmed["SHORT"]), ("LONG", rsi_alerts_confirmed["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
-        
         if direction == "SHORT":
-            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n"
-            msg += f"🎯 <b>TEYİTLİ SİNYAL (Short) - {symbol}</b>\n"
-            msg += f"RSI 8 zirveyi ({last_sig['peak_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine geri çekildi.\n"
-            msg += f"📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n"
-            msg += f"🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 0.97:,.2f} (%3)\n"
-            msg += f"👉 <b>Short denenebilir. Grafiği kontrol edin.</b>"
+            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Short) - {symbol}</b>\nRSI 8 zirveyi ({last_sig['peak_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine geri çekildi.\n📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 0.97:,.2f} (%3)\n👉 <b>Short denenebilir. Grafiği kontrol edin.</b>"
         else:
-            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n"
-            msg += f"🎯 <b>TEYİTLİ SİNYAL (Long) - {symbol}</b>\n"
-            msg += f"RSI 8 dibi ({last_sig['low_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine yükseldi.\n"
-            msg += f"📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n"
-            msg += f"🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 1.03:,.2f} (%3)\n"
-            msg += f"👉 <b>Long denenebilir. Grafiği kontrol edin.</b>"
-            
+            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Long) - {symbol}</b>\nRSI 8 dibi ({last_sig['low_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine yükseldi.\n📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 1.03:,.2f} (%3)\n👉 <b>Long denenebilir. Grafiği kontrol edin.</b>"
         msgs.append({"text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'], "type": "alert_confirmed", "direction": direction, "ref_tf": last_sig['tf']})
 
     return msgs
+
+# --- KOMUT İLE HİSSE ANALİZİ FONKSİYONU ---
+async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # Gelen mesajın metnini al (örn: "/ASELS" veya "ASELS")
+    text = update.message.text.upper().replace("/", "").strip()
+    
+    if text not in SYMBOLS:
+        await update.message.reply_text(f"❌ '{text}' tarama listesinde bulunamadı. Lütfen geçerli bir sembol girin (Örn: /ASELS).")
+        return
+        
+    await update.message.reply_text(f"🔍 {text} analiz ediliyor, lütfen bekleyin...")
+    
+    try:
+        # Verileri çek
+        df_1h = fetch_ohlc(text, "1h", limit=250)
+        df_4h = fetch_ohlc(text, "4h", limit=250)
+        df_1d = fetch_ohlc(text, "1d", limit=250)
+        
+        if df_1h is None or df_4h is None:
+            await update.message.reply_text("❌ Veri çekilemedi.")
+            return
+            
+        msg = f"🤖 <b>{text} — Kapsamlı Analiz</b>\n"
+        
+        # 1H Analizi
+        rsi_1h = get_rsi(df_1h['close'], RSI_PERIOD).iloc[-1]
+        ema50_1h = df_1h['close'].ewm(span=50).mean().iloc[-1]
+        ema200_1h = df_1h['close'].ewm(span=200).mean().iloc[-1]
+        price = df_1h['close'].iloc[-1]
+        trend_1h = "🟢 Yukarı" if price > ema200_1h else "🔴 Aşağı"
+        
+        msg += f"\n📊 <b>1 Saatlik (1H)</b>\n"
+        msg += f"• Fiyat: {price:,.2f}\n"
+        msg += f"• RSI(8): {rsi_1h:.1f}\n"
+        msg += f"• Trend: {trend_1h} (EMA 200)\n"
+        
+        # 4H Analizi
+        rsi_4h = get_rsi(df_4h['close'], RSI_PERIOD).iloc[-1]
+        ema200_4h = df_4h['close'].ewm(span=200).mean().iloc[-1]
+        trend_4h = "🟢 Yukarı" if price > ema200_4h else "🔴 Aşağı"
+        
+        msg += f"\n📊 <b>4 Saatlik (4H)</b>\n"
+        msg += f"• RSI(8): {rsi_4h:.1f}\n"
+        msg += f"• Trend: {trend_4h} (EMA 200)\n"
+        
+        # 1D Analizi
+        if df_1d is not None:
+            rsi_1d = get_rsi(df_1d['close'], 14).iloc[-1] # Günlükte RSI 14 daha standart
+            msg += f"\n📊 <b>Günlük (1D)</b>\n"
+            msg += f"• RSI(14): {rsi_1d:.1f}\n"
+            
+        msg += f"\n💡 <b>Yorum:</b> RSI 1H'de {rsi_1h:.1f}, 4H'de {rsi_4h:.1f} seviyesinde. "
+        if rsi_1h > 70: msg += "1H'de aşırı alım bölgesinde, kısa vadeli düzeltme gelebilir."
+        elif rsi_1h < 30: msg += "1H'de aşırı satım bölgesinde, tepki yükselişi gelebilir."
+        else: msg += "RSI değerleri normal seyrinde."
+        
+        await update.message.reply_text(msg, parse_mode="HTML")
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Analiz hatası: {e}")
 
 # --- İŞLEM TAKİP SİSTEMİ ---
 async def check_active_trades():
@@ -483,9 +516,15 @@ async def send_signal_message(msg_data):
         active_trades[trade_key] = trade_info
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE): 
-    await update.message.reply_text("✅ Sistem güncellendi. 'RSI Büyüsü' başlığı eklendi.")
+    await update.message.reply_text("✅ Sistem çalışıyor. Analiz için /ASELS gibi komut yazabilirsiniz.")
 
+# Komutları ve Dinleyicileri Ekle
 bot_app.add_handler(CommandHandler("start", cmd_start))
+# /ASELS, /THYAO gibi tüm mesajları dinle
+bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyze_symbol))
+# Eğik çizgi ile başlayan ama /start olmayan dinamik komutları da dinle
+bot_app.add_handler(MessageHandler(filters.COMMAND & ~filters.Regex(r'^/start$'), analyze_symbol))
+
 
 async def tick(force=False):
     if not force and not is_market_open(): return
