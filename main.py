@@ -27,7 +27,6 @@ CHAT_IDS = [5066109900, 8776376951]
 
 TIMEZONE = pytz.timezone("Europe/Istanbul")
 
-# Yeni semboller eklendi
 SYMBOLS = [
     "TOASO", "TRALT", "ASTOR", "GUBRF", "TRMET", "TCELL", "GARAN", "YKBNK", "TAVHL", "ENKAI",
     "TTKOM", "SAHOL", "SASA", "AEFES", "ASELS", "MGROS", "TUPRS", "AKBNK", "KCHOL", "KRDMD",
@@ -63,6 +62,7 @@ KV_EMA_FAST = 13
 KV_EMA_SLOW = 34
 
 active_trades = {}
+# State Machine hafızası artık hem durumu hem de zirve/dip bilgilerini tutacak
 rsi_alarm_states = {}
 # ==========================================
 
@@ -217,27 +217,47 @@ def process_signals(symbol, dfs):
 
         # --- 3. KATMAN: SMA'SIZ SAF STATE MACHINE (81-65 / 25-45) ---
         alarm_key = f"{symbol}_{tf}"
-        alarm_state = rsi_alarm_states.get(alarm_key, "IDLE")
+        if alarm_key not in rsi_alarm_states:
+            rsi_alarm_states[alarm_key] = {"state": "IDLE", "peak_rsi": 0, "peak_price": 0, "low_rsi": 100, "low_price": 0}
+            
+        alarm_data = rsi_alarm_states[alarm_key]
+        state = alarm_data["state"]
         
-        if alarm_state == "IDLE":
+        if state == "IDLE":
             if r_now > ALARM_SHORT_UPPER:
-                rsi_alarm_states[alarm_key] = "SHORT_ARMED"
+                rsi_alarm_states[alarm_key] = {"state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": close_price, "low_rsi": 100, "low_price": 0}
             elif r_now < ALARM_LONG_LOWER:
-                rsi_alarm_states[alarm_key] = "LONG_ARMED"
+                rsi_alarm_states[alarm_key] = {"state": "LONG_ARMED", "peak_rsi": 0, "peak_price": 0, "low_rsi": r_now, "low_price": close_price}
                 
-        elif alarm_state == "SHORT_ARMED":
+        elif state == "SHORT_ARMED":
+            # Zirveyi güncelle
+            if r_now > alarm_data["peak_rsi"]:
+                alarm_data["peak_rsi"] = r_now
+                alarm_data["peak_price"] = close_price
+                
             if r_now <= ALARM_SHORT_LOWER:
-                rsi_alerts["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
-                rsi_alarm_states[alarm_key] = "IDLE"
+                rsi_alerts["SHORT"].append({
+                    "tf": tf, "prev": r_prev, "now": r_now, "price": close_price,
+                    "peak_rsi": alarm_data["peak_rsi"], "peak_price": alarm_data["peak_price"]
+                })
+                rsi_alarm_states[alarm_key]["state"] = "IDLE"
             elif r_now < ALARM_LONG_LOWER:
-                rsi_alarm_states[alarm_key] = "LONG_ARMED"
+                rsi_alarm_states[alarm_key] = {"state": "LONG_ARMED", "peak_rsi": 0, "peak_price": 0, "low_rsi": r_now, "low_price": close_price}
                 
-        elif alarm_state == "LONG_ARMED":
+        elif state == "LONG_ARMED":
+            # Dibi güncelle
+            if r_now < alarm_data["low_rsi"]:
+                alarm_data["low_rsi"] = r_now
+                alarm_data["low_price"] = close_price
+                
             if r_now >= ALARM_LONG_UPPER:
-                rsi_alerts["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
-                rsi_alarm_states[alarm_key] = "IDLE"
+                rsi_alerts["LONG"].append({
+                    "tf": tf, "prev": r_prev, "now": r_now, "price": close_price,
+                    "low_rsi": alarm_data["low_rsi"], "low_price": alarm_data["low_price"]
+                })
+                rsi_alarm_states[alarm_key]["state"] = "IDLE"
             elif r_now > ALARM_SHORT_UPPER:
-                rsi_alarm_states[alarm_key] = "SHORT_ARMED"
+                rsi_alarm_states[alarm_key] = {"state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": close_price, "low_rsi": 100, "low_price": 0}
 
     # Sniper ve Standart Mesajları
     for direction, sig_list, title, emoji in [
@@ -296,11 +316,13 @@ def process_signals(symbol, dfs):
             msg = f"⚠️ <b>{symbol}</b> — SADECE RSI UYARISI [{last_sig['tf'].upper()}]\n"
             msg += f"RSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f}\n"
             msg += f"🔴 <b>Short denenebilir.</b> (Grafiği kontrol edin)\n"
+            msg += f"📈 <b>Zirve RSI:</b> {last_sig['peak_rsi']:.1f} (O anki Fiyat: {last_sig['peak_price']:,.2f})\n"
             msg += f"🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 0.97:,.2f} (%3)\n"
         else:
             msg = f"⚠️ <b>{symbol}</b> — SADECE RSI UYARISI [{last_sig['tf'].upper()}]\n"
             msg += f"RSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f}\n"
             msg += f"🟢 <b>Long denenebilir.</b> (Grafiği kontrol edin)\n"
+            msg += f"📉 <b>Dip RSI:</b> {last_sig['low_rsi']:.1f} (O anki Fiyat: {last_sig['low_price']:,.2f})\n"
             msg += f"🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 1.03:,.2f} (%3)\n"
             
         msg += f"<i>(Stop yoktur, manuel değerlendirme)</i>"
@@ -415,7 +437,7 @@ async def send_signal_message(msg_data):
         active_trades[trade_key] = trade_info
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE): 
-    await update.message.reply_text("✅ Sistem güncellendi. Yeni semboller ve %3 TP uyarıları aktif.")
+    await update.message.reply_text("✅ Sistem güncellendi. RSI Zirve/Dip fiyat bilgileri eklendi.")
 
 bot_app.add_handler(CommandHandler("start", cmd_start))
 
