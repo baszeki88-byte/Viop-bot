@@ -83,7 +83,7 @@ KV_EMA_SLOW = 34
 active_trades = {}
 rsi_alarm_states = {}
 last_rsi_alert_msgs = {} 
-earnings_cache = {} # Bilanço bilgilerini tutacağımız hafıza
+earnings_cache = {} 
 # ==========================================
 
 def is_market_open(now=None):
@@ -93,12 +93,10 @@ def is_market_open(now=None):
     if now.date() in tr_holidays: return False
     return time(9, 55) <= now.time() <= time(18, 0)
 
-# --- YENİ: BİLANÇO TARİHİ KONTROLÜ ---
 def get_earnings_note(symbol):
     today = datetime.now(TIMEZONE).date()
     cache_key = f"{symbol}_{today}"
     
-    # Eğer bugün bu hisse için zaten sorgulama yaptıysak hafızadan dön
     if cache_key in earnings_cache:
         return earnings_cache[cache_key]
         
@@ -119,7 +117,6 @@ def get_earnings_note(symbol):
             
         days_left = (earnings_date.date() - today).days
         
-        # Bilançoya 5 gün veya daha az kaldıysa not oluştur
         if 0 <= days_left <= 5:
             note = f"\n📅 <b>Bilanço Uyarısı:</b> Bilançoya {days_left} gün kaldı! (Dikkatli olun)"
             earnings_cache[cache_key] = note
@@ -253,7 +250,6 @@ def process_signals(symbol, dfs):
         
         close_price = float(df["close"].iloc[-1])
         
-        # --- 1. KATMAN: SNIPER & STANDART ---
         st = states.setdefault((symbol, tf), {"state": State.IDLE, "last_bar": None})
         bar_time = df.index[-1]
         if st["last_bar"] != bar_time:
@@ -271,13 +267,11 @@ def process_signals(symbol, dfs):
                 st["state"] = State.LONG
             st["last_bar"] = bar_time
 
-        # --- 2. KATMAN: ANINDA RSI UYARISI (İlk uyarı 81/25) ---
         if r_prev <= INSTANT_SHORT < r_now:
             rsi_alerts_instant["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
         elif r_prev >= INSTANT_LONG > r_now:
             rsi_alerts_instant["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
 
-        # --- 3. KATMAN: TEYİTLİ RSI UYARISI (State Machine) ---
         alarm_key = f"{symbol}_{tf}"
         if alarm_key not in rsi_alarm_states:
             rsi_alarm_states[alarm_key] = {"state": "IDLE", "peak_rsi": 0, "peak_price": 0, "low_rsi": 100, "low_price": 0}
@@ -317,6 +311,7 @@ def process_signals(symbol, dfs):
             elif r_now > ALARM_SHORT_UPPER:
                 rsi_alarm_states[alarm_key] = {"state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": close_price, "low_rsi": 100, "low_price": 0}
 
+    # Sniper ve Standart Mesajları
     for direction, sig_list, title, emoji in [
         ("SHORT", sniper_signals["SHORT"], "🔥🎯 KESKİN NİŞANCI SİNYALİ", "🔴"),
         ("LONG", sniper_signals["LONG"], "🔥🎯 KESKİN NİŞANCI SİNYALİ", "🟢"),
@@ -361,34 +356,46 @@ def process_signals(symbol, dfs):
             msg = f"⚡ <b>30M KISA VADE SİNYALİ (SHORT)</b>\n🔴 <b>{symbol}</b> — SHORT [30M] ✅ PSAR & 4H EMA50 ONAYLI\n\n💰 <b>Giriş Fiyatı:</b> {close_price:,.2f}\n🛑 <b>İlk Stop:</b> {sl_price:,.2f} (3 ATR)\n🎯 <b>1. Hedef (TP1):</b> {tp_price:,.2f} (%{KV_TP1_PCT} Kâr)\n💡 <b>Çıkış:</b> TP1'de yarısını kapat, stopu maliyete çek, kalanı 30m EMA50 ile takip et."
             msgs.append({"text": msg, "df": df_30m, "symbol": symbol, "tf": "30m", "direction": "SHORT", "price": close_price, "sl": sl_price, "tp": tp_price, "atr": atr, "type": "kisa_vade"})
 
-    # RSI BÜYÜSÜ İLK UYARI (Bilanço notu eklendi)
+    # --- RSI BÜYÜSÜ: İLK UYARI (Confluence Kontrolü Eklendi) ---
     for direction, sig_list in [("SHORT", rsi_alerts_instant["SHORT"]), ("LONG", rsi_alerts_instant["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
         
+        # 1H ve 4H uyum kontrolü
+        tfs = [s["tf"] for s in sig_list]
+        is_confluence = ("1h" in tfs and "4h" in tfs)
+        confluence_icon = "🔥🔥 <b>[1H + 4H UYUMU]</b> 🔥🔥\n" if is_confluence else ""
+        
         earnings_note = get_earnings_note(symbol)
         
         if direction == "SHORT":
-            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Alım)\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
+            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n{confluence_icon}⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Alım)\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
         else:
-            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Satım)\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
+            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n{confluence_icon}⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Satım)\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
         
         msg += earnings_note
         msgs.append({"text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'], "type": "alert_instant", "direction": direction})
 
-    # RSI BÜYÜSÜ TEYİTLİ UYARI
+    # --- RSI BÜYÜSÜ: TEYİTLİ UYARI (Confluence Kontrolü Eklendi) ---
     for direction, sig_list in [("SHORT", rsi_alerts_confirmed["SHORT"]), ("LONG", rsi_alerts_confirmed["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
+        
+        # 1H ve 4H uyum kontrolü
+        tfs = [s["tf"] for s in sig_list]
+        is_confluence = ("1h" in tfs and "4h" in tfs)
+        confluence_icon = "🔥🔥 <b>[1H + 4H UYUMU]</b> 🔥🔥\n" if is_confluence else ""
+        
         if direction == "SHORT":
-            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Short) - {symbol}</b>\nRSI 8 zirveyi ({last_sig['peak_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine geri çekildi.\n📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 0.97:,.2f} (%3)\n👉 <b>Short denenebilir. Grafiği kontrol edin.</b>"
+            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n{confluence_icon}🎯 <b>TEYİTLİ SİNYAL (Short) - {symbol}</b>\nRSI 8 zirveyi ({last_sig['peak_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine geri çekildi.\n📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 0.97:,.2f} (%3)\n👉 <b>Short denenebilir. Grafiği kontrol edin.</b>"
         else:
-            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Long) - {symbol}</b>\nRSI 8 dibi ({last_sig['low_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine yükseldi.\n📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 1.03:,.2f} (%3)\n👉 <b>Long denenebilir. Grafiği kontrol edin.</b>"
+            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n{confluence_icon}🎯 <b>TEYİTLİ SİNYAL (Long) - {symbol}</b>\nRSI 8 dibi ({last_sig['low_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine yükseldi.\n📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 1.03:,.2f} (%3)\n👉 <b>Long denenebilir. Grafiği kontrol edin.</b>"
+        
         msgs.append({"text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'], "type": "alert_confirmed", "direction": direction, "ref_tf": last_sig['tf']})
 
     return msgs
 
-# --- PİYASA ÖZETİ FONKSİYONU (SEKTÖR ANALİZLİ) ---
+# --- PİYASA ÖZETİ FONKSİYONU ---
 async def generate_market_summary(session_name):
     try:
         df_30m = fetch_ohlc("XU030", "30m", limit=250)
@@ -448,7 +455,6 @@ async def generate_market_summary(session_name):
         else:
             vol_status = "⚪ Normal Seviyede"
 
-        # --- HİSSE BAZLI DEĞİŞİM VE SEKTÖR ANALİZİ ---
         stock_changes = {}
         green_count = 0
         red_count = 0
