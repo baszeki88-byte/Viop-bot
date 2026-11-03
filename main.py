@@ -65,13 +65,15 @@ RSI_PERIOD = 8
 RSI_SHORT_STD = 75
 RSI_LONG_STD = 25
 
-INSTANT_SHORT = 81
-INSTANT_LONG = 25
+INSTANT_SHORT = 80
+INSTANT_LONG = 20
 
-ALARM_SHORT_UPPER = 81
+ALARM_SHORT_UPPER = 80
 ALARM_SHORT_LOWER = 65
-ALARM_LONG_LOWER = 25
+ALARM_LONG_LOWER = 20
 ALARM_LONG_UPPER = 45
+
+ALARM_ATR_DROP = 2.0
 
 EMA_PERIOD = 200
 SL_MULTIPLIER = 1.5
@@ -86,7 +88,7 @@ KV_SL_MULT = 3.0
 KV_EMA_FAST = 13
 KV_EMA_SLOW = 34
 
-# --- RSI BÜYÜSÜ H1 STRATEJİSİ ---
+# --- RSI BÜYÜSÜ H1 ---
 RB_SL_ATR_MULT = 2.5
 RB_TP1_PCT = 1.5
 RB_TP2_PCT = 3.0
@@ -99,7 +101,9 @@ MACD_SIGNAL = 9
 
 active_trades = {}
 rsi_alarm_states = {}
+atr_dunyasi_states = {}   # YENİ
 last_rsi_alert_msgs = {}
+last_atr_dunyasi_msgs = {}  # YENİ
 earnings_cache = {}
 # ==========================================
 
@@ -143,7 +147,6 @@ def get_earnings_note(symbol):
 
 
 def get_symbol_trend_label(direction, df_1h, df_4h):
-    """Sinyalin geldiği hissenin 1H ve 4H EMA200 trendini döner."""
     trend_1h = get_ema_trend(df_1h, EMA_PERIOD) if df_1h is not None else 0
     trend_4h = get_ema_trend(df_4h, EMA_PERIOD) if df_4h is not None else 0
 
@@ -157,7 +160,7 @@ def get_symbol_trend_label(direction, df_1h, df_4h):
             status = "⚠️ <b>Kısmi Uyum</b> (Tek TF düşüşte)"
         else:
             status = "❌ <b>Trend Uyumsuz</b> (Yükseliş Trendinde SHORT)"
-    else:  # LONG
+    else:
         if trend_1h == 1 and trend_4h == 1:
             status = "✅ <b>Tam Uyumlu</b> (Güçlü Yükseliş Trendi)"
         elif trend_1h == 1 or trend_4h == 1:
@@ -306,6 +309,7 @@ def process_signals(symbol, dfs):
     standard_signals = {"LONG": [], "SHORT": []}
     rsi_alerts_instant = {"LONG": [], "SHORT": []}
     rsi_alerts_confirmed = {"LONG": [], "SHORT": []}
+    atr_dunyasi_signals = {"LONG": [], "SHORT": []}  # YENİ
 
     for tf in TIME_FRAMES:
         df = dfs.get(tf)
@@ -339,33 +343,45 @@ def process_signals(symbol, dfs):
                 st["state"] = State.LONG
             st["last_bar"] = bar_time
 
+        # İLK UYARI
         if r_prev <= INSTANT_SHORT < r_now:
             rsi_alerts_instant["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
         elif r_prev >= INSTANT_LONG > r_now:
             rsi_alerts_instant["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
 
+        # === RSI BÜYÜSÜ (ARMED + ATR 2.0 teyit) ===
         alarm_key = f"{symbol}_{tf}"
         if alarm_key not in rsi_alarm_states:
-            rsi_alarm_states[alarm_key] = {"state": "IDLE", "peak_rsi": 0, "peak_price": 0,
-                                           "low_rsi": 100, "low_price": 0}
+            rsi_alarm_states[alarm_key] = {
+                "state": "IDLE", "peak_rsi": 0, "peak_price": 0,
+                "low_rsi": 100, "low_price": 0,
+                "last_bar": None, "reject_count": 0
+            }
 
         alarm_data = rsi_alarm_states[alarm_key]
-        state = alarm_data["state"]
+        if alarm_data.get("last_bar") != df.index[-1]:
+            alarm_data["last_bar"] = df.index[-1]
+            state = alarm_data["state"]
 
-        if state == "IDLE":
-            if r_now > ALARM_SHORT_UPPER:
-                rsi_alarm_states[alarm_key] = {"state": "SHORT_ARMED", "peak_rsi": r_now,
-                                                "peak_price": close_price, "low_rsi": 100, "low_price": 0}
-            elif r_now < ALARM_LONG_LOWER:
-                rsi_alarm_states[alarm_key] = {"state": "LONG_ARMED", "peak_rsi": 0,
-                                                "peak_price": 0, "low_rsi": r_now, "low_price": close_price}
+            if state == "IDLE":
+                if r_now > ALARM_SHORT_UPPER:
+                    rsi_alarm_states[alarm_key] = {
+                        "state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": close_price,
+                        "low_rsi": 100, "low_price": 0,
+                        "last_bar": df.index[-1], "reject_count": 0
+                    }
+                elif r_now < ALARM_LONG_LOWER:
+                    rsi_alarm_states[alarm_key] = {
+                        "state": "LONG_ARMED", "peak_rsi": 0, "peak_price": 0,
+                        "low_rsi": r_now, "low_price": close_price,
+                        "last_bar": df.index[-1], "reject_count": 0
+                    }
 
-        elif state == "SHORT_ARMED":
-            if r_now > alarm_data["peak_rsi"]:
-                alarm_data["peak_rsi"] = r_now
-                alarm_data["peak_price"] = close_price
-            if r_now <= ALARM_SHORT_LOWER:
-                price_ok = (alarm_data["peak_price"] - close_price) >= atr * 0.5
+            elif state == "SHORT_ARMED":
+                if r_now > alarm_data["peak_rsi"]:
+                    alarm_data["peak_rsi"] = r_now
+                    alarm_data["peak_price"] = close_price
+                price_ok = (alarm_data["peak_price"] - close_price) >= atr * ALARM_ATR_DROP
                 candle_ok = close_price < float(df['open'].iloc[-1])
                 macd_ok = macd_now < macd_sig_now
                 if price_ok and candle_ok and macd_ok:
@@ -377,18 +393,20 @@ def process_signals(symbol, dfs):
                     rsi_alarm_states[alarm_key]["state"] = "IDLE"
                 else:
                     alarm_data["reject_count"] = alarm_data.get("reject_count", 0) + 1
-                    if alarm_data["reject_count"] >= 5:
+                    if alarm_data["reject_count"] >= 10:
                         rsi_alarm_states[alarm_key]["state"] = "IDLE"
-            elif r_now < ALARM_LONG_LOWER:
-                rsi_alarm_states[alarm_key] = {"state": "LONG_ARMED", "peak_rsi": 0,
-                                                "peak_price": 0, "low_rsi": r_now, "low_price": close_price}
+                    elif r_now < ALARM_LONG_LOWER:
+                        rsi_alarm_states[alarm_key] = {
+                            "state": "LONG_ARMED", "peak_rsi": 0, "peak_price": 0,
+                            "low_rsi": r_now, "low_price": close_price,
+                            "last_bar": df.index[-1], "reject_count": 0
+                        }
 
-        elif state == "LONG_ARMED":
-            if r_now < alarm_data["low_rsi"]:
-                alarm_data["low_rsi"] = r_now
-                alarm_data["low_price"] = close_price
-            if r_now >= ALARM_LONG_UPPER:
-                price_ok = (close_price - alarm_data["low_price"]) >= atr * 0.5
+            elif state == "LONG_ARMED":
+                if r_now < alarm_data["low_rsi"]:
+                    alarm_data["low_rsi"] = r_now
+                    alarm_data["low_price"] = close_price
+                price_ok = (close_price - alarm_data["low_price"]) >= atr * ALARM_ATR_DROP
                 candle_ok = close_price > float(df['open'].iloc[-1])
                 macd_ok = macd_now > macd_sig_now
                 if price_ok and candle_ok and macd_ok:
@@ -400,11 +418,92 @@ def process_signals(symbol, dfs):
                     rsi_alarm_states[alarm_key]["state"] = "IDLE"
                 else:
                     alarm_data["reject_count"] = alarm_data.get("reject_count", 0) + 1
-                    if alarm_data["reject_count"] >= 5:
+                    if alarm_data["reject_count"] >= 10:
                         rsi_alarm_states[alarm_key]["state"] = "IDLE"
-            elif r_now > ALARM_SHORT_UPPER:
-                rsi_alarm_states[alarm_key] = {"state": "SHORT_ARMED", "peak_rsi": r_now,
-                                                "peak_price": close_price, "low_rsi": 100, "low_price": 0}
+                    elif r_now > ALARM_SHORT_UPPER:
+                        rsi_alarm_states[alarm_key] = {
+                            "state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": close_price,
+                            "low_rsi": 100, "low_price": 0,
+                            "last_bar": df.index[-1], "reject_count": 0
+                        }
+
+        # === YENİ: ATR DÜNYASI (bağımsız state machine) ===
+        atr_key = f"atr_{symbol}_{tf}"
+        if atr_key not in atr_dunyasi_states:
+            atr_dunyasi_states[atr_key] = {
+                "state": "IDLE", "peak_rsi": 0, "peak_price": 0,
+                "low_rsi": 100, "low_price": 0,
+                "last_bar": None, "reject_count": 0
+            }
+
+        atr_data = atr_dunyasi_states[atr_key]
+        if atr_data.get("last_bar") != df.index[-1]:
+            atr_data["last_bar"] = df.index[-1]
+            atr_state = atr_data["state"]
+
+            if atr_state == "IDLE":
+                if r_now > ALARM_SHORT_UPPER:
+                    atr_dunyasi_states[atr_key] = {
+                        "state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": close_price,
+                        "low_rsi": 100, "low_price": 0,
+                        "last_bar": df.index[-1], "reject_count": 0
+                    }
+                elif r_now < ALARM_LONG_LOWER:
+                    atr_dunyasi_states[atr_key] = {
+                        "state": "LONG_ARMED", "peak_rsi": 0, "peak_price": 0,
+                        "low_rsi": r_now, "low_price": close_price,
+                        "last_bar": df.index[-1], "reject_count": 0
+                    }
+
+            elif atr_state == "SHORT_ARMED":
+                if r_now > atr_data["peak_rsi"]:
+                    atr_data["peak_rsi"] = r_now
+                    atr_data["peak_price"] = close_price
+                price_ok = (atr_data["peak_price"] - close_price) >= atr * ALARM_ATR_DROP
+                candle_ok = close_price < float(df['open'].iloc[-1])
+                macd_ok = macd_now < macd_sig_now
+                if price_ok and candle_ok and macd_ok:
+                    atr_dunyasi_signals["SHORT"].append({
+                        "tf": tf, "now_rsi": r_now,
+                        "peak_rsi": atr_data["peak_rsi"], "peak_price": atr_data["peak_price"],
+                        "price": close_price, "atr": atr
+                    })
+                    atr_dunyasi_states[atr_key]["state"] = "IDLE"
+                else:
+                    atr_data["reject_count"] = atr_data.get("reject_count", 0) + 1
+                    if atr_data["reject_count"] >= 10:
+                        atr_dunyasi_states[atr_key]["state"] = "IDLE"
+                    elif r_now < ALARM_LONG_LOWER:
+                        atr_dunyasi_states[atr_key] = {
+                            "state": "LONG_ARMED", "peak_rsi": 0, "peak_price": 0,
+                            "low_rsi": r_now, "low_price": close_price,
+                            "last_bar": df.index[-1], "reject_count": 0
+                        }
+
+            elif atr_state == "LONG_ARMED":
+                if r_now < atr_data["low_rsi"]:
+                    atr_data["low_rsi"] = r_now
+                    atr_data["low_price"] = close_price
+                price_ok = (close_price - atr_data["low_price"]) >= atr * ALARM_ATR_DROP
+                candle_ok = close_price > float(df['open'].iloc[-1])
+                macd_ok = macd_now > macd_sig_now
+                if price_ok and candle_ok and macd_ok:
+                    atr_dunyasi_signals["LONG"].append({
+                        "tf": tf, "now_rsi": r_now,
+                        "low_rsi": atr_data["low_rsi"], "low_price": atr_data["low_price"],
+                        "price": close_price, "atr": atr
+                    })
+                    atr_dunyasi_states[atr_key]["state"] = "IDLE"
+                else:
+                    atr_data["reject_count"] = atr_data.get("reject_count", 0) + 1
+                    if atr_data["reject_count"] >= 10:
+                        atr_dunyasi_states[atr_key]["state"] = "IDLE"
+                    elif r_now > ALARM_SHORT_UPPER:
+                        atr_dunyasi_states[atr_key] = {
+                            "state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": close_price,
+                            "low_rsi": 100, "low_price": 0,
+                            "last_bar": df.index[-1], "reject_count": 0
+                        }
 
     # --- STANDART & NİŞANCI ---
     for direction, sig_list, title, emoji in [
@@ -423,7 +522,7 @@ def process_signals(symbol, dfs):
         msgs.append({"text": msg, "df": last_sig["df"], "symbol": symbol, "tf": last_sig["tf"],
                      "direction": direction, "price": last_sig["price"], "sl": sl_price, "type": "standard"})
 
-    # --- KISA VADE (30m) ---
+    # --- KISA VADE ---
     df_30m = dfs.get("30m")
     if df_30m is not None and len(df_30m) > KV_EMA_SLOW + 10:
         df_30m = df_30m.copy()
@@ -471,7 +570,7 @@ def process_signals(symbol, dfs):
         msgs.append({"text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'],
                      "type": "alert_instant", "direction": direction})
 
-    # --- RSI BÜYÜSÜ: TEYİTLİ (H1 STRATEJİSİ) ---
+    # --- RSI BÜYÜSÜ: TEYİTLİ ---
     for direction, sig_list in [("SHORT", rsi_alerts_confirmed["SHORT"]), ("LONG", rsi_alerts_confirmed["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
@@ -479,7 +578,6 @@ def process_signals(symbol, dfs):
         entry = last_sig['price']
         atr = last_sig.get('atr', 0)
 
-        # Hisse trendi + bilanço notu (yeni eklendi)
         trend_info = get_symbol_trend_label(direction, dfs.get("1h"), dfs.get("4h"))
         earnings_note = get_earnings_note(symbol)
 
@@ -490,8 +588,9 @@ def process_signals(symbol, dfs):
             sl_pct = ((sl - entry) / entry) * 100
 
             msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Short) - {symbol}</b>\n"
-            msg += f"RSI 8 zirveyi ({last_sig['peak_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine geri çekildi.\n"
-            msg += f"📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n\n"
+            msg += f"RSI 8 zirveyi ({last_sig['peak_rsi']:.1f}) gördü.\n"
+            msg += f"📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n"
+            msg += f"📉 <b>Zirveden Düşüş:</b> {((last_sig['peak_price'] - entry) / entry) * 100:.2f}% (≈ {ALARM_ATR_DROP} ATR)\n\n"
             msg += f"{trend_info}\n\n"
             msg += f"💰 <b>Giriş:</b> {entry:,.2f}\n"
             msg += f"🛑 <b>SL (2.5 ATR):</b> {sl:,.2f} (%{sl_pct:.2f})\n"
@@ -506,8 +605,9 @@ def process_signals(symbol, dfs):
             sl_pct = ((entry - sl) / entry) * 100
 
             msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Long) - {symbol}</b>\n"
-            msg += f"RSI 8 dibi ({last_sig['low_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine yükseldi.\n"
-            msg += f"📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n\n"
+            msg += f"RSI 8 dibi ({last_sig['low_rsi']:.1f}) gördü.\n"
+            msg += f"📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n"
+            msg += f"📈 <b>Dipten Yükseliş:</b> {((entry - last_sig['low_price']) / last_sig['low_price']) * 100:.2f}% (≈ {ALARM_ATR_DROP} ATR)\n\n"
             msg += f"{trend_info}\n\n"
             msg += f"💰 <b>Giriş:</b> {entry:,.2f}\n"
             msg += f"🛑 <b>SL (2.5 ATR):</b> {sl:,.2f} (%{sl_pct:.2f})\n"
@@ -519,6 +619,65 @@ def process_signals(symbol, dfs):
         msgs.append({
             "text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'],
             "type": "rsi_buyusu", "direction": direction,
+            "price": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "atr": atr,
+            "ref_tf": last_sig['tf']
+        })
+
+    # === YENİ: ATR DÜNYASI MESAJLARI ===
+    for direction, sig_list in [("SHORT", atr_dunyasi_signals["SHORT"]), ("LONG", atr_dunyasi_signals["LONG"])]:
+        if not sig_list: continue
+        last_sig = sig_list[-1]
+
+        entry = last_sig['price']
+        atr = last_sig.get('atr', 0)
+
+        trend_info = get_symbol_trend_label(direction, dfs.get("1h"), dfs.get("4h"))
+        earnings_note = get_earnings_note(symbol)
+
+        if direction == "SHORT":
+            # Stop = zirve fiyatı (sabit)
+            sl = last_sig['peak_price']
+            tp1 = entry * (1 - RB_TP1_PCT / 100)
+            tp2 = entry * (1 - RB_TP2_PCT / 100)
+            sl_pct = ((sl - entry) / entry) * 100
+            drop_pct = ((last_sig['peak_price'] - entry) / entry) * 100
+
+            msg = f"✨ <b>ATR DÜNYASI</b> ✨\n"
+            msg += f"🎯 <b>ATR ONAYLI SİNYAL (Short) - {symbol}</b>\n"
+            msg += f"🔴 <b>RSI Aşırı Alım:</b> {last_sig['peak_rsi']:.1f} (Zirve)\n"
+            msg += f"📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n"
+            msg += f"📉 <b>Zirveden Düşüş:</b> %{drop_pct:.2f} (≈ {ALARM_ATR_DROP} ATR onayı)\n\n"
+            msg += f"{trend_info}\n\n"
+            msg += f"💰 <b>Giriş:</b> {entry:,.2f}\n"
+            msg += f"🛑 <b>Stop (Zirve):</b> {sl:,.2f} (+%{sl_pct:.2f})\n"
+            msg += f"🎯 <b>TP1 (%{RB_TP1_PCT}):</b> {tp1:,.2f} → yarısını kapat, SL'yi {entry:,.2f}'ye çek\n"
+            msg += f"🎯 <b>TP2 (%{RB_TP2_PCT}):</b> {tp2:,.2f} → kalanı burada kapat\n\n"
+            msg += f"⚠️ <b>ATR:</b> {atr:.2f} | <b>Şu anki RSI:</b> {last_sig['now_rsi']:.1f} | <b>Ödül:</b> %{RB_TP1_PCT}/%{RB_TP2_PCT}"
+            msg += earnings_note
+        else:
+            # Stop = dip fiyatı (sabit)
+            sl = last_sig['low_price']
+            tp1 = entry * (1 + RB_TP1_PCT / 100)
+            tp2 = entry * (1 + RB_TP2_PCT / 100)
+            sl_pct = ((entry - sl) / entry) * 100
+            rise_pct = ((entry - last_sig['low_price']) / last_sig['low_price']) * 100
+
+            msg = f"✨ <b>ATR DÜNYASI</b> ✨\n"
+            msg += f"🎯 <b>ATR ONAYLI SİNYAL (Long) - {symbol}</b>\n"
+            msg += f"🟢 <b>RSI Aşırı Satım:</b> {last_sig['low_rsi']:.1f} (Dip)\n"
+            msg += f"📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n"
+            msg += f"📈 <b>Dipten Yükseliş:</b> %{rise_pct:.2f} (≈ {ALARM_ATR_DROP} ATR onayı)\n\n"
+            msg += f"{trend_info}\n\n"
+            msg += f"💰 <b>Giriş:</b> {entry:,.2f}\n"
+            msg += f"🛑 <b>Stop (Dip):</b> {sl:,.2f} (-%{sl_pct:.2f})\n"
+            msg += f"🎯 <b>TP1 (%{RB_TP1_PCT}):</b> {tp1:,.2f} → yarısını kapat, SL'yi {entry:,.2f}'ye çek\n"
+            msg += f"🎯 <b>TP2 (%{RB_TP2_PCT}):</b> {tp2:,.2f} → kalanı burada kapat\n\n"
+            msg += f"⚠️ <b>ATR:</b> {atr:.2f} | <b>Şu anki RSI:</b> {last_sig['now_rsi']:.1f} | <b>Ödül:</b> %{RB_TP1_PCT}/%{RB_TP2_PCT}"
+            msg += earnings_note
+
+        msgs.append({
+            "text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'],
+            "type": "atr_dunyasi", "direction": direction,
             "price": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "atr": atr,
             "ref_tf": last_sig['tf']
         })
@@ -771,14 +930,13 @@ async def check_active_trades():
 
         t_type = trade["type"]
 
-        # === RSI BÜYÜSÜ H1 ===
-        if trade.get("signal_type") == "rsi_buyusu":
+        # === RSI BÜYÜSÜ ve ATR DÜNYASI aynı lifecycle ===
+        if trade.get("signal_type") in ("rsi_buyusu", "atr_dunyasi"):
             entry = trade["entry"]
             tp1 = trade["tp1"]
             tp2 = trade["tp2"]
             sl_orig = trade["sl"]
             hit_tp1 = trade.get("hit_tp1", False)
-
             current_sl = entry if hit_tp1 else sl_orig
 
             if (t_type == "LONG" and current_low <= current_sl) or (t_type == "SHORT" and current_high >= current_sl):
@@ -813,7 +971,6 @@ async def check_active_trades():
                     del active_trades[trade_key]
                     continue
 
-        # === KISA VADE ===
         elif trade.get("signal_type") == "kisa_vade":
             tp_hit = trade.get("tp_hit", False)
             init_sl = trade["sl"]
@@ -848,7 +1005,6 @@ async def check_active_trades():
                         except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                     del active_trades[trade_key]
 
-        # === STANDART ===
         else:
             if not trade.get("hit_3pct", False):
                 if (t_type == "LONG" and current_high >= trade["entry"] * 1.03) or (t_type == "SHORT" and current_low <= trade["entry"] * 0.97):
@@ -903,7 +1059,7 @@ async def send_signal_message(msg_data):
                     last_rsi_alert_msgs[key] = {}
                 last_rsi_alert_msgs[key][str(cid)] = sent.message_id
 
-            if "direction" in msg_data and msg_type in ["standard", "kisa_vade", "rsi_buyusu"]:
+            if "direction" in msg_data and msg_type in ["standard", "kisa_vade", "rsi_buyusu", "atr_dunyasi"]:
                 msg_ids[str(cid)] = sent.message_id
 
         except Exception as e:
@@ -914,12 +1070,12 @@ async def send_signal_message(msg_data):
                     sent = await bot_app.bot.send_photo(chat_id=cid, photo=buf, caption=text, parse_mode="HTML")
                 else:
                     sent = await bot_app.bot.send_message(chat_id=cid, text=text, parse_mode="HTML")
-                if "direction" in msg_data and msg_type in ["standard", "kisa_vade", "rsi_buyusu"]:
+                if "direction" in msg_data and msg_type in ["standard", "kisa_vade", "rsi_buyusu", "atr_dunyasi"]:
                     msg_ids[str(cid)] = sent.message_id
             except Exception as e2:
                 print(f"send_signal_message fallback {symbol} chat {cid}: {e2}")
 
-    if "direction" in msg_data and msg_type in ["standard", "kisa_vade", "rsi_buyusu"]:
+    if "direction" in msg_data and msg_type in ["standard", "kisa_vade", "rsi_buyusu", "atr_dunyasi"]:
         trade_key = f"{symbol}_{msg_data['direction']}_{msg_type}"
         trade_info = {
             "symbol": symbol, "type": msg_data["direction"], "entry": msg_data["price"],
@@ -928,7 +1084,7 @@ async def send_signal_message(msg_data):
         }
         if msg_type == "kisa_vade":
             trade_info["tp"] = msg_data.get("tp")
-        elif msg_type == "rsi_buyusu":
+        elif msg_type in ("rsi_buyusu", "atr_dunyasi"):
             trade_info["tp1"] = msg_data.get("tp1")
             trade_info["tp2"] = msg_data.get("tp2")
             trade_info["hit_tp1"] = False
@@ -977,6 +1133,7 @@ async def task_afternoon_summary():
 
 async def clear_daily_state():
     last_rsi_alert_msgs.clear()
+    last_atr_dunyasi_msgs.clear()
     earnings_cache.clear()
     print("🧹 Günlük state temizlendi.")
 
