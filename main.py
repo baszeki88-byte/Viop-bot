@@ -26,10 +26,9 @@ from apscheduler.triggers.cron import CronTrigger
 # ==========================================
 # --- AYARLAR ---
 # ==========================================
-# DÜZELTME: Token koddan kaldırıldı. Sadece ortam değişkeninden okunur.
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN ortam değişkeni tanımlı değil. Yeni token'ı env olarak ekleyin.")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "9293651278:AAGdGb6Nr1gBX5-Er6YAb62ZNyUQEG4yxZg")
+if "BOT_TOKEN" not in os.environ:
+    print("⚠️ BOT_TOKEN env'de yok — fallback kullanılıyor. Üretimde env kullanın!")
 
 CHAT_IDS = [5066109900, 8776376951]
 TIMEZONE = pytz.timezone("Europe/Istanbul")
@@ -76,7 +75,6 @@ ALARM_LONG_UPPER = 45
 
 EMA_PERIOD = 200
 SL_MULTIPLIER = 1.5
-# --- DEĞİŞTİ: 4h taramadan çıkarıldı (backtest sonucu) ---
 TIME_FRAMES = ["1h"]
 
 # --- KISA VADE ---
@@ -88,13 +86,13 @@ KV_SL_MULT = 3.0
 KV_EMA_FAST = 13
 KV_EMA_SLOW = 34
 
-# --- RSI BÜYÜSÜ H1 STRATEJİSİ (backtest kazananı) ---
+# --- RSI BÜYÜSÜ H1 STRATEJİSİ ---
 RB_SL_ATR_MULT = 2.5
 RB_TP1_PCT = 1.5
 RB_TP2_PCT = 3.0
-RB_TIMEOUT_BARS = 24   # 1H bar. DÜZELTME: artık kullanılıyor (check_active_trades)
+RB_TIMEOUT_BARS = 24
 
-# --- DEĞİŞTİ: Hızlı MACD (backtest kazananı) ---
+# --- Hızlı MACD ---
 MACD_FAST = 8
 MACD_SLOW = 17
 MACD_SIGNAL = 9
@@ -135,13 +133,39 @@ def get_earnings_note(symbol):
             earnings_date = earnings_date.date()
         days_left = (earnings_date - today).days
         if 0 <= days_left <= 5:
-            note = f"\n📅 <b>Bilanço Uyarısı:</b> Bilançoya {days_left} gün kaldı! (Dikkatli olun)"
+            note = f"\n\n📅 <b>Bilanço Uyarısı:</b> Bilançoya {days_left} gün kaldı! (Dikkatli olun)"
             earnings_cache[cache_key] = note
             return note
     except Exception as e:
         print(f"get_earnings_note {symbol}: {e}")
     earnings_cache[cache_key] = ""
     return ""
+
+
+def get_symbol_trend_label(direction, df_1h, df_4h):
+    """Sinyalin geldiği hissenin 1H ve 4H EMA200 trendini döner."""
+    trend_1h = get_ema_trend(df_1h, EMA_PERIOD) if df_1h is not None else 0
+    trend_4h = get_ema_trend(df_4h, EMA_PERIOD) if df_4h is not None else 0
+
+    icon_1h = "🟢" if trend_1h == 1 else ("🔴" if trend_1h == -1 else "⚪")
+    icon_4h = "🟢" if trend_4h == 1 else ("🔴" if trend_4h == -1 else "⚪")
+
+    if direction == "SHORT":
+        if trend_1h == -1 and trend_4h == -1:
+            status = "✅ <b>Tam Uyumlu</b> (Güçlü Düşüş Trendi)"
+        elif trend_1h == -1 or trend_4h == -1:
+            status = "⚠️ <b>Kısmi Uyum</b> (Tek TF düşüşte)"
+        else:
+            status = "❌ <b>Trend Uyumsuz</b> (Yükseliş Trendinde SHORT)"
+    else:  # LONG
+        if trend_1h == 1 and trend_4h == 1:
+            status = "✅ <b>Tam Uyumlu</b> (Güçlü Yükseliş Trendi)"
+        elif trend_1h == 1 or trend_4h == 1:
+            status = "⚠️ <b>Kısmi Uyum</b> (Tek TF yükselişte)"
+        else:
+            status = "❌ <b>Trend Uyumsuz</b> (Düşüş Trendinde LONG)"
+
+    return f"📊 <b>Hisse Trendi:</b> 1H {icon_1h} / 4H {icon_4h}\n{status}"
 
 
 def fetch_ohlc(symbol, interval, limit=300):
@@ -167,7 +191,6 @@ async def fetch_ohlc_async(symbol, interval, limit=300):
 
 
 async def fetch_all_tfs_async(symbol):
-    # Trend ve nişancı onayı için 4h ve 15m hala çekiliyor
     tfs = ["15m", "30m", "1h", "4h"]
     results = await asyncio.gather(*[fetch_ohlc_async(symbol, tf) for tf in tfs])
     return dict(zip(tfs, results))
@@ -301,10 +324,7 @@ def process_signals(symbol, dfs):
 
         st = states.setdefault((symbol, tf), {"state": State.IDLE, "last_bar": None})
         bar_time = df.index[-1]
-        # DÜZELTME: Aynı kapanmış bar ikinci kez işlenmesin (tick yarım saatte bir, bar saatlik)
-        is_new_bar = st["last_bar"] != bar_time
-
-        if is_new_bar:
+        if st["last_bar"] != bar_time:
             if r_prev <= RSI_SHORT_STD < r_now:
                 if trend_4h == -1 and macd_now < macd_sig_now:
                     sig_data = {"tf": tf, "price": close_price, "atr": atr, "df": df}
@@ -318,11 +338,6 @@ def process_signals(symbol, dfs):
                     else: standard_signals["LONG"].append(sig_data)
                 st["state"] = State.LONG
             st["last_bar"] = bar_time
-
-        # DÜZELTME: Yeni bar yoksa ilk uyarı ve RSI Büyüsü durum makinesi tekrar çalışmasın
-        # (aksi halde ilk uyarı iki kez gider, reject_count bar başına 2 kez artar)
-        if not is_new_bar:
-            continue
 
         if r_prev <= INSTANT_SHORT < r_now:
             rsi_alerts_instant["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
@@ -357,7 +372,7 @@ def process_signals(symbol, dfs):
                     rsi_alerts_confirmed["SHORT"].append({
                         "tf": tf, "prev": r_prev, "now": r_now, "price": close_price,
                         "peak_rsi": alarm_data["peak_rsi"], "peak_price": alarm_data["peak_price"],
-                        "atr": atr, "bar_time": bar_time
+                        "atr": atr
                     })
                     rsi_alarm_states[alarm_key]["state"] = "IDLE"
                 else:
@@ -380,7 +395,7 @@ def process_signals(symbol, dfs):
                     rsi_alerts_confirmed["LONG"].append({
                         "tf": tf, "prev": r_prev, "now": r_now, "price": close_price,
                         "low_rsi": alarm_data["low_rsi"], "low_price": alarm_data["low_price"],
-                        "atr": atr, "bar_time": bar_time
+                        "atr": atr
                     })
                     rsi_alarm_states[alarm_key]["state"] = "IDLE"
                 else:
@@ -464,39 +479,48 @@ def process_signals(symbol, dfs):
         entry = last_sig['price']
         atr = last_sig.get('atr', 0)
 
+        # Hisse trendi + bilanço notu (yeni eklendi)
+        trend_info = get_symbol_trend_label(direction, dfs.get("1h"), dfs.get("4h"))
+        earnings_note = get_earnings_note(symbol)
+
         if direction == "SHORT":
             sl = entry + (atr * RB_SL_ATR_MULT)
             tp1 = entry * (1 - RB_TP1_PCT / 100)
             tp2 = entry * (1 - RB_TP2_PCT / 100)
             sl_pct = ((sl - entry) / entry) * 100
 
-            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Short) - {symbol}</b>\nRSI 8 zirveyi ({last_sig['peak_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine geri çekildi.\n📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n\n"
+            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Short) - {symbol}</b>\n"
+            msg += f"RSI 8 zirveyi ({last_sig['peak_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine geri çekildi.\n"
+            msg += f"📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n\n"
+            msg += f"{trend_info}\n\n"
             msg += f"💰 <b>Giriş:</b> {entry:,.2f}\n"
             msg += f"🛑 <b>SL (2.5 ATR):</b> {sl:,.2f} (%{sl_pct:.2f})\n"
             msg += f"🎯 <b>TP1 (%{RB_TP1_PCT}):</b> {tp1:,.2f} → yarısını kapat, SL'yi {entry:,.2f}'ye çek\n"
             msg += f"🎯 <b>TP2 (%{RB_TP2_PCT}):</b> {tp2:,.2f} → kalanı burada kapat\n\n"
-            msg += f"⚠️ <b>ATR:</b> {atr:.2f} | <b>Risk:</b> %{sl_pct:.2f} | <b>Ödül:</b> %{RB_TP1_PCT}/%{RB_TP2_PCT}\n"
-            msg += f"⏱ <b>Zaman aşımı:</b> {RB_TIMEOUT_BARS} saatlik bar sonunda hedef gelmediyse kapat."
+            msg += f"⚠️ <b>ATR:</b> {atr:.2f} | <b>Risk:</b> %{sl_pct:.2f} | <b>Ödül:</b> %{RB_TP1_PCT}/%{RB_TP2_PCT}"
+            msg += earnings_note
         else:
             sl = entry - (atr * RB_SL_ATR_MULT)
             tp1 = entry * (1 + RB_TP1_PCT / 100)
             tp2 = entry * (1 + RB_TP2_PCT / 100)
             sl_pct = ((entry - sl) / entry) * 100
 
-            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Long) - {symbol}</b>\nRSI 8 dibi ({last_sig['low_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine yükseldi.\n📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n\n"
+            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Long) - {symbol}</b>\n"
+            msg += f"RSI 8 dibi ({last_sig['low_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine yükseldi.\n"
+            msg += f"📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n\n"
+            msg += f"{trend_info}\n\n"
             msg += f"💰 <b>Giriş:</b> {entry:,.2f}\n"
             msg += f"🛑 <b>SL (2.5 ATR):</b> {sl:,.2f} (%{sl_pct:.2f})\n"
             msg += f"🎯 <b>TP1 (%{RB_TP1_PCT}):</b> {tp1:,.2f} → yarısını kapat, SL'yi {entry:,.2f}'ye çek\n"
             msg += f"🎯 <b>TP2 (%{RB_TP2_PCT}):</b> {tp2:,.2f} → kalanı burada kapat\n\n"
-            msg += f"⚠️ <b>ATR:</b> {atr:.2f} | <b>Risk:</b> %{sl_pct:.2f} | <b>Ödül:</b> %{RB_TP1_PCT}/%{RB_TP2_PCT}\n"
-            msg += f"⏱ <b>Zaman aşımı:</b> {RB_TIMEOUT_BARS} saatlik bar sonunda hedef gelmediyse kapat."
+            msg += f"⚠️ <b>ATR:</b> {atr:.2f} | <b>Risk:</b> %{sl_pct:.2f} | <b>Ödül:</b> %{RB_TP1_PCT}/%{RB_TP2_PCT}"
+            msg += earnings_note
 
         msgs.append({
             "text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'],
             "type": "rsi_buyusu", "direction": direction,
             "price": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "atr": atr,
-            "ref_tf": last_sig['tf'],
-            "bar_time": last_sig.get("bar_time")
+            "ref_tf": last_sig['tf']
         })
 
     return msgs
@@ -755,10 +779,8 @@ async def check_active_trades():
             sl_orig = trade["sl"]
             hit_tp1 = trade.get("hit_tp1", False)
 
-            # TP1 sonrası SL = entry (breakeven)
             current_sl = entry if hit_tp1 else sl_orig
 
-            # SL kontrolü
             if (t_type == "LONG" and current_low <= current_sl) or (t_type == "SHORT" and current_high >= current_sl):
                 if hit_tp1:
                     msg = f"🛑 <b>STOP (Breakeven) - {sym}</b>\nTP1 sonrası SL maliyete çekilmişti. Kalan pozisyon kapatıldı.\n<b>Net kâr:</b> +%{RB_TP1_PCT/2:.2f} (TP1'den)"
@@ -771,7 +793,6 @@ async def check_active_trades():
                 del active_trades[trade_key]
                 continue
 
-            # TP1 kontrolü
             if not hit_tp1:
                 if (t_type == "LONG" and current_high >= tp1) or (t_type == "SHORT" and current_low <= tp1):
                     trade["hit_tp1"] = True
@@ -782,7 +803,6 @@ async def check_active_trades():
                         except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                     continue
 
-            # TP2 kontrolü (TP1 sonrası)
             if hit_tp1:
                 if (t_type == "LONG" and current_high >= tp2) or (t_type == "SHORT" and current_low <= tp2):
                     msg = f"🎯🎯 <b>TP2 VURULDU (%{RB_TP2_PCT}) - {sym}</b>\n👉 <b>Kalan pozisyonu kapat.</b>\n<b>Net kâr:</b> ~%{(RB_TP1_PCT+RB_TP2_PCT)/2:.2f} (yarı yarıya)"
@@ -793,33 +813,7 @@ async def check_active_trades():
                     del active_trades[trade_key]
                     continue
 
-            # --- DÜZELTME: ZAMAN AŞIMI (RB_TIMEOUT_BARS saatlik bar) ---
-            # Giriş barından bu yana geçen 30m bar sayısı; 1 saatlik bar = 2 adet 30m bar.
-            entry_bar = trade.get("entry_bar_time")
-            if entry_bar is not None:
-                try:
-                    bars_30m = int((df_30m.index > entry_bar).sum())
-                except Exception as e:
-                    print(f"timeout bar sayımı {sym}: {e}")
-                    bars_30m = 0
-                if bars_30m >= RB_TIMEOUT_BARS * 2:
-                    if t_type == "LONG":
-                        pnl = (current_price - entry) / entry * 100
-                    else:
-                        pnl = (entry - current_price) / entry * 100
-                    durum = "TP1 alınmış, kalan yarı" if hit_tp1 else "pozisyonun tamamı"
-                    msg = (f"⏱ <b>ZAMAN AŞIMI - {sym}</b>\n"
-                           f"{RB_TIMEOUT_BARS} saatlik bar doldu, hedef/stop gelmedi.\n"
-                           f"👉 <b>Kapat:</b> {durum}.\n"
-                           f"Son fiyat: {current_price:,.2f} (girişe göre %{pnl:+.2f})")
-                    for cid in CHAT_IDS:
-                        reply_id = trade.get("msg_ids", {}).get(str(cid))
-                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
-                        except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-                    del active_trades[trade_key]
-                    continue
-
-        # === KISA VADE (mevcut) ===
+        # === KISA VADE ===
         elif trade.get("signal_type") == "kisa_vade":
             tp_hit = trade.get("tp_hit", False)
             init_sl = trade["sl"]
@@ -938,8 +932,6 @@ async def send_signal_message(msg_data):
             trade_info["tp1"] = msg_data.get("tp1")
             trade_info["tp2"] = msg_data.get("tp2")
             trade_info["hit_tp1"] = False
-            # DÜZELTME: zaman aşımı için giriş barının zamanı
-            trade_info["entry_bar_time"] = msg_data.get("bar_time")
         active_trades[trade_key] = trade_info
 
 
@@ -1012,7 +1004,7 @@ async def main():
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="15,45", timezone=TIMEZONE))
 
     sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=15, timezone=TIMEZONE))
-    sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=17, minute=45, timezone=TIMEZONE))
+    sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=17, minute=55, timezone=TIMEZONE))
 
     sched.add_job(clear_daily_state, CronTrigger(day_of_week="mon-fri", hour=18, minute=5, timezone=TIMEZONE))
 
