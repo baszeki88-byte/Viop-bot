@@ -971,8 +971,8 @@ async def main():
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="0,30", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="15,45", timezone=TIMEZONE))
 
-    sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=55, timezone=TIMEZONE))
-    sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=17, minute=55, timezone=TIMEZONE))
+    sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=15, timezone=TIMEZONE))
+    sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=17, minute=45, timezone=TIMEZONE))
 
     sched.add_job(clear_daily_state, CronTrigger(day_of_week="mon-fri", hour=18, minute=5, timezone=TIMEZONE))
 
