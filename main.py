@@ -5,7 +5,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, time, timedelta
 from enum import Enum
 
-# --- MATPLOTLIB HEADLESS (sunucuda çökmeyi engeller) ---
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -32,7 +31,6 @@ if "BOT_TOKEN" not in os.environ:
     print("⚠️ BOT_TOKEN env'de yok — fallback kullanılıyor. Üretimde env kullanın!")
 
 CHAT_IDS = [5066109900, 8776376951]
-
 TIMEZONE = pytz.timezone("Europe/Istanbul")
 
 SYMBOLS = [
@@ -77,9 +75,10 @@ ALARM_LONG_UPPER = 45
 
 EMA_PERIOD = 200
 SL_MULTIPLIER = 1.5
-TIME_FRAMES = ["1h", "4h"]
+# --- DEĞİŞTİ: 4h taramadan çıkarıldı (backtest sonucu) ---
+TIME_FRAMES = ["1h"]
 
-# --- KISA VADE AYARLARI ---
+# --- KISA VADE ---
 KV_RSI_PERIOD = 14
 KV_RSI_LONG = 60
 KV_RSI_SHORT = 40
@@ -87,6 +86,17 @@ KV_TP1_PCT = 5
 KV_SL_MULT = 3.0
 KV_EMA_FAST = 13
 KV_EMA_SLOW = 34
+
+# --- RSI BÜYÜSÜ H1 STRATEJİSİ (backtest kazananı) ---
+RB_SL_ATR_MULT = 2.5
+RB_TP1_PCT = 1.5
+RB_TP2_PCT = 3.0
+RB_TIMEOUT_BARS = 24
+
+# --- DEĞİŞTİ: Hızlı MACD (backtest kazananı) ---
+MACD_FAST = 8
+MACD_SLOW = 17
+MACD_SIGNAL = 9
 
 active_trades = {}
 rsi_alarm_states = {}
@@ -118,12 +128,10 @@ def get_earnings_note(symbol):
         if not earnings_date:
             earnings_cache[cache_key] = ""
             return ""
-
         if isinstance(earnings_date, str):
             earnings_date = datetime.strptime(earnings_date, "%Y-%m-%d").date()
         elif hasattr(earnings_date, "date"):
             earnings_date = earnings_date.date()
-
         days_left = (earnings_date - today).days
         if 0 <= days_left <= 5:
             note = f"\n📅 <b>Bilanço Uyarısı:</b> Bilançoya {days_left} gün kaldı! (Dikkatli olun)"
@@ -140,14 +148,12 @@ def fetch_ohlc(symbol, interval, limit=300):
         df = bp.Ticker(symbol).history(period=f"{limit + 2} bar", interval=interval)
         if df is not None and not df.empty:
             df.columns = [str(c).lower() for c in df.columns]
-            # --- TIMEZONE NORMALİZASYONU ---
-            # Eğer borsapy UTC döndürüyorsa İstanbul'a çevir (between_time filtreleri için kritik)
             if hasattr(df.index, "tz") and df.index.tz is not None:
                 try:
                     if str(df.index.tz) != "Europe/Istanbul":
                         df.index = df.index.tz_convert(TIMEZONE)
-                except Exception as tz_err:
-                    print(f"tz_convert uyarı {symbol} {interval}: {tz_err}")
+                except Exception:
+                    pass
             return df.iloc[:-1]
         return None
     except Exception as e:
@@ -159,13 +165,9 @@ async def fetch_ohlc_async(symbol, interval, limit=300):
     return await asyncio.to_thread(fetch_ohlc, symbol, interval, limit)
 
 
-def fetch_all_tfs(symbol):
-    tfs = set(TIME_FRAMES) | {"15m", "30m"}
-    return {tf: fetch_ohlc(symbol, tf) for tf in tfs}
-
-
 async def fetch_all_tfs_async(symbol):
-    tfs = list(set(TIME_FRAMES) | {"15m", "30m"})
+    # Trend ve nişancı onayı için 4h ve 15m hala çekiliyor
+    tfs = ["15m", "30m", "1h", "4h"]
     results = await asyncio.gather(*[fetch_ohlc_async(symbol, tf) for tf in tfs])
     return dict(zip(tfs, results))
 
@@ -178,11 +180,11 @@ def get_rsi(series, period=8):
     return 100 - (100 / (1 + rs))
 
 
-def get_macd(series, fast=12, slow=26, signal=9):
-    exp1 = series.ewm(span=fast, adjust=False).mean()
-    exp2 = series.ewm(span=slow, adjust=False).mean()
+def get_macd(series):
+    exp1 = series.ewm(span=MACD_FAST, adjust=False).mean()
+    exp2 = series.ewm(span=MACD_SLOW, adjust=False).mean()
     macd_line = exp1 - exp2
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
     return macd_line, signal_line
 
 
@@ -246,10 +248,13 @@ def create_chart_image(df, symbol, tf):
         df_chart['ema200'] = df_chart['close'].ewm(span=EMA_PERIOD, adjust=False).mean()
         plot_df = df_chart.tail(30)
         mc = mpf.make_marketcolors(up='g', down='r', edge='inherit', wick='inherit', volume='in')
-        s  = mpf.make_mpf_style(marketcolors=mc, gridstyle='', facecolor='#1e1e1e', figcolor='#1e1e1e', rc={'axes.labelcolor': 'white', 'xtick.color': 'white', 'ytick.color': 'white'})
-        addplots = [mpf.make_addplot(plot_df['ema50'], color='orange', width=1), mpf.make_addplot(plot_df['ema200'], color='blue', width=1)]
+        s = mpf.make_mpf_style(marketcolors=mc, gridstyle='', facecolor='#1e1e1e', figcolor='#1e1e1e',
+                                rc={'axes.labelcolor': 'white', 'xtick.color': 'white', 'ytick.color': 'white'})
+        addplots = [mpf.make_addplot(plot_df['ema50'], color='orange', width=1),
+                    mpf.make_addplot(plot_df['ema200'], color='blue', width=1)]
         buf = io.BytesIO()
-        mpf.plot(plot_df, type='candle', style=s, title=f'\n{symbol} - {tf.upper()}', volume=True, addplot=addplots, savefig=buf)
+        mpf.plot(plot_df, type='candle', style=s, title=f'\n{symbol} - {tf.upper()}',
+                 volume=True, addplot=addplots, savefig=buf)
         buf.seek(0)
         plt.close('all')
         return buf
@@ -258,7 +263,12 @@ def create_chart_image(df, symbol, tf):
         return None
 
 
-class State(Enum): IDLE="IDLE"; SHORT="SHORT"; LONG="LONG"
+class State(Enum):
+    IDLE = "IDLE"
+    SHORT = "SHORT"
+    LONG = "LONG"
+
+
 states = {}
 
 
@@ -280,7 +290,8 @@ def process_signals(symbol, dfs):
         if rsi is None or len(rsi) < 2: continue
 
         macd_line, macd_sig_line = get_macd(df["close"])
-        macd_now, macd_sig_now = float(macd_line.iloc[-1]), float(macd_sig_line.iloc[-1])
+        macd_now = float(macd_line.iloc[-1])
+        macd_sig_now = float(macd_sig_line.iloc[-1])
         r_now, r_prev = float(rsi.iloc[-1]), float(rsi.iloc[-2])
         atr = calculate_atr(df, period=10)
         if not atr: continue
@@ -311,44 +322,67 @@ def process_signals(symbol, dfs):
 
         alarm_key = f"{symbol}_{tf}"
         if alarm_key not in rsi_alarm_states:
-            rsi_alarm_states[alarm_key] = {"state": "IDLE", "peak_rsi": 0, "peak_price": 0, "low_rsi": 100, "low_price": 0}
+            rsi_alarm_states[alarm_key] = {"state": "IDLE", "peak_rsi": 0, "peak_price": 0,
+                                           "low_rsi": 100, "low_price": 0}
 
         alarm_data = rsi_alarm_states[alarm_key]
         state = alarm_data["state"]
 
         if state == "IDLE":
             if r_now > ALARM_SHORT_UPPER:
-                rsi_alarm_states[alarm_key] = {"state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": close_price, "low_rsi": 100, "low_price": 0}
+                rsi_alarm_states[alarm_key] = {"state": "SHORT_ARMED", "peak_rsi": r_now,
+                                                "peak_price": close_price, "low_rsi": 100, "low_price": 0}
             elif r_now < ALARM_LONG_LOWER:
-                rsi_alarm_states[alarm_key] = {"state": "LONG_ARMED", "peak_rsi": 0, "peak_price": 0, "low_rsi": r_now, "low_price": close_price}
+                rsi_alarm_states[alarm_key] = {"state": "LONG_ARMED", "peak_rsi": 0,
+                                                "peak_price": 0, "low_rsi": r_now, "low_price": close_price}
 
         elif state == "SHORT_ARMED":
             if r_now > alarm_data["peak_rsi"]:
                 alarm_data["peak_rsi"] = r_now
                 alarm_data["peak_price"] = close_price
             if r_now <= ALARM_SHORT_LOWER:
-                rsi_alerts_confirmed["SHORT"].append({
-                    "tf": tf, "prev": r_prev, "now": r_now, "price": close_price,
-                    "peak_rsi": alarm_data["peak_rsi"], "peak_price": alarm_data["peak_price"]
-                })
-                rsi_alarm_states[alarm_key]["state"] = "IDLE"
+                price_ok = (alarm_data["peak_price"] - close_price) >= atr * 0.5
+                candle_ok = close_price < float(df['open'].iloc[-1])
+                macd_ok = macd_now < macd_sig_now
+                if price_ok and candle_ok and macd_ok:
+                    rsi_alerts_confirmed["SHORT"].append({
+                        "tf": tf, "prev": r_prev, "now": r_now, "price": close_price,
+                        "peak_rsi": alarm_data["peak_rsi"], "peak_price": alarm_data["peak_price"],
+                        "atr": atr
+                    })
+                    rsi_alarm_states[alarm_key]["state"] = "IDLE"
+                else:
+                    alarm_data["reject_count"] = alarm_data.get("reject_count", 0) + 1
+                    if alarm_data["reject_count"] >= 5:
+                        rsi_alarm_states[alarm_key]["state"] = "IDLE"
             elif r_now < ALARM_LONG_LOWER:
-                rsi_alarm_states[alarm_key] = {"state": "LONG_ARMED", "peak_rsi": 0, "peak_price": 0, "low_rsi": r_now, "low_price": close_price}
+                rsi_alarm_states[alarm_key] = {"state": "LONG_ARMED", "peak_rsi": 0,
+                                                "peak_price": 0, "low_rsi": r_now, "low_price": close_price}
 
         elif state == "LONG_ARMED":
             if r_now < alarm_data["low_rsi"]:
                 alarm_data["low_rsi"] = r_now
                 alarm_data["low_price"] = close_price
             if r_now >= ALARM_LONG_UPPER:
-                rsi_alerts_confirmed["LONG"].append({
-                    "tf": tf, "prev": r_prev, "now": r_now, "price": close_price,
-                    "low_rsi": alarm_data["low_rsi"], "low_price": alarm_data["low_price"]
-                })
-                rsi_alarm_states[alarm_key]["state"] = "IDLE"
+                price_ok = (close_price - alarm_data["low_price"]) >= atr * 0.5
+                candle_ok = close_price > float(df['open'].iloc[-1])
+                macd_ok = macd_now > macd_sig_now
+                if price_ok and candle_ok and macd_ok:
+                    rsi_alerts_confirmed["LONG"].append({
+                        "tf": tf, "prev": r_prev, "now": r_now, "price": close_price,
+                        "low_rsi": alarm_data["low_rsi"], "low_price": alarm_data["low_price"],
+                        "atr": atr
+                    })
+                    rsi_alarm_states[alarm_key]["state"] = "IDLE"
+                else:
+                    alarm_data["reject_count"] = alarm_data.get("reject_count", 0) + 1
+                    if alarm_data["reject_count"] >= 5:
+                        rsi_alarm_states[alarm_key]["state"] = "IDLE"
             elif r_now > ALARM_SHORT_UPPER:
-                rsi_alarm_states[alarm_key] = {"state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": close_price, "low_rsi": 100, "low_price": 0}
+                rsi_alarm_states[alarm_key] = {"state": "SHORT_ARMED", "peak_rsi": r_now,
+                                                "peak_price": close_price, "low_rsi": 100, "low_price": 0}
 
-    # Sniper ve Standart Mesajları
+    # --- STANDART & NİŞANCI ---
     for direction, sig_list, title, emoji in [
         ("SHORT", sniper_signals["SHORT"], "🔥🎯 KESKİN NİŞANCI SİNYALİ", "🔴"),
         ("LONG", sniper_signals["LONG"], "🔥🎯 KESKİN NİŞANCI SİNYALİ", "🟢"),
@@ -362,8 +396,10 @@ def process_signals(symbol, dfs):
         sl_price = last_sig["price"] - (last_sig["atr"] * SL_MULTIPLIER) if direction == "LONG" else last_sig["price"] + (last_sig["atr"] * SL_MULTIPLIER)
         msg += f"🛑 <b>İlk Stop (1.5 ATR):</b> {sl_price:,.2f}\n"
         msg += f"💡 <b>Strateji:</b> %3 kârda yarısını kapat, kalanı 30m EMA50 ile takip et."
-        msgs.append({"text": msg, "df": last_sig["df"], "symbol": symbol, "tf": last_sig["tf"], "direction": direction, "price": last_sig["price"], "sl": sl_price, "type": "standard"})
+        msgs.append({"text": msg, "df": last_sig["df"], "symbol": symbol, "tf": last_sig["tf"],
+                     "direction": direction, "price": last_sig["price"], "sl": sl_price, "type": "standard"})
 
+    # --- KISA VADE (30m) ---
     df_30m = dfs.get("30m")
     if df_30m is not None and len(df_30m) > KV_EMA_SLOW + 10:
         df_30m = df_30m.copy()
@@ -376,62 +412,84 @@ def process_signals(symbol, dfs):
         i = len(df_30m) - 1
         cross_up = (df_30m['ema_fast'].iloc[i-1] <= df_30m['ema_slow'].iloc[i-1]) and (df_30m['ema_fast'].iloc[i] > df_30m['ema_slow'].iloc[i])
         cross_down = (df_30m['ema_fast'].iloc[i-1] >= df_30m['ema_slow'].iloc[i-1]) and (df_30m['ema_fast'].iloc[i] < df_30m['ema_slow'].iloc[i])
-        atr = calculate_atr(df_30m, 10)
-        close_price = float(df_30m['close'].iloc[i])
+        atr_kv = calculate_atr(df_30m, 10)
+        close_kv = float(df_30m['close'].iloc[i])
 
         is_kv_long = cross_up and (df_30m['rsi14'].iloc[i] > KV_RSI_LONG) and (trend_4h_50 == 1) and (df_30m['psar_trend'].iloc[i] == 1)
         is_kv_short = cross_down and (df_30m['rsi14'].iloc[i] < KV_RSI_SHORT) and (trend_4h_50 == -1) and (df_30m['psar_trend'].iloc[i] == -1)
 
-        if is_kv_long and atr:
-            sl_price = close_price - (atr * KV_SL_MULT)
-            tp_price = close_price * (1 + KV_TP1_PCT/100)
-            msg = f"⚡ <b>30M KISA VADE SİNYALİ (LONG)</b>\n🟢 <b>{symbol}</b> — LONG [30M] ✅ PSAR & 4H EMA50 ONAYLI\n\n💰 <b>Giriş Fiyatı:</b> {close_price:,.2f}\n🛑 <b>İlk Stop:</b> {sl_price:,.2f} (3 ATR)\n🎯 <b>1. Hedef (TP1):</b> {tp_price:,.2f} (%{KV_TP1_PCT} Kâr)\n💡 <b>Çıkış:</b> TP1'de yarısını kapat, stopu maliyete çek, kalanı 30m EMA50 ile takip et."
-            msgs.append({"text": msg, "df": df_30m, "symbol": symbol, "tf": "30m", "direction": "LONG", "price": close_price, "sl": sl_price, "tp": tp_price, "atr": atr, "type": "kisa_vade"})
-        elif is_kv_short and atr:
-            sl_price = close_price + (atr * KV_SL_MULT)
-            tp_price = close_price * (1 - KV_TP1_PCT/100)
-            msg = f"⚡ <b>30M KISA VADE SİNYALİ (SHORT)</b>\n🔴 <b>{symbol}</b> — SHORT [30M] ✅ PSAR & 4H EMA50 ONAYLI\n\n💰 <b>Giriş Fiyatı:</b> {close_price:,.2f}\n🛑 <b>İlk Stop:</b> {sl_price:,.2f} (3 ATR)\n🎯 <b>1. Hedef (TP1):</b> {tp_price:,.2f} (%{KV_TP1_PCT} Kâr)\n💡 <b>Çıkış:</b> TP1'de yarısını kapat, stopu maliyete çek, kalanı 30m EMA50 ile takip et."
-            msgs.append({"text": msg, "df": df_30m, "symbol": symbol, "tf": "30m", "direction": "SHORT", "price": close_price, "sl": sl_price, "tp": tp_price, "atr": atr, "type": "kisa_vade"})
+        if is_kv_long and atr_kv:
+            sl_price = close_kv - (atr_kv * KV_SL_MULT)
+            tp_price = close_kv * (1 + KV_TP1_PCT/100)
+            msg = f"⚡ <b>30M KISA VADE SİNYALİ (LONG)</b>\n🟢 <b>{symbol}</b> — LONG [30M] ✅ PSAR & 4H EMA50 ONAYLI\n\n💰 <b>Giriş Fiyatı:</b> {close_kv:,.2f}\n🛑 <b>İlk Stop:</b> {sl_price:,.2f} (3 ATR)\n🎯 <b>1. Hedef (TP1):</b> {tp_price:,.2f} (%{KV_TP1_PCT} Kâr)\n💡 <b>Çıkış:</b> TP1'de yarısını kapat, stopu maliyete çek, kalanı 30m EMA50 ile takip et."
+            msgs.append({"text": msg, "df": df_30m, "symbol": symbol, "tf": "30m",
+                         "direction": "LONG", "price": close_kv, "sl": sl_price,
+                         "tp": tp_price, "atr": atr_kv, "type": "kisa_vade"})
+        elif is_kv_short and atr_kv:
+            sl_price = close_kv + (atr_kv * KV_SL_MULT)
+            tp_price = close_kv * (1 - KV_TP1_PCT/100)
+            msg = f"⚡ <b>30M KISA VADE SİNYALİ (SHORT)</b>\n🔴 <b>{symbol}</b> — SHORT [30M] ✅ PSAR & 4H EMA50 ONAYLI\n\n💰 <b>Giriş Fiyatı:</b> {close_kv:,.2f}\n🛑 <b>İlk Stop:</b> {sl_price:,.2f} (3 ATR)\n🎯 <b>1. Hedef (TP1):</b> {tp_price:,.2f} (%{KV_TP1_PCT} Kâr)\n💡 <b>Çıkış:</b> TP1'de yarısını kapat, stopu maliyete çek, kalanı 30m EMA50 ile takip et."
+            msgs.append({"text": msg, "df": df_30m, "symbol": symbol, "tf": "30m",
+                         "direction": "SHORT", "price": close_kv, "sl": sl_price,
+                         "tp": tp_price, "atr": atr_kv, "type": "kisa_vade"})
 
     # --- RSI BÜYÜSÜ: İLK UYARI ---
     for direction, sig_list in [("SHORT", rsi_alerts_instant["SHORT"]), ("LONG", rsi_alerts_instant["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
-
-        tfs = [s["tf"] for s in sig_list]
-        is_confluence = ("1h" in tfs and "4h" in tfs)
-        confluence_icon = "🔥🔥 <b>[1H + 4H UYUMU]</b> 🔥🔥\n" if is_confluence else ""
-
         earnings_note = get_earnings_note(symbol)
 
         if direction == "SHORT":
-            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n{confluence_icon}⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Alım)\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
+            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Alım)\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
         else:
-            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n{confluence_icon}⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Satım)\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
-
+            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Satım)\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
         msg += earnings_note
-        msgs.append({"text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'], "type": "alert_instant", "direction": direction})
+        msgs.append({"text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'],
+                     "type": "alert_instant", "direction": direction})
 
-    # --- RSI BÜYÜSÜ: TEYİTLİ UYARI ---
+    # --- RSI BÜYÜSÜ: TEYİTLİ (H1 STRATEJİSİ) ---
     for direction, sig_list in [("SHORT", rsi_alerts_confirmed["SHORT"]), ("LONG", rsi_alerts_confirmed["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
 
-        tfs = [s["tf"] for s in sig_list]
-        is_confluence = ("1h" in tfs and "4h" in tfs)
-        confluence_icon = "🔥🔥 <b>[1H + 4H UYUMU]</b> 🔥🔥\n" if is_confluence else ""
+        entry = last_sig['price']
+        atr = last_sig.get('atr', 0)
 
         if direction == "SHORT":
-            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n{confluence_icon}🎯 <b>TEYİTLİ SİNYAL (Short) - {symbol}</b>\nRSI 8 zirveyi ({last_sig['peak_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine geri çekildi.\n📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 0.97:,.2f} (%3)\n👉 <b>Short denenebilir. Grafiği kontrol edin.</b>"
-        else:
-            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n{confluence_icon}🎯 <b>TEYİTLİ SİNYAL (Long) - {symbol}</b>\nRSI 8 dibi ({last_sig['low_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine yükseldi.\n📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 1.03:,.2f} (%3)\n👉 <b>Long denenebilir. Grafiği kontrol edin.</b>"
+            sl = entry + (atr * RB_SL_ATR_MULT)
+            tp1 = entry * (1 - RB_TP1_PCT / 100)
+            tp2 = entry * (1 - RB_TP2_PCT / 100)
+            sl_pct = ((sl - entry) / entry) * 100
 
-        msgs.append({"text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'], "type": "alert_confirmed", "direction": direction, "ref_tf": last_sig['tf']})
+            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Short) - {symbol}</b>\nRSI 8 zirveyi ({last_sig['peak_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine geri çekildi.\n📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n\n"
+            msg += f"💰 <b>Giriş:</b> {entry:,.2f}\n"
+            msg += f"🛑 <b>SL (2.5 ATR):</b> {sl:,.2f} (%{sl_pct:.2f})\n"
+            msg += f"🎯 <b>TP1 (%{RB_TP1_PCT}):</b> {tp1:,.2f} → yarısını kapat, SL'yi {entry:,.2f}'ye çek\n"
+            msg += f"🎯 <b>TP2 (%{RB_TP2_PCT}):</b> {tp2:,.2f} → kalanı burada kapat\n\n"
+            msg += f"⚠️ <b>ATR:</b> {atr:.2f} | <b>Risk:</b> %{sl_pct:.2f} | <b>Ödül:</b> %{RB_TP1_PCT}/%{RB_TP2_PCT}"
+        else:
+            sl = entry - (atr * RB_SL_ATR_MULT)
+            tp1 = entry * (1 + RB_TP1_PCT / 100)
+            tp2 = entry * (1 + RB_TP2_PCT / 100)
+            sl_pct = ((entry - sl) / entry) * 100
+
+            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Long) - {symbol}</b>\nRSI 8 dibi ({last_sig['low_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine yükseldi.\n📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n\n"
+            msg += f"💰 <b>Giriş:</b> {entry:,.2f}\n"
+            msg += f"🛑 <b>SL (2.5 ATR):</b> {sl:,.2f} (%{sl_pct:.2f})\n"
+            msg += f"🎯 <b>TP1 (%{RB_TP1_PCT}):</b> {tp1:,.2f} → yarısını kapat, SL'yi {entry:,.2f}'ye çek\n"
+            msg += f"🎯 <b>TP2 (%{RB_TP2_PCT}):</b> {tp2:,.2f} → kalanı burada kapat\n\n"
+            msg += f"⚠️ <b>ATR:</b> {atr:.2f} | <b>Risk:</b> %{sl_pct:.2f} | <b>Ödül:</b> %{RB_TP1_PCT}/%{RB_TP2_PCT}"
+
+        msgs.append({
+            "text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'],
+            "type": "rsi_buyusu", "direction": direction,
+            "price": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "atr": atr,
+            "ref_tf": last_sig['tf']
+        })
 
     return msgs
 
 
-# --- PİYASA ÖZETİ FONKSİYONU ---
 async def _fetch_stock_change(sym):
     def _inner():
         try:
@@ -455,20 +513,14 @@ async def generate_market_summary(session_name):
         )
 
         if df_30m is None or df_1h is None:
-            print(f"⚠️ Özet({session_name}): XU030 verisi çekilemedi (df_30m={df_30m is None}, df_1h={df_1h is None})")
+            print(f"⚠️ Özet({session_name}): XU030 verisi çekilemedi")
             return
-
-        # Debug: XU030 verisinin zaman aralığını gör
-        try:
-            print(f"🔍 DEBUG XU030({session_name}) — ilk bar: {df_30m.index[0]} | son bar: {df_30m.index[-1]} | tz: {df_30m.index.tz}")
-        except Exception:
-            pass
 
         today = datetime.now(TIMEZONE).date()
         df_today = df_30m[df_30m.index.date == today]
 
         if df_today.empty:
-            print(f"⚠️ Özet({session_name}): Bugün ({today}) için XU030 30m verisi yok. Son bar tarihi: {df_30m.index[-1]}")
+            print(f"⚠️ Özet({session_name}): Bugün için XU030 30m verisi yok")
             return
 
         if "Sabah" in session_name:
@@ -479,7 +531,7 @@ async def generate_market_summary(session_name):
             time_str = "14:01 - 17:54"
 
         if session_df.empty:
-            print(f"⚠️ Özet({session_name}): '{time_str}' aralığında veri yok. Bugünkü bar sayısı: {len(df_today)}")
+            print(f"⚠️ Özet({session_name}): '{time_str}' aralığında veri yok")
             return
 
         open_price = session_df['open'].iloc[0]
@@ -520,7 +572,6 @@ async def generate_market_summary(session_name):
         else:
             vol_status = "⚪ Normal Seviyede"
 
-        # Paralel hisse değişimleri
         stock_changes = {}
         green_count = 0
         red_count = 0
@@ -596,7 +647,6 @@ async def generate_market_summary(session_name):
         traceback.print_exc()
 
 
-# --- KOMUT İLE HİSSE ANALİZİ FONKSİYONU ---
 async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.upper().replace("/", "").strip()
 
@@ -668,7 +718,6 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Analiz hatası: {e}")
 
 
-# --- İŞLEM TAKİP SİSTEMİ ---
 async def check_active_trades():
     global active_trades
     if not active_trades: return
@@ -686,7 +735,54 @@ async def check_active_trades():
 
         t_type = trade["type"]
 
-        if trade.get("signal_type") == "kisa_vade":
+        # === RSI BÜYÜSÜ H1 ===
+        if trade.get("signal_type") == "rsi_buyusu":
+            entry = trade["entry"]
+            tp1 = trade["tp1"]
+            tp2 = trade["tp2"]
+            sl_orig = trade["sl"]
+            hit_tp1 = trade.get("hit_tp1", False)
+
+            # TP1 sonrası SL = entry (breakeven)
+            current_sl = entry if hit_tp1 else sl_orig
+
+            # SL kontrolü
+            if (t_type == "LONG" and current_low <= current_sl) or (t_type == "SHORT" and current_high >= current_sl):
+                if hit_tp1:
+                    msg = f"🛑 <b>STOP (Breakeven) - {sym}</b>\nTP1 sonrası SL maliyete çekilmişti. Kalan pozisyon kapatıldı.\n<b>Net kâr:</b> +%{RB_TP1_PCT/2:.2f} (TP1'den)"
+                else:
+                    msg = f"🛑 <b>STOP OLDU - {sym}</b>\nİlk Stop ({sl_orig:,.2f}) seviyesine değdi. Pozisyon kapatıldı."
+                for cid in CHAT_IDS:
+                    reply_id = trade.get("msg_ids", {}).get(str(cid))
+                    try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                    except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                del active_trades[trade_key]
+                continue
+
+            # TP1 kontrolü
+            if not hit_tp1:
+                if (t_type == "LONG" and current_high >= tp1) or (t_type == "SHORT" and current_low <= tp1):
+                    trade["hit_tp1"] = True
+                    msg = f"🎯 <b>TP1 VURULDU (%{RB_TP1_PCT}) - {sym}</b>\n👉 <b>Pozisyonun yarısını kapat.</b>\n🛑 <b>SL'yi maliyete çek:</b> {entry:,.2f}\n⏳ <i>Kalan yarıyı TP2 ({tp2:,.2f}) veya breakeven'a kadar tut.</i>"
+                    for cid in CHAT_IDS:
+                        reply_id = trade.get("msg_ids", {}).get(str(cid))
+                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                        except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                    continue
+
+            # TP2 kontrolü (TP1 sonrası)
+            if hit_tp1:
+                if (t_type == "LONG" and current_high >= tp2) or (t_type == "SHORT" and current_low <= tp2):
+                    msg = f"🎯🎯 <b>TP2 VURULDU (%{RB_TP2_PCT}) - {sym}</b>\n👉 <b>Kalan pozisyonu kapat.</b>\n<b>Net kâr:</b> ~%{(RB_TP1_PCT+RB_TP2_PCT)/2:.2f} (yarı yarıya)"
+                    for cid in CHAT_IDS:
+                        reply_id = trade.get("msg_ids", {}).get(str(cid))
+                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                        except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                    del active_trades[trade_key]
+                    continue
+
+        # === KISA VADE (mevcut) ===
+        elif trade.get("signal_type") == "kisa_vade":
             tp_hit = trade.get("tp_hit", False)
             init_sl = trade["sl"]
             entry_price = trade["entry"]
@@ -704,7 +800,7 @@ async def check_active_trades():
             if not tp_hit:
                 if (t_type == "LONG" and current_high >= target_tp) or (t_type == "SHORT" and current_low <= target_tp):
                     trade["tp_hit"] = True
-                    msg = f"🎯 <b>TP1 VURULDU (%5 Kâr) - {sym}</b>\n👉 <b>Pozisyonun yarısını (%50) kapatın.</b>\n🛑 <b>Stop-Loss'u maliyete çekin: {entry_price:,.2f}</b>\n⏳ <i>Kalan yarıyı 30m EMA50 kırılımına kadar tutun.</i>"
+                    msg = f"🎯 <b>TP1 VURULDU (%5 Kâr) - {sym}</b>\n👉 <b>Pozisyonun yarısını (%50) kapatın.</b>\n🛑 <b>Stop-Loss'u maliyete çekin: {entry_price:,.2f}</b>"
                     for cid in CHAT_IDS:
                         reply_id = trade.get("msg_ids", {}).get(str(cid))
                         try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
@@ -720,6 +816,7 @@ async def check_active_trades():
                         except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                     del active_trades[trade_key]
 
+        # === STANDART ===
         else:
             if not trade.get("hit_3pct", False):
                 if (t_type == "LONG" and current_high >= trade["entry"] * 1.03) or (t_type == "SHORT" and current_low <= trade["entry"] * 0.97):
@@ -757,7 +854,7 @@ async def send_signal_message(msg_data):
     for cid in CHAT_IDS:
         try:
             reply_to = None
-            if msg_type == "alert_confirmed":
+            if msg_type in ("alert_confirmed", "rsi_buyusu"):
                 key = f"{symbol}_{msg_data.get('ref_tf')}"
                 if key in last_rsi_alert_msgs and str(cid) in last_rsi_alert_msgs[key]:
                     reply_to = last_rsi_alert_msgs[key][str(cid)]
@@ -774,7 +871,7 @@ async def send_signal_message(msg_data):
                     last_rsi_alert_msgs[key] = {}
                 last_rsi_alert_msgs[key][str(cid)] = sent.message_id
 
-            if "direction" in msg_data and msg_type in ["standard", "kisa_vade"]:
+            if "direction" in msg_data and msg_type in ["standard", "kisa_vade", "rsi_buyusu"]:
                 msg_ids[str(cid)] = sent.message_id
 
         except Exception as e:
@@ -785,21 +882,24 @@ async def send_signal_message(msg_data):
                     sent = await bot_app.bot.send_photo(chat_id=cid, photo=buf, caption=text, parse_mode="HTML")
                 else:
                     sent = await bot_app.bot.send_message(chat_id=cid, text=text, parse_mode="HTML")
-                if "direction" in msg_data and msg_type in ["standard", "kisa_vade"]:
+                if "direction" in msg_data and msg_type in ["standard", "kisa_vade", "rsi_buyusu"]:
                     msg_ids[str(cid)] = sent.message_id
             except Exception as e2:
                 print(f"send_signal_message fallback {symbol} chat {cid}: {e2}")
 
-    if "direction" in msg_data and msg_type in ["standard", "kisa_vade"]:
+    if "direction" in msg_data and msg_type in ["standard", "kisa_vade", "rsi_buyusu"]:
         trade_key = f"{symbol}_{msg_data['direction']}_{msg_type}"
         trade_info = {
             "symbol": symbol, "type": msg_data["direction"], "entry": msg_data["price"],
-            "msg_ids": msg_ids,
-            "signal_type": msg_type,
+            "msg_ids": msg_ids, "signal_type": msg_type,
             "hit_3pct": False, "tp_hit": False, "sl": msg_data.get("sl")
         }
         if msg_type == "kisa_vade":
             trade_info["tp"] = msg_data.get("tp")
+        elif msg_type == "rsi_buyusu":
+            trade_info["tp1"] = msg_data.get("tp1")
+            trade_info["tp2"] = msg_data.get("tp2")
+            trade_info["hit_tp1"] = False
         active_trades[trade_key] = trade_info
 
 
@@ -807,12 +907,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Sistem çalışıyor. Analiz için /ASELS gibi komut yazabilirsiniz.")
 
 
-# Komutları ve Dinleyicileri Ekle
 bot_app.add_handler(CommandHandler("start", cmd_start))
 bot_app.add_handler(MessageHandler(filters.TEXT, analyze_symbol))
 
 
-# --- ZAMANLAYICILAR ---
 async def tick(force=False):
     if not force and not is_market_open(): return
     for sym in SYMBOLS:
@@ -857,7 +955,7 @@ class DummyHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.send_response(200); self.end_headers()
     def log_message(self, format, *args):
-        return  # log spam'i kapat
+        return
 
 
 def run_dummy_server():
@@ -873,7 +971,6 @@ async def main():
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="0,30", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="15,45", timezone=TIMEZONE))
 
-    # ↓↓↓ SABAH ÖZETİ 14:55'E ÇEKİLDİ (eski: 14:01) ↓↓↓
     sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=55, timezone=TIMEZONE))
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=17, minute=55, timezone=TIMEZONE))
 
