@@ -35,10 +35,8 @@ SYMBOLS = [
     "TKFEN", "ULKER", "VESTL", "XU030", "XU100", "XAUUSD", "XAGUSD"
 ]
 
-# Piyasa genişliği hesaplarken endeks ve emtiaları çıkarıp sadece hisseleri alacağız
 BIST_STOCKS = [s for s in SYMBOLS if not s.startswith("XU") and not s.endswith("USD")]
 
-# --- SEKTÖR AYRIMI ---
 SECTORS = {
     "🏦 Bankacılık": ["GARAN", "YKBNK", "AKBNK", "ISCTR", "VAKBN"],
     "🏢 Holdingler": ["SAHOL", "KCHOL", "ALARK", "DOHOL"],
@@ -85,6 +83,7 @@ KV_EMA_SLOW = 34
 active_trades = {}
 rsi_alarm_states = {}
 last_rsi_alert_msgs = {} 
+earnings_cache = {} # Bilanço bilgilerini tutacağımız hafıza
 # ==========================================
 
 def is_market_open(now=None):
@@ -93,6 +92,43 @@ def is_market_open(now=None):
     tr_holidays = holidays.Turkey()
     if now.date() in tr_holidays: return False
     return time(9, 55) <= now.time() <= time(18, 0)
+
+# --- YENİ: BİLANÇO TARİHİ KONTROLÜ ---
+def get_earnings_note(symbol):
+    today = datetime.now(TIMEZONE).date()
+    cache_key = f"{symbol}_{today}"
+    
+    # Eğer bugün bu hisse için zaten sorgulama yaptıysak hafızadan dön
+    if cache_key in earnings_cache:
+        return earnings_cache[cache_key]
+        
+    try:
+        ticker = bp.Ticker(symbol)
+        cal = ticker.calendar
+        if not cal: 
+            earnings_cache[cache_key] = ""
+            return ""
+            
+        earnings_date = cal.get('Earnings Date') if hasattr(cal, 'get') else None
+        if not earnings_date: 
+            earnings_cache[cache_key] = ""
+            return ""
+            
+        if isinstance(earnings_date, str):
+            earnings_date = datetime.strptime(earnings_date, "%Y-%m-%d")
+            
+        days_left = (earnings_date.date() - today).days
+        
+        # Bilançoya 5 gün veya daha az kaldıysa not oluştur
+        if 0 <= days_left <= 5:
+            note = f"\n📅 <b>Bilanço Uyarısı:</b> Bilançoya {days_left} gün kaldı! (Dikkatli olun)"
+            earnings_cache[cache_key] = note
+            return note
+    except Exception: 
+        pass
+        
+    earnings_cache[cache_key] = ""
+    return ""
 
 def fetch_ohlc(symbol, interval, limit=300):
     try:
@@ -217,6 +253,7 @@ def process_signals(symbol, dfs):
         
         close_price = float(df["close"].iloc[-1])
         
+        # --- 1. KATMAN: SNIPER & STANDART ---
         st = states.setdefault((symbol, tf), {"state": State.IDLE, "last_bar": None})
         bar_time = df.index[-1]
         if st["last_bar"] != bar_time:
@@ -234,11 +271,13 @@ def process_signals(symbol, dfs):
                 st["state"] = State.LONG
             st["last_bar"] = bar_time
 
+        # --- 2. KATMAN: ANINDA RSI UYARISI (İlk uyarı 81/25) ---
         if r_prev <= INSTANT_SHORT < r_now:
             rsi_alerts_instant["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
         elif r_prev >= INSTANT_LONG > r_now:
             rsi_alerts_instant["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
 
+        # --- 3. KATMAN: TEYİTLİ RSI UYARISI (State Machine) ---
         alarm_key = f"{symbol}_{tf}"
         if alarm_key not in rsi_alarm_states:
             rsi_alarm_states[alarm_key] = {"state": "IDLE", "peak_rsi": 0, "peak_price": 0, "low_rsi": 100, "low_price": 0}
@@ -322,15 +361,22 @@ def process_signals(symbol, dfs):
             msg = f"⚡ <b>30M KISA VADE SİNYALİ (SHORT)</b>\n🔴 <b>{symbol}</b> — SHORT [30M] ✅ PSAR & 4H EMA50 ONAYLI\n\n💰 <b>Giriş Fiyatı:</b> {close_price:,.2f}\n🛑 <b>İlk Stop:</b> {sl_price:,.2f} (3 ATR)\n🎯 <b>1. Hedef (TP1):</b> {tp_price:,.2f} (%{KV_TP1_PCT} Kâr)\n💡 <b>Çıkış:</b> TP1'de yarısını kapat, stopu maliyete çek, kalanı 30m EMA50 ile takip et."
             msgs.append({"text": msg, "df": df_30m, "symbol": symbol, "tf": "30m", "direction": "SHORT", "price": close_price, "sl": sl_price, "tp": tp_price, "atr": atr, "type": "kisa_vade"})
 
+    # RSI BÜYÜSÜ İLK UYARI (Bilanço notu eklendi)
     for direction, sig_list in [("SHORT", rsi_alerts_instant["SHORT"]), ("LONG", rsi_alerts_instant["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
+        
+        earnings_note = get_earnings_note(symbol)
+        
         if direction == "SHORT":
             msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Alım)\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
         else:
             msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Satım)\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
+        
+        msg += earnings_note
         msgs.append({"text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'], "type": "alert_instant", "direction": direction})
 
+    # RSI BÜYÜSÜ TEYİTLİ UYARI
     for direction, sig_list in [("SHORT", rsi_alerts_confirmed["SHORT"]), ("LONG", rsi_alerts_confirmed["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
@@ -423,7 +469,6 @@ async def generate_market_summary(session_name):
             except:
                 pass
         
-        # Sektör bazlı özet
         sector_lines = []
         for sector_name, stocks in SECTORS.items():
             sector_stocks = [s for s in stocks if s in stock_changes]
@@ -433,26 +478,19 @@ async def generate_market_summary(session_name):
             reds = len(sector_stocks) - greens
             avg_chg = sum(stock_changes[s] for s in sector_stocks) / len(sector_stocks)
             
-            if greens > reds:
-                emoji = "🟢"
-            elif reds > greens:
-                emoji = "🔴"
-            else:
-                emoji = "⚪"
+            if greens > reds: emoji = "🟢"
+            elif reds > greens: emoji = "🔴"
+            else: emoji = "⚪"
                 
             sector_lines.append((avg_chg, f"{emoji} {sector_name}: {greens}Y/{reds}K (Ort: %{avg_chg:+.2f})"))
         
-        # En iyi ve en kötü sektörleri vurgulamak için ortalamaya göre sırala
         sector_lines.sort(key=lambda x: x[0], reverse=True)
         sector_text = "\n".join([line for _, line in sector_lines])
 
-        # Trend & Momentum
         rsi_1h = get_rsi(df_1h['close'], RSI_PERIOD).iloc[-1]
         ema50_30m = df_30m['close'].ewm(span=50).mean().iloc[-1]
         trend_status = "🟢 EMA 50 Üzerinde" if close_price > ema50_30m else "🔴 EMA 50 Altında"
 
-        # Yorum
-        yorum = ""
         best_sector = sector_lines[0][1].split(":")[0] if sector_lines else ""
         worst_sector = sector_lines[-1][1].split(":")[0] if sector_lines else ""
         
