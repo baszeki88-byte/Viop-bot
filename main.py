@@ -119,7 +119,6 @@ def get_earnings_note(symbol):
             earnings_cache[cache_key] = ""
             return ""
 
-        # Güvenli tarih dönüşümü (str / datetime / date hepsini destekler)
         if isinstance(earnings_date, str):
             earnings_date = datetime.strptime(earnings_date, "%Y-%m-%d").date()
         elif hasattr(earnings_date, "date"):
@@ -141,6 +140,14 @@ def fetch_ohlc(symbol, interval, limit=300):
         df = bp.Ticker(symbol).history(period=f"{limit + 2} bar", interval=interval)
         if df is not None and not df.empty:
             df.columns = [str(c).lower() for c in df.columns]
+            # --- TIMEZONE NORMALİZASYONU ---
+            # Eğer borsapy UTC döndürüyorsa İstanbul'a çevir (between_time filtreleri için kritik)
+            if hasattr(df.index, "tz") and df.index.tz is not None:
+                try:
+                    if str(df.index.tz) != "Europe/Istanbul":
+                        df.index = df.index.tz_convert(TIMEZONE)
+                except Exception as tz_err:
+                    print(f"tz_convert uyarı {symbol} {interval}: {tz_err}")
             return df.iloc[:-1]
         return None
     except Exception as e:
@@ -433,25 +440,36 @@ async def _fetch_stock_change(sym):
                 prev = h['Close'].iloc[-2]
                 last = h['Close'].iloc[-1]
                 return sym, ((last - prev) / prev) * 100
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"_fetch_stock_change {sym}: {e}")
         return sym, None
     return await asyncio.to_thread(_inner)
 
 
 async def generate_market_summary(session_name):
+    print(f"▶️ Piyasa özeti başlıyor: {session_name} @ {datetime.now(TIMEZONE).strftime('%H:%M:%S')}")
     try:
         df_30m, df_1h = await asyncio.gather(
             fetch_ohlc_async("XU030", "30m", limit=250),
             fetch_ohlc_async("XU030", "1h",  limit=250),
         )
 
-        if df_30m is None or df_1h is None: return
+        if df_30m is None or df_1h is None:
+            print(f"⚠️ Özet({session_name}): XU030 verisi çekilemedi (df_30m={df_30m is None}, df_1h={df_1h is None})")
+            return
+
+        # Debug: XU030 verisinin zaman aralığını gör
+        try:
+            print(f"🔍 DEBUG XU030({session_name}) — ilk bar: {df_30m.index[0]} | son bar: {df_30m.index[-1]} | tz: {df_30m.index.tz}")
+        except Exception:
+            pass
 
         today = datetime.now(TIMEZONE).date()
         df_today = df_30m[df_30m.index.date == today]
 
-        if df_today.empty: return
+        if df_today.empty:
+            print(f"⚠️ Özet({session_name}): Bugün ({today}) için XU030 30m verisi yok. Son bar tarihi: {df_30m.index[-1]}")
+            return
 
         if "Sabah" in session_name:
             session_df = df_today.between_time('09:55', '14:00')
@@ -460,7 +478,9 @@ async def generate_market_summary(session_name):
             session_df = df_today.between_time('14:01', '17:54')
             time_str = "14:01 - 17:54"
 
-        if session_df.empty: return
+        if session_df.empty:
+            print(f"⚠️ Özet({session_name}): '{time_str}' aralığında veri yok. Bugünkü bar sayısı: {len(df_today)}")
+            return
 
         open_price = session_df['open'].iloc[0]
         close_price = session_df['close'].iloc[-1]
@@ -491,7 +511,7 @@ async def generate_market_summary(session_name):
                 past_vols.append(p_vol)
 
         avg_3d_vol = sum(past_vols) / len(past_vols) if past_vols else session_vol
-        vol_change = ((session_vol - avg_3d_vol) / avg_3d_vol) * 100
+        vol_change = ((session_vol - avg_3d_vol) / avg_3d_vol) * 100 if avg_3d_vol > 0 else 0
 
         if vol_change > 10:
             vol_status = f"🟢 Son 3 günün %{vol_change:.1f} ÜZERİNDE (Hacimli)"
@@ -561,12 +581,19 @@ async def generate_market_summary(session_name):
         msg += f"🏭 <b>Sektör Performansı:</b>\n{sector_text}\n\n"
         msg += f"💡 <b>Yorum:</b> {yorum}"
 
+        sent_count = 0
         for cid in CHAT_IDS:
-            try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-            except: pass
+            try:
+                await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                sent_count += 1
+            except Exception as send_err:
+                print(f"Özet gönderim hatası chat {cid}: {send_err}")
+        print(f"✅ Özet tamamlandı: {session_name} → {sent_count}/{len(CHAT_IDS)} gönderildi")
 
     except Exception as e:
-        print(f"Piyasa Özeti Hatası: {e}")
+        print(f"❌ Piyasa Özeti Hatası ({session_name}): {e}")
+        import traceback
+        traceback.print_exc()
 
 
 # --- KOMUT İLE HİSSE ANALİZİ FONKSİYONU ---
@@ -827,6 +854,8 @@ async def clear_daily_state():
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers(); self.wfile.write(b"Alive")
+    def do_HEAD(self):
+        self.send_response(200); self.end_headers()
     def log_message(self, format, *args):
         return  # log spam'i kapat
 
@@ -844,7 +873,8 @@ async def main():
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="0,30", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="15,45", timezone=TIMEZONE))
 
-    sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=1, timezone=TIMEZONE))
+    # ↓↓↓ SABAH ÖZETİ 14:55'E ÇEKİLDİ (eski: 14:01) ↓↓↓
+    sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=55, timezone=TIMEZONE))
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=17, minute=55, timezone=TIMEZONE))
 
     sched.add_job(clear_daily_state, CronTrigger(day_of_week="mon-fri", hour=18, minute=5, timezone=TIMEZONE))
