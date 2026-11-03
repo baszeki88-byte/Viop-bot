@@ -4,10 +4,15 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, time, timedelta
 from enum import Enum
+
+# --- MATPLOTLIB HEADLESS (sunucuda çökmeyi engeller) ---
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 import numpy as np
 import io
 import mplfinance as mpf
-import matplotlib.pyplot as plt
 
 import pandas as pd
 import borsapy as bp
@@ -22,16 +27,19 @@ from apscheduler.triggers.cron import CronTrigger
 # ==========================================
 # --- AYARLAR ---
 # ==========================================
-BOT_TOKEN = "9293651278:AAGdGb6Nr1gBX5-Er6YAb62ZNyUQEG4yxZg"
-CHAT_IDS = [5066109900, 8776376951] 
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "9293651278:AAGdGb6Nr1gBX5-Er6YAb62ZNyUQEG4yxZg")
+if "BOT_TOKEN" not in os.environ:
+    print("⚠️ BOT_TOKEN env'de yok — fallback kullanılıyor. Üretimde env kullanın!")
+
+CHAT_IDS = [5066109900, 8776376951]
 
 TIMEZONE = pytz.timezone("Europe/Istanbul")
 
 SYMBOLS = [
     "TOASO", "TRALT", "ASTOR", "GUBRF", "TRMET", "TCELL", "GARAN", "YKBNK", "TAVHL", "ENKAI",
     "TTKOM", "SAHOL", "SASA", "AEFES", "ASELS", "MGROS", "TUPRS", "AKBNK", "KCHOL", "KRDMD",
-    "ISCTR", "THYAO", "BIMAS", "EREGL", "EKGYO", "PGSUS", "FROTO", "SISE", "VAKBN", "ALARK", 
-    "AKSEN", "ARCLK", "BRSAN", "CIMSA", "DOAS", "DOHOL", "ENJSA", "OYAKC", "PETKM", "SOKM", 
+    "ISCTR", "THYAO", "BIMAS", "EREGL", "EKGYO", "PGSUS", "FROTO", "SISE", "VAKBN", "ALARK",
+    "AKSEN", "ARCLK", "BRSAN", "CIMSA", "DOAS", "DOHOL", "ENJSA", "OYAKC", "PETKM", "SOKM",
     "TKFEN", "ULKER", "VESTL", "XU030", "XU100", "XAUUSD", "XAGUSD"
 ]
 
@@ -68,8 +76,8 @@ ALARM_LONG_LOWER = 25
 ALARM_LONG_UPPER = 45
 
 EMA_PERIOD = 200
-SL_MULTIPLIER = 1.5  
-TIME_FRAMES = ["1h", "4h"] 
+SL_MULTIPLIER = 1.5
+TIME_FRAMES = ["1h", "4h"]
 
 # --- KISA VADE AYARLARI ---
 KV_RSI_PERIOD = 14
@@ -82,9 +90,10 @@ KV_EMA_SLOW = 34
 
 active_trades = {}
 rsi_alarm_states = {}
-last_rsi_alert_msgs = {} 
-earnings_cache = {} 
+last_rsi_alert_msgs = {}
+earnings_cache = {}
 # ==========================================
+
 
 def is_market_open(now=None):
     now = now or datetime.now(TIMEZONE)
@@ -93,39 +102,39 @@ def is_market_open(now=None):
     if now.date() in tr_holidays: return False
     return time(9, 55) <= now.time() <= time(18, 0)
 
+
 def get_earnings_note(symbol):
     today = datetime.now(TIMEZONE).date()
     cache_key = f"{symbol}_{today}"
-    
     if cache_key in earnings_cache:
         return earnings_cache[cache_key]
-        
     try:
         ticker = bp.Ticker(symbol)
         cal = ticker.calendar
-        if not cal: 
+        if not cal:
             earnings_cache[cache_key] = ""
             return ""
-            
         earnings_date = cal.get('Earnings Date') if hasattr(cal, 'get') else None
-        if not earnings_date: 
+        if not earnings_date:
             earnings_cache[cache_key] = ""
             return ""
-            
+
+        # Güvenli tarih dönüşümü (str / datetime / date hepsini destekler)
         if isinstance(earnings_date, str):
-            earnings_date = datetime.strptime(earnings_date, "%Y-%m-%d")
-            
-        days_left = (earnings_date.date() - today).days
-        
+            earnings_date = datetime.strptime(earnings_date, "%Y-%m-%d").date()
+        elif hasattr(earnings_date, "date"):
+            earnings_date = earnings_date.date()
+
+        days_left = (earnings_date - today).days
         if 0 <= days_left <= 5:
             note = f"\n📅 <b>Bilanço Uyarısı:</b> Bilançoya {days_left} gün kaldı! (Dikkatli olun)"
             earnings_cache[cache_key] = note
             return note
-    except Exception: 
-        pass
-        
+    except Exception as e:
+        print(f"get_earnings_note {symbol}: {e}")
     earnings_cache[cache_key] = ""
     return ""
+
 
 def fetch_ohlc(symbol, interval, limit=300):
     try:
@@ -134,12 +143,25 @@ def fetch_ohlc(symbol, interval, limit=300):
             df.columns = [str(c).lower() for c in df.columns]
             return df.iloc[:-1]
         return None
-    except:
+    except Exception as e:
+        print(f"fetch_ohlc {symbol} {interval}: {e}")
         return None
+
+
+async def fetch_ohlc_async(symbol, interval, limit=300):
+    return await asyncio.to_thread(fetch_ohlc, symbol, interval, limit)
+
 
 def fetch_all_tfs(symbol):
     tfs = set(TIME_FRAMES) | {"15m", "30m"}
     return {tf: fetch_ohlc(symbol, tf) for tf in tfs}
+
+
+async def fetch_all_tfs_async(symbol):
+    tfs = list(set(TIME_FRAMES) | {"15m", "30m"})
+    results = await asyncio.gather(*[fetch_ohlc_async(symbol, tf) for tf in tfs])
+    return dict(zip(tfs, results))
+
 
 def get_rsi(series, period=8):
     delta = series.diff()
@@ -148,12 +170,14 @@ def get_rsi(series, period=8):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
+
 def get_macd(series, fast=12, slow=26, signal=9):
     exp1 = series.ewm(span=fast, adjust=False).mean()
     exp2 = series.ewm(span=slow, adjust=False).mean()
     macd_line = exp1 - exp2
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     return macd_line, signal_line
+
 
 def calculate_atr(df, period=10):
     if df is None or len(df) < period + 1: return None
@@ -164,19 +188,21 @@ def calculate_atr(df, period=10):
     atr = tr.rolling(window=period).mean()
     return float(atr.iloc[-1])
 
+
 def get_ema_trend(df, period=200):
     if df is None or len(df) < period: return 0
     ema = df['close'].ewm(span=period, adjust=False).mean()
     close_price = float(df['close'].iloc[-1])
     ema_val = float(ema.iloc[-1])
-    return 1 if close_price > ema_val else -1 
+    return 1 if close_price > ema_val else -1
+
 
 def calculate_psar(df, af=0.02, max_af=0.2):
     high = df['high'].values
     low = df['low'].values
     n = len(df)
     psar = np.zeros(n)
-    trend = np.zeros(n) 
+    trend = np.zeros(n)
     if n == 0: return df
     psar[0] = low[0]
     trend[0] = 1
@@ -205,6 +231,7 @@ def calculate_psar(df, af=0.02, max_af=0.2):
     df['psar_trend'] = trend
     return df
 
+
 def create_chart_image(df, symbol, tf):
     try:
         df_chart = df.copy()
@@ -217,39 +244,42 @@ def create_chart_image(df, symbol, tf):
         buf = io.BytesIO()
         mpf.plot(plot_df, type='candle', style=s, title=f'\n{symbol} - {tf.upper()}', volume=True, addplot=addplots, savefig=buf)
         buf.seek(0)
-        plt.close('all') 
+        plt.close('all')
         return buf
     except Exception as e:
+        print(f"create_chart_image {symbol} {tf}: {e}")
         return None
+
 
 class State(Enum): IDLE="IDLE"; SHORT="SHORT"; LONG="LONG"
 states = {}
+
 
 def process_signals(symbol, dfs):
     msgs = []
     ctx_df = dfs.get("15m")
     trend_4h = get_ema_trend(dfs.get("4h"), EMA_PERIOD)
     trend_15m = get_ema_trend(ctx_df, EMA_PERIOD) if ctx_df is not None else 0
-    
+
     sniper_signals = {"LONG": [], "SHORT": []}
     standard_signals = {"LONG": [], "SHORT": []}
-    rsi_alerts_instant = {"LONG": [], "SHORT": []} 
-    rsi_alerts_confirmed = {"LONG": [], "SHORT": []} 
+    rsi_alerts_instant = {"LONG": [], "SHORT": []}
+    rsi_alerts_confirmed = {"LONG": [], "SHORT": []}
 
     for tf in TIME_FRAMES:
         df = dfs.get(tf)
         if df is None or len(df) < 30: continue
         rsi = get_rsi(df["close"], period=RSI_PERIOD)
         if rsi is None or len(rsi) < 2: continue
-        
+
         macd_line, macd_sig_line = get_macd(df["close"])
         macd_now, macd_sig_now = float(macd_line.iloc[-1]), float(macd_sig_line.iloc[-1])
         r_now, r_prev = float(rsi.iloc[-1]), float(rsi.iloc[-2])
         atr = calculate_atr(df, period=10)
         if not atr: continue
-        
+
         close_price = float(df["close"].iloc[-1])
-        
+
         st = states.setdefault((symbol, tf), {"state": State.IDLE, "last_bar": None})
         bar_time = df.index[-1]
         if st["last_bar"] != bar_time:
@@ -275,16 +305,16 @@ def process_signals(symbol, dfs):
         alarm_key = f"{symbol}_{tf}"
         if alarm_key not in rsi_alarm_states:
             rsi_alarm_states[alarm_key] = {"state": "IDLE", "peak_rsi": 0, "peak_price": 0, "low_rsi": 100, "low_price": 0}
-            
+
         alarm_data = rsi_alarm_states[alarm_key]
         state = alarm_data["state"]
-        
+
         if state == "IDLE":
             if r_now > ALARM_SHORT_UPPER:
                 rsi_alarm_states[alarm_key] = {"state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": close_price, "low_rsi": 100, "low_price": 0}
             elif r_now < ALARM_LONG_LOWER:
                 rsi_alarm_states[alarm_key] = {"state": "LONG_ARMED", "peak_rsi": 0, "peak_price": 0, "low_rsi": r_now, "low_price": close_price}
-                
+
         elif state == "SHORT_ARMED":
             if r_now > alarm_data["peak_rsi"]:
                 alarm_data["peak_rsi"] = r_now
@@ -297,7 +327,7 @@ def process_signals(symbol, dfs):
                 rsi_alarm_states[alarm_key]["state"] = "IDLE"
             elif r_now < ALARM_LONG_LOWER:
                 rsi_alarm_states[alarm_key] = {"state": "LONG_ARMED", "peak_rsi": 0, "peak_price": 0, "low_rsi": r_now, "low_price": close_price}
-                
+
         elif state == "LONG_ARMED":
             if r_now < alarm_data["low_rsi"]:
                 alarm_data["low_rsi"] = r_now
@@ -334,17 +364,17 @@ def process_signals(symbol, dfs):
         df_30m['ema_slow'] = df_30m['close'].ewm(span=KV_EMA_SLOW, adjust=False).mean()
         df_30m['rsi14'] = get_rsi(df_30m['close'], KV_RSI_PERIOD)
         df_30m = calculate_psar(df_30m)
-        
+
         trend_4h_50 = get_ema_trend(dfs.get("4h"), 50)
         i = len(df_30m) - 1
         cross_up = (df_30m['ema_fast'].iloc[i-1] <= df_30m['ema_slow'].iloc[i-1]) and (df_30m['ema_fast'].iloc[i] > df_30m['ema_slow'].iloc[i])
         cross_down = (df_30m['ema_fast'].iloc[i-1] >= df_30m['ema_slow'].iloc[i-1]) and (df_30m['ema_fast'].iloc[i] < df_30m['ema_slow'].iloc[i])
         atr = calculate_atr(df_30m, 10)
         close_price = float(df_30m['close'].iloc[i])
-        
+
         is_kv_long = cross_up and (df_30m['rsi14'].iloc[i] > KV_RSI_LONG) and (trend_4h_50 == 1) and (df_30m['psar_trend'].iloc[i] == 1)
         is_kv_short = cross_down and (df_30m['rsi14'].iloc[i] < KV_RSI_SHORT) and (trend_4h_50 == -1) and (df_30m['psar_trend'].iloc[i] == -1)
-        
+
         if is_kv_long and atr:
             sl_price = close_price - (atr * KV_SL_MULT)
             tp_price = close_price * (1 + KV_TP1_PCT/100)
@@ -356,56 +386,71 @@ def process_signals(symbol, dfs):
             msg = f"⚡ <b>30M KISA VADE SİNYALİ (SHORT)</b>\n🔴 <b>{symbol}</b> — SHORT [30M] ✅ PSAR & 4H EMA50 ONAYLI\n\n💰 <b>Giriş Fiyatı:</b> {close_price:,.2f}\n🛑 <b>İlk Stop:</b> {sl_price:,.2f} (3 ATR)\n🎯 <b>1. Hedef (TP1):</b> {tp_price:,.2f} (%{KV_TP1_PCT} Kâr)\n💡 <b>Çıkış:</b> TP1'de yarısını kapat, stopu maliyete çek, kalanı 30m EMA50 ile takip et."
             msgs.append({"text": msg, "df": df_30m, "symbol": symbol, "tf": "30m", "direction": "SHORT", "price": close_price, "sl": sl_price, "tp": tp_price, "atr": atr, "type": "kisa_vade"})
 
-    # --- RSI BÜYÜSÜ: İLK UYARI (Confluence Kontrolü Eklendi) ---
+    # --- RSI BÜYÜSÜ: İLK UYARI ---
     for direction, sig_list in [("SHORT", rsi_alerts_instant["SHORT"]), ("LONG", rsi_alerts_instant["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
-        
-        # 1H ve 4H uyum kontrolü
+
         tfs = [s["tf"] for s in sig_list]
         is_confluence = ("1h" in tfs and "4h" in tfs)
         confluence_icon = "🔥🔥 <b>[1H + 4H UYUMU]</b> 🔥🔥\n" if is_confluence else ""
-        
+
         earnings_note = get_earnings_note(symbol)
-        
+
         if direction == "SHORT":
             msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n{confluence_icon}⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Alım)\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
         else:
             msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n{confluence_icon}⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Satım)\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
-        
+
         msg += earnings_note
         msgs.append({"text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'], "type": "alert_instant", "direction": direction})
 
-    # --- RSI BÜYÜSÜ: TEYİTLİ UYARI (Confluence Kontrolü Eklendi) ---
+    # --- RSI BÜYÜSÜ: TEYİTLİ UYARI ---
     for direction, sig_list in [("SHORT", rsi_alerts_confirmed["SHORT"]), ("LONG", rsi_alerts_confirmed["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
-        
-        # 1H ve 4H uyum kontrolü
+
         tfs = [s["tf"] for s in sig_list]
         is_confluence = ("1h" in tfs and "4h" in tfs)
         confluence_icon = "🔥🔥 <b>[1H + 4H UYUMU]</b> 🔥🔥\n" if is_confluence else ""
-        
+
         if direction == "SHORT":
             msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n{confluence_icon}🎯 <b>TEYİTLİ SİNYAL (Short) - {symbol}</b>\nRSI 8 zirveyi ({last_sig['peak_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine geri çekildi.\n📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 0.97:,.2f} (%3)\n👉 <b>Short denenebilir. Grafiği kontrol edin.</b>"
         else:
             msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n{confluence_icon}🎯 <b>TEYİTLİ SİNYAL (Long) - {symbol}</b>\nRSI 8 dibi ({last_sig['low_rsi']:.1f}) gördü ve {last_sig['now']:.1f} seviyesine yükseldi.\n📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n🎯 <b>Olası Hedef (TP):</b> {last_sig['price'] * 1.03:,.2f} (%3)\n👉 <b>Long denenebilir. Grafiği kontrol edin.</b>"
-        
+
         msgs.append({"text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'], "type": "alert_confirmed", "direction": direction, "ref_tf": last_sig['tf']})
 
     return msgs
 
+
 # --- PİYASA ÖZETİ FONKSİYONU ---
+async def _fetch_stock_change(sym):
+    def _inner():
+        try:
+            h = bp.Ticker(sym).history(period="5d", interval="1d")
+            if len(h) >= 2:
+                prev = h['Close'].iloc[-2]
+                last = h['Close'].iloc[-1]
+                return sym, ((last - prev) / prev) * 100
+        except Exception:
+            pass
+        return sym, None
+    return await asyncio.to_thread(_inner)
+
+
 async def generate_market_summary(session_name):
     try:
-        df_30m = fetch_ohlc("XU030", "30m", limit=250)
-        df_1h = fetch_ohlc("XU030", "1h", limit=250)
-        
+        df_30m, df_1h = await asyncio.gather(
+            fetch_ohlc_async("XU030", "30m", limit=250),
+            fetch_ohlc_async("XU030", "1h",  limit=250),
+        )
+
         if df_30m is None or df_1h is None: return
-        
+
         today = datetime.now(TIMEZONE).date()
         df_today = df_30m[df_30m.index.date == today]
-        
+
         if df_today.empty: return
 
         if "Sabah" in session_name:
@@ -422,10 +467,10 @@ async def generate_market_summary(session_name):
         high_price = session_df['high'].max()
         low_price = session_df['low'].min()
         pct_change = ((close_price - open_price) / open_price) * 100
-        
+
         dist_to_high = ((high_price - close_price) / high_price) * 100
         dist_to_low = ((close_price - low_price) / low_price) * 100
-        
+
         if dist_to_high < 0.2:
             close_status = "🟢 Zirvede Kapattı (Güçlü)"
         elif dist_to_low < 0.2:
@@ -444,10 +489,10 @@ async def generate_market_summary(session_name):
                 else:
                     p_vol = past_df.between_time('14:01', '17:54')['volume'].sum()
                 past_vols.append(p_vol)
-                
+
         avg_3d_vol = sum(past_vols) / len(past_vols) if past_vols else session_vol
         vol_change = ((session_vol - avg_3d_vol) / avg_3d_vol) * 100
-        
+
         if vol_change > 10:
             vol_status = f"🟢 Son 3 günün %{vol_change:.1f} ÜZERİNDE (Hacimli)"
         elif vol_change < -10:
@@ -455,26 +500,21 @@ async def generate_market_summary(session_name):
         else:
             vol_status = "⚪ Normal Seviyede"
 
+        # Paralel hisse değişimleri
         stock_changes = {}
         green_count = 0
         red_count = 0
-        
-        for sym in BIST_STOCKS:
-            try:
-                t = bp.Ticker(sym)
-                h = t.history(period="5d", interval="1d")
-                if len(h) >= 2:
-                    prev_close = h['Close'].iloc[-2]
-                    last_close = h['Close'].iloc[-1]
-                    change = ((last_close - prev_close) / prev_close) * 100
-                    stock_changes[sym] = change
-                    if change > 0:
-                        green_count += 1
-                    else:
-                        red_count += 1
-            except:
-                pass
-        
+
+        results = await asyncio.gather(*[_fetch_stock_change(s) for s in BIST_STOCKS])
+        for sym, change in results:
+            if change is None:
+                continue
+            stock_changes[sym] = change
+            if change > 0:
+                green_count += 1
+            else:
+                red_count += 1
+
         sector_lines = []
         for sector_name, stocks in SECTORS.items():
             sector_stocks = [s for s in stocks if s in stock_changes]
@@ -483,13 +523,13 @@ async def generate_market_summary(session_name):
             greens = sum(1 for s in sector_stocks if stock_changes[s] > 0)
             reds = len(sector_stocks) - greens
             avg_chg = sum(stock_changes[s] for s in sector_stocks) / len(sector_stocks)
-            
+
             if greens > reds: emoji = "🟢"
             elif reds > greens: emoji = "🔴"
             else: emoji = "⚪"
-                
+
             sector_lines.append((avg_chg, f"{emoji} {sector_name}: {greens}Y/{reds}K (Ort: %{avg_chg:+.2f})"))
-        
+
         sector_lines.sort(key=lambda x: x[0], reverse=True)
         sector_text = "\n".join([line for _, line in sector_lines])
 
@@ -499,7 +539,7 @@ async def generate_market_summary(session_name):
 
         best_sector = sector_lines[0][1].split(":")[0] if sector_lines else ""
         worst_sector = sector_lines[-1][1].split(":")[0] if sector_lines else ""
-        
+
         if pct_change > 0 and vol_change > 0 and green_count > red_count:
             yorum = f"Alıcılar baskın. Özellikle {best_sector} sektörü öne çıkıyor. Long işlemler ön planda olabilir."
         elif pct_change < 0 and vol_change > 0 and red_count > green_count:
@@ -520,7 +560,7 @@ async def generate_market_summary(session_name):
         msg += f"🧭 <b>Trend:</b> 1H RSI: {rsi_1h:.1f} | 30m EMA 50: {ema50_30m:,.2f} ({trend_status})\n\n"
         msg += f"🏭 <b>Sektör Performansı:</b>\n{sector_text}\n\n"
         msg += f"💡 <b>Yorum:</b> {yorum}"
-        
+
         for cid in CHAT_IDS:
             try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
             except: pass
@@ -528,51 +568,57 @@ async def generate_market_summary(session_name):
     except Exception as e:
         print(f"Piyasa Özeti Hatası: {e}")
 
+
 # --- KOMUT İLE HİSSE ANALİZİ FONKSİYONU ---
 async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.upper().replace("/", "").strip()
-    
+
+    if text == "START":
+        return
+
     if text not in SYMBOLS:
         await update.message.reply_text(f"❌ '{text}' tarama listesinde bulunamadı. Lütfen geçerli bir sembol girin (Örn: /ASELS).")
         return
-        
+
     await update.message.reply_text(f"🔍 {text} analiz ediliyor, lütfen bekleyin...")
-    
+
     try:
-        df_30m = fetch_ohlc(text, "30m", limit=250)
-        df_1h = fetch_ohlc(text, "1h", limit=250)
-        df_4h = fetch_ohlc(text, "4h", limit=250)
-        df_1d = fetch_ohlc(text, "1d", limit=250)
-        
+        df_30m, df_1h, df_4h, df_1d = await asyncio.gather(
+            fetch_ohlc_async(text, "30m", limit=250),
+            fetch_ohlc_async(text, "1h",  limit=250),
+            fetch_ohlc_async(text, "4h",  limit=250),
+            fetch_ohlc_async(text, "1d",  limit=250),
+        )
+
         if df_1h is None or df_4h is None:
             await update.message.reply_text("❌ Veri çekilemedi.")
             return
-            
+
         msg = f"🤖 <b>{text} — Kapsamlı Analiz</b>\n"
         price = df_1h['close'].iloc[-1]
-        
+
         rsi_1h = get_rsi(df_1h['close'], RSI_PERIOD).iloc[-1]
         ema200_1h = df_1h['close'].ewm(span=200).mean().iloc[-1]
         trend_1h = "🟢 Yukarı" if price > ema200_1h else "🔴 Aşağı"
-        
+
         msg += f"\n📊 <b>1 Saatlik (1H)</b>\n"
         msg += f"• Fiyat: {price:,.2f}\n"
         msg += f"• RSI(8): {rsi_1h:.1f}\n"
         msg += f"• Trend: {trend_1h} (EMA 200)\n"
-        
+
         rsi_4h = get_rsi(df_4h['close'], RSI_PERIOD).iloc[-1]
         ema200_4h = df_4h['close'].ewm(span=200).mean().iloc[-1]
         trend_4h = "🟢 Yukarı" if price > ema200_4h else "🔴 Aşağı"
-        
+
         msg += f"\n📊 <b>4 Saatlik (4H)</b>\n"
         msg += f"• RSI(8): {rsi_4h:.1f}\n"
         msg += f"• Trend: {trend_4h} (EMA 200)\n"
-        
+
         if df_1d is not None:
             rsi_1d = get_rsi(df_1d['close'], 14).iloc[-1]
             msg += f"\n📊 <b>Günlük (1D)</b>\n"
             msg += f"• RSI(14): {rsi_1d:.1f}\n"
-            
+
         ema50_30m = 0
         if df_30m is not None:
             ema50_30m = df_30m['close'].ewm(span=50).mean().iloc[-1]
@@ -588,35 +634,36 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             msg += f"Ana trend AŞAĞI. Satış (Short) yönlü işlemler düşünülebilir.\n"
             if df_30m is not None:
                 msg += f"🛒 <b>Olası Satım Yeri (Direnç):</b> 30m EMA 50 seviyesi olan <b>{ema50_30m:,.2f}</b> civarı takip edilebilir."
-        
+
         await update.message.reply_text(msg, parse_mode="HTML")
-        
+
     except Exception as e:
         await update.message.reply_text(f"❌ Analiz hatası: {e}")
+
 
 # --- İŞLEM TAKİP SİSTEMİ ---
 async def check_active_trades():
     global active_trades
     if not active_trades: return
-    
+
     for trade_key, trade in list(active_trades.items()):
         sym = trade["symbol"]
-        df_30m = fetch_ohlc(sym, "30m", limit=100) 
+        df_30m = await fetch_ohlc_async(sym, "30m", limit=100)
         if df_30m is None or len(df_30m) < 50: continue
-        
+
         df_30m['ema50'] = df_30m['close'].ewm(span=50, adjust=False).mean()
         current_price = float(df_30m['close'].iloc[-1])
         current_ema50 = float(df_30m['ema50'].iloc[-1])
         current_high = float(df_30m['high'].iloc[-1])
         current_low = float(df_30m['low'].iloc[-1])
-        
+
         t_type = trade["type"]
-        
+
         if trade.get("signal_type") == "kisa_vade":
             tp_hit = trade.get("tp_hit", False)
             init_sl = trade["sl"]
             entry_price = trade["entry"]
-            
+
             if (t_type == "LONG" and current_low <= init_sl) or (t_type == "SHORT" and current_high >= init_sl):
                 msg = f"🛑 <b>STOP OLDU - {sym}</b>\nİlk Stop Seviyesine ({init_sl:,.2f}) değdi. Pozisyonu kapatın."
                 for cid in CHAT_IDS:
@@ -645,7 +692,7 @@ async def check_active_trades():
                         try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
                         except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                     del active_trades[trade_key]
-        
+
         else:
             if not trade.get("hit_3pct", False):
                 if (t_type == "LONG" and current_high >= trade["entry"] * 1.03) or (t_type == "SHORT" and current_low <= trade["entry"] * 0.97):
@@ -664,7 +711,9 @@ async def check_active_trades():
                         except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                     del active_trades[trade_key]
 
+
 bot_app = Application.builder().token(BOT_TOKEN).build()
+
 
 async def send_signal_message(msg_data):
     text = msg_data["text"]
@@ -672,11 +721,11 @@ async def send_signal_message(msg_data):
     symbol = msg_data["symbol"]
     tf = msg_data.get("tf")
     msg_type = msg_data["type"]
-    
+
     buf = None
     if df is not None:
         buf = create_chart_image(df, symbol, tf)
-    
+
     msg_ids = {}
     for cid in CHAT_IDS:
         try:
@@ -687,11 +736,11 @@ async def send_signal_message(msg_data):
                     reply_to = last_rsi_alert_msgs[key][str(cid)]
 
             if buf:
-                buf.seek(0) 
+                buf.seek(0)
                 sent = await bot_app.bot.send_photo(chat_id=cid, photo=buf, caption=text, parse_mode="HTML", reply_to_message_id=reply_to)
             else:
                 sent = await bot_app.bot.send_message(chat_id=cid, text=text, parse_mode="HTML", reply_to_message_id=reply_to)
-            
+
             if msg_type == "alert_instant":
                 key = f"{symbol}_{tf}"
                 if key not in last_rsi_alert_msgs:
@@ -700,20 +749,24 @@ async def send_signal_message(msg_data):
 
             if "direction" in msg_data and msg_type in ["standard", "kisa_vade"]:
                 msg_ids[str(cid)] = sent.message_id
-                
+
         except Exception as e:
-            if buf:
-                buf.seek(0) 
-                sent = await bot_app.bot.send_photo(chat_id=cid, photo=buf, caption=text, parse_mode="HTML")
-            else:
-                sent = await bot_app.bot.send_message(chat_id=cid, text=text, parse_mode="HTML")
-            if "direction" in msg_data and msg_type in ["standard", "kisa_vade"]:
-                msg_ids[str(cid)] = sent.message_id
-    
+            print(f"send_signal_message {symbol} chat {cid}: {e}")
+            try:
+                if buf:
+                    buf.seek(0)
+                    sent = await bot_app.bot.send_photo(chat_id=cid, photo=buf, caption=text, parse_mode="HTML")
+                else:
+                    sent = await bot_app.bot.send_message(chat_id=cid, text=text, parse_mode="HTML")
+                if "direction" in msg_data and msg_type in ["standard", "kisa_vade"]:
+                    msg_ids[str(cid)] = sent.message_id
+            except Exception as e2:
+                print(f"send_signal_message fallback {symbol} chat {cid}: {e2}")
+
     if "direction" in msg_data and msg_type in ["standard", "kisa_vade"]:
         trade_key = f"{symbol}_{msg_data['direction']}_{msg_type}"
         trade_info = {
-            "symbol": symbol, "type": msg_data["direction"], "entry": msg_data["price"], 
+            "symbol": symbol, "type": msg_data["direction"], "entry": msg_data["price"],
             "msg_ids": msg_ids,
             "signal_type": msg_type,
             "hit_3pct": False, "tp_hit": False, "sl": msg_data.get("sl")
@@ -722,28 +775,32 @@ async def send_signal_message(msg_data):
             trade_info["tp"] = msg_data.get("tp")
         active_trades[trade_key] = trade_info
 
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE): 
+
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Sistem çalışıyor. Analiz için /ASELS gibi komut yazabilirsiniz.")
+
 
 # Komutları ve Dinleyicileri Ekle
 bot_app.add_handler(CommandHandler("start", cmd_start))
-bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyze_symbol))
-bot_app.add_handler(MessageHandler(filters.COMMAND & ~filters.Regex(r'^/start$'), analyze_symbol))
+bot_app.add_handler(MessageHandler(filters.TEXT, analyze_symbol))
+
 
 # --- ZAMANLAYICILAR ---
 async def tick(force=False):
     if not force and not is_market_open(): return
     for sym in SYMBOLS:
         try:
-            dfs = fetch_all_tfs(sym)
-            for msg_data in process_signals(sym, dfs): 
+            dfs = await fetch_all_tfs_async(sym)
+            for msg_data in process_signals(sym, dfs):
                 await send_signal_message(msg_data)
-        except Exception as e: 
-            pass
+        except Exception as e:
+            print(f"tick {sym}: {e}")
+
 
 async def tracker_tick():
     if not is_market_open(): return
     await check_active_trades()
+
 
 async def market_open_scan():
     if not is_market_open(): return
@@ -752,32 +809,50 @@ async def market_open_scan():
         except: pass
     await tick(force=True)
 
+
 async def task_morning_summary():
     await generate_market_summary("Sabah")
+
 
 async def task_afternoon_summary():
     await generate_market_summary("Öğleden Sonra")
 
+
+async def clear_daily_state():
+    last_rsi_alert_msgs.clear()
+    earnings_cache.clear()
+    print("🧹 Günlük state temizlendi.")
+
+
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers(); self.wfile.write(b"Alive")
+    def log_message(self, format, *args):
+        return  # log spam'i kapat
+
+
 def run_dummy_server():
     HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8080))), DummyHandler).serve_forever()
+
 
 async def main():
     threading.Thread(target=run_dummy_server, daemon=True).start()
     await bot_app.initialize(); await bot_app.start(); await bot_app.updater.start_polling()
     sched = AsyncIOScheduler(timezone=TIMEZONE)
-    
+
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="0,30", timezone=TIMEZONE))
-    sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="15,45", timezone=TIMEZONE)) 
-    
+    sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="15,45", timezone=TIMEZONE))
+
     sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=1, timezone=TIMEZONE))
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=17, minute=55, timezone=TIMEZONE))
-    
+
+    sched.add_job(clear_daily_state, CronTrigger(day_of_week="mon-fri", hour=18, minute=5, timezone=TIMEZONE))
+
     sched.start()
     print("✅ Bot çalışıyor.")
     while True: await asyncio.sleep(3600)
 
-if __name__ == "__main__": asyncio.run(main())
+
+if __name__ == "__main__":
+    asyncio.run(main())
