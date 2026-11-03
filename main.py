@@ -26,9 +26,10 @@ from apscheduler.triggers.cron import CronTrigger
 # ==========================================
 # --- AYARLAR ---
 # ==========================================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "9293651278:AAGdGb6Nr1gBX5-Er6YAb62ZNyUQEG4yxZg")
-if "BOT_TOKEN" not in os.environ:
-    print("⚠️ BOT_TOKEN env'de yok — fallback kullanılıyor. Üretimde env kullanın!")
+# DÜZELTME: Token koddan kaldırıldı. Sadece ortam değişkeninden okunur.
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN ortam değişkeni tanımlı değil. Yeni token'ı env olarak ekleyin.")
 
 CHAT_IDS = [5066109900, 8776376951]
 TIMEZONE = pytz.timezone("Europe/Istanbul")
@@ -91,7 +92,7 @@ KV_EMA_SLOW = 34
 RB_SL_ATR_MULT = 2.5
 RB_TP1_PCT = 1.5
 RB_TP2_PCT = 3.0
-RB_TIMEOUT_BARS = 24
+RB_TIMEOUT_BARS = 24   # 1H bar. DÜZELTME: artık kullanılıyor (check_active_trades)
 
 # --- DEĞİŞTİ: Hızlı MACD (backtest kazananı) ---
 MACD_FAST = 8
@@ -300,7 +301,10 @@ def process_signals(symbol, dfs):
 
         st = states.setdefault((symbol, tf), {"state": State.IDLE, "last_bar": None})
         bar_time = df.index[-1]
-        if st["last_bar"] != bar_time:
+        # DÜZELTME: Aynı kapanmış bar ikinci kez işlenmesin (tick yarım saatte bir, bar saatlik)
+        is_new_bar = st["last_bar"] != bar_time
+
+        if is_new_bar:
             if r_prev <= RSI_SHORT_STD < r_now:
                 if trend_4h == -1 and macd_now < macd_sig_now:
                     sig_data = {"tf": tf, "price": close_price, "atr": atr, "df": df}
@@ -314,6 +318,11 @@ def process_signals(symbol, dfs):
                     else: standard_signals["LONG"].append(sig_data)
                 st["state"] = State.LONG
             st["last_bar"] = bar_time
+
+        # DÜZELTME: Yeni bar yoksa ilk uyarı ve RSI Büyüsü durum makinesi tekrar çalışmasın
+        # (aksi halde ilk uyarı iki kez gider, reject_count bar başına 2 kez artar)
+        if not is_new_bar:
+            continue
 
         if r_prev <= INSTANT_SHORT < r_now:
             rsi_alerts_instant["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
@@ -348,7 +357,7 @@ def process_signals(symbol, dfs):
                     rsi_alerts_confirmed["SHORT"].append({
                         "tf": tf, "prev": r_prev, "now": r_now, "price": close_price,
                         "peak_rsi": alarm_data["peak_rsi"], "peak_price": alarm_data["peak_price"],
-                        "atr": atr
+                        "atr": atr, "bar_time": bar_time
                     })
                     rsi_alarm_states[alarm_key]["state"] = "IDLE"
                 else:
@@ -371,7 +380,7 @@ def process_signals(symbol, dfs):
                     rsi_alerts_confirmed["LONG"].append({
                         "tf": tf, "prev": r_prev, "now": r_now, "price": close_price,
                         "low_rsi": alarm_data["low_rsi"], "low_price": alarm_data["low_price"],
-                        "atr": atr
+                        "atr": atr, "bar_time": bar_time
                     })
                     rsi_alarm_states[alarm_key]["state"] = "IDLE"
                 else:
@@ -466,7 +475,8 @@ def process_signals(symbol, dfs):
             msg += f"🛑 <b>SL (2.5 ATR):</b> {sl:,.2f} (%{sl_pct:.2f})\n"
             msg += f"🎯 <b>TP1 (%{RB_TP1_PCT}):</b> {tp1:,.2f} → yarısını kapat, SL'yi {entry:,.2f}'ye çek\n"
             msg += f"🎯 <b>TP2 (%{RB_TP2_PCT}):</b> {tp2:,.2f} → kalanı burada kapat\n\n"
-            msg += f"⚠️ <b>ATR:</b> {atr:.2f} | <b>Risk:</b> %{sl_pct:.2f} | <b>Ödül:</b> %{RB_TP1_PCT}/%{RB_TP2_PCT}"
+            msg += f"⚠️ <b>ATR:</b> {atr:.2f} | <b>Risk:</b> %{sl_pct:.2f} | <b>Ödül:</b> %{RB_TP1_PCT}/%{RB_TP2_PCT}\n"
+            msg += f"⏱ <b>Zaman aşımı:</b> {RB_TIMEOUT_BARS} saatlik bar sonunda hedef gelmediyse kapat."
         else:
             sl = entry - (atr * RB_SL_ATR_MULT)
             tp1 = entry * (1 + RB_TP1_PCT / 100)
@@ -478,13 +488,15 @@ def process_signals(symbol, dfs):
             msg += f"🛑 <b>SL (2.5 ATR):</b> {sl:,.2f} (%{sl_pct:.2f})\n"
             msg += f"🎯 <b>TP1 (%{RB_TP1_PCT}):</b> {tp1:,.2f} → yarısını kapat, SL'yi {entry:,.2f}'ye çek\n"
             msg += f"🎯 <b>TP2 (%{RB_TP2_PCT}):</b> {tp2:,.2f} → kalanı burada kapat\n\n"
-            msg += f"⚠️ <b>ATR:</b> {atr:.2f} | <b>Risk:</b> %{sl_pct:.2f} | <b>Ödül:</b> %{RB_TP1_PCT}/%{RB_TP2_PCT}"
+            msg += f"⚠️ <b>ATR:</b> {atr:.2f} | <b>Risk:</b> %{sl_pct:.2f} | <b>Ödül:</b> %{RB_TP1_PCT}/%{RB_TP2_PCT}\n"
+            msg += f"⏱ <b>Zaman aşımı:</b> {RB_TIMEOUT_BARS} saatlik bar sonunda hedef gelmediyse kapat."
 
         msgs.append({
             "text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'],
             "type": "rsi_buyusu", "direction": direction,
             "price": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "atr": atr,
-            "ref_tf": last_sig['tf']
+            "ref_tf": last_sig['tf'],
+            "bar_time": last_sig.get("bar_time")
         })
 
     return msgs
@@ -781,6 +793,32 @@ async def check_active_trades():
                     del active_trades[trade_key]
                     continue
 
+            # --- DÜZELTME: ZAMAN AŞIMI (RB_TIMEOUT_BARS saatlik bar) ---
+            # Giriş barından bu yana geçen 30m bar sayısı; 1 saatlik bar = 2 adet 30m bar.
+            entry_bar = trade.get("entry_bar_time")
+            if entry_bar is not None:
+                try:
+                    bars_30m = int((df_30m.index > entry_bar).sum())
+                except Exception as e:
+                    print(f"timeout bar sayımı {sym}: {e}")
+                    bars_30m = 0
+                if bars_30m >= RB_TIMEOUT_BARS * 2:
+                    if t_type == "LONG":
+                        pnl = (current_price - entry) / entry * 100
+                    else:
+                        pnl = (entry - current_price) / entry * 100
+                    durum = "TP1 alınmış, kalan yarı" if hit_tp1 else "pozisyonun tamamı"
+                    msg = (f"⏱ <b>ZAMAN AŞIMI - {sym}</b>\n"
+                           f"{RB_TIMEOUT_BARS} saatlik bar doldu, hedef/stop gelmedi.\n"
+                           f"👉 <b>Kapat:</b> {durum}.\n"
+                           f"Son fiyat: {current_price:,.2f} (girişe göre %{pnl:+.2f})")
+                    for cid in CHAT_IDS:
+                        reply_id = trade.get("msg_ids", {}).get(str(cid))
+                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                        except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                    del active_trades[trade_key]
+                    continue
+
         # === KISA VADE (mevcut) ===
         elif trade.get("signal_type") == "kisa_vade":
             tp_hit = trade.get("tp_hit", False)
@@ -900,6 +938,8 @@ async def send_signal_message(msg_data):
             trade_info["tp1"] = msg_data.get("tp1")
             trade_info["tp2"] = msg_data.get("tp2")
             trade_info["hit_tp1"] = False
+            # DÜZELTME: zaman aşımı için giriş barının zamanı
+            trade_info["entry_bar_time"] = msg_data.get("bar_time")
         active_trades[trade_key] = trade_info
 
 
