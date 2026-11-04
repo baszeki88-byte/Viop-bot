@@ -26,11 +26,12 @@ from apscheduler.triggers.cron import CronTrigger
 # ==========================================
 # --- AYARLAR ---
 # ==========================================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "9293651278:AAGdGb6Nr1gBX5-Er6YAb62ZNyUQEG4yxZg")
-if "BOT_TOKEN" not in os.environ:
-    print("⚠️ BOT_TOKEN env'de yok — fallback kullanılıyor. Üretimde env kullanın!")
+# Güvenlik: Token artık sadece Render Environment (Çevre Değişkenleri) üzerinden okunuyor.
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("❌ HATA: BOT_TOKEN bulunamadı! Lütfen Render Environment sekmesine ekleyin.")
 
-CHAT_IDS = [5066109900, 8776376951]
+CHAT_IDS = [5066109900, 8776376951] # Sadece bu iki ID botu kullanabilir!
 TIMEZONE = pytz.timezone("Europe/Istanbul")
 
 SYMBOLS = [
@@ -345,7 +346,7 @@ def process_signals(symbol, dfs):
                 st["state"] = State.LONG
             st["last_bar"] = bar_time
 
-        # İLK UYARI (Aynı bar için tekrar atmasını önlemek adına instant_states eklendi)
+        # İLK UYARI (Mükerrer mesaj engelleme)
         inst_key = f"inst_{symbol}_{tf}"
         if inst_key not in instant_states:
             instant_states[inst_key] = {"last_bar": None}
@@ -588,7 +589,7 @@ def process_signals(symbol, dfs):
         atr = last_sig.get('atr', 0)
 
         trend_info = get_symbol_trend_label(direction, dfs.get("1h"), dfs.get("4h"))
-        earnings_note = get_earnings_note(symbol)  # <-- Bilanço Uyarısı Eklendi
+        earnings_note = get_earnings_note(symbol)
 
         if direction == "SHORT":
             sl = entry + (atr * RB_SL_ATR_MULT)
@@ -641,7 +642,7 @@ def process_signals(symbol, dfs):
         atr = last_sig.get('atr', 0)
 
         trend_info = get_symbol_trend_label(direction, dfs.get("1h"), dfs.get("4h"))
-        earnings_note = get_earnings_note(symbol)  # <-- Bilanço Uyarısı Eklendi
+        earnings_note = get_earnings_note(symbol)
 
         if direction == "SHORT":
             sl = last_sig['peak_price']
@@ -1102,8 +1103,13 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Sistem çalışıyor. Analiz için /ASELS gibi komut yazabilirsiniz.")
 
 
-bot_app.add_handler(CommandHandler("start", cmd_start))
-bot_app.add_handler(MessageHandler(filters.TEXT, analyze_symbol))
+# ==========================================
+# GÜVENLİK FİLTRESİ: Sadece CHAT_IDS'deki kişiler kullanabilir
+# ==========================================
+auth_filter = filters.User(user_id=CHAT_IDS)
+
+bot_app.add_handler(CommandHandler("start", cmd_start, filters=auth_filter))
+bot_app.add_handler(MessageHandler(filters.TEXT & auth_filter, analyze_symbol))
 
 
 async def tick(force=False):
@@ -1165,7 +1171,8 @@ async def main():
     sched = AsyncIOScheduler(timezone=TIMEZONE)
 
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
-    # Gecikmeyi önlemek için tarama sıklığını :15 ve :45 olarak güncelledik (Saat başından 15 dk sonra veri kesin düşmüş olur)
+    
+    # Gecikmeyi önlemek için tarama sıklığını :15 ve :45 olarak güncelledik
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="15,45", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="0,30", timezone=TIMEZONE))
 
