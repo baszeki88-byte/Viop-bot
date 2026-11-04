@@ -566,16 +566,27 @@ def process_signals(symbol, dfs):
                          "direction": "SHORT", "price": close_kv, "sl": sl_price,
                          "tp": tp_price, "atr": atr_kv, "type": "kisa_vade"})
 
-    # --- RSI BÜYÜSÜ: İLK UYARI ---
+    # --- RSI BÜYÜSÜ: İLK UYARI (YENİ: Hedef Giriş Fiyatı Eklendi) ---
     for direction, sig_list in [("SHORT", rsi_alerts_instant["SHORT"]), ("LONG", rsi_alerts_instant["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
         earnings_note = get_earnings_note(symbol)
 
         if direction == "SHORT":
-            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Alım)\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
+            # Backtest sonucuna göre SHORT sinyali sonrası zirve ortalama +%2 yukarıda oluşuyor
+            hedef_fiyat = last_sig['price'] * 1.02
+            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Alım)\n\n"
+            msg += f"🚨 <b>Alarm Fiyatı:</b> {last_sig['price']:,.2f}\n"
+            msg += f"🎯 <b>Olası Giriş (Zirve Hedefi):</b> {hedef_fiyat:,.2f} (Tahmini +%2)\n\n"
+            msg += f"👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
         else:
-            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Satım)\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
+            # Backtest sonucuna göre LONG sinyali sonrası dip ortalama -%2 aşağıda oluşuyor
+            hedef_fiyat = last_sig['price'] * 0.98
+            msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Satım)\n\n"
+            msg += f"🚨 <b>Alarm Fiyatı:</b> {last_sig['price']:,.2f}\n"
+            msg += f"🎯 <b>Olası Giriş (Dip Hedefi):</b> {hedef_fiyat:,.2f} (Tahmini -%2)\n\n"
+            msg += f"👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
+            
         msg += earnings_note
         msgs.append({"text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'],
                      "type": "alert_instant", "direction": direction})
