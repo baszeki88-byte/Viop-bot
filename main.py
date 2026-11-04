@@ -101,9 +101,10 @@ MACD_SIGNAL = 9
 
 active_trades = {}
 rsi_alarm_states = {}
-atr_dunyasi_states = {}   # YENİ
+atr_dunyasi_states = {}
+instant_states = {}       # Aynı bar için tekrar tekrar ilk uyarı atmasını engeller
 last_rsi_alert_msgs = {}
-last_atr_dunyasi_msgs = {}  # YENİ
+last_atr_dunyasi_msgs = {}
 earnings_cache = {}
 # ==========================================
 
@@ -117,6 +118,7 @@ def is_market_open(now=None):
 
 
 def get_earnings_note(symbol):
+    """Son 5 gün içinde bilanço açıklaması varsa uyarı döner."""
     today = datetime.now(TIMEZONE).date()
     cache_key = f"{symbol}_{today}"
     if cache_key in earnings_cache:
@@ -309,7 +311,7 @@ def process_signals(symbol, dfs):
     standard_signals = {"LONG": [], "SHORT": []}
     rsi_alerts_instant = {"LONG": [], "SHORT": []}
     rsi_alerts_confirmed = {"LONG": [], "SHORT": []}
-    atr_dunyasi_signals = {"LONG": [], "SHORT": []}  # YENİ
+    atr_dunyasi_signals = {"LONG": [], "SHORT": []}
 
     for tf in TIME_FRAMES:
         df = dfs.get(tf)
@@ -325,9 +327,9 @@ def process_signals(symbol, dfs):
         if not atr: continue
 
         close_price = float(df["close"].iloc[-1])
+        bar_time = df.index[-1]
 
         st = states.setdefault((symbol, tf), {"state": State.IDLE, "last_bar": None})
-        bar_time = df.index[-1]
         if st["last_bar"] != bar_time:
             if r_prev <= RSI_SHORT_STD < r_now:
                 if trend_4h == -1 and macd_now < macd_sig_now:
@@ -343,11 +345,18 @@ def process_signals(symbol, dfs):
                 st["state"] = State.LONG
             st["last_bar"] = bar_time
 
-        # İLK UYARI
-        if r_prev <= INSTANT_SHORT < r_now:
-            rsi_alerts_instant["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
-        elif r_prev >= INSTANT_LONG > r_now:
-            rsi_alerts_instant["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
+        # İLK UYARI (Aynı bar için tekrar atmasını önlemek adına instant_states eklendi)
+        inst_key = f"inst_{symbol}_{tf}"
+        if inst_key not in instant_states:
+            instant_states[inst_key] = {"last_bar": None}
+            
+        if instant_states[inst_key]["last_bar"] != bar_time:
+            if r_prev <= INSTANT_SHORT < r_now:
+                rsi_alerts_instant["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
+                instant_states[inst_key]["last_bar"] = bar_time
+            elif r_prev >= INSTANT_LONG > r_now:
+                rsi_alerts_instant["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
+                instant_states[inst_key]["last_bar"] = bar_time
 
         # === RSI BÜYÜSÜ (ARMED + ATR 2.0 teyit) ===
         alarm_key = f"{symbol}_{tf}"
@@ -427,7 +436,7 @@ def process_signals(symbol, dfs):
                             "last_bar": df.index[-1], "reject_count": 0
                         }
 
-        # === YENİ: ATR DÜNYASI (bağımsız state machine) ===
+        # === YENİ: ATR DÜNYASI ===
         atr_key = f"atr_{symbol}_{tf}"
         if atr_key not in atr_dunyasi_states:
             atr_dunyasi_states[atr_key] = {
@@ -579,7 +588,7 @@ def process_signals(symbol, dfs):
         atr = last_sig.get('atr', 0)
 
         trend_info = get_symbol_trend_label(direction, dfs.get("1h"), dfs.get("4h"))
-        earnings_note = get_earnings_note(symbol)
+        earnings_note = get_earnings_note(symbol)  # <-- Bilanço Uyarısı Eklendi
 
         if direction == "SHORT":
             sl = entry + (atr * RB_SL_ATR_MULT)
@@ -632,10 +641,9 @@ def process_signals(symbol, dfs):
         atr = last_sig.get('atr', 0)
 
         trend_info = get_symbol_trend_label(direction, dfs.get("1h"), dfs.get("4h"))
-        earnings_note = get_earnings_note(symbol)
+        earnings_note = get_earnings_note(symbol)  # <-- Bilanço Uyarısı Eklendi
 
         if direction == "SHORT":
-            # Stop = zirve fiyatı (sabit)
             sl = last_sig['peak_price']
             tp1 = entry * (1 - RB_TP1_PCT / 100)
             tp2 = entry * (1 - RB_TP2_PCT / 100)
@@ -655,7 +663,6 @@ def process_signals(symbol, dfs):
             msg += f"⚠️ <b>ATR:</b> {atr:.2f} | <b>Şu anki RSI:</b> {last_sig['now_rsi']:.1f} | <b>Ödül:</b> %{RB_TP1_PCT}/%{RB_TP2_PCT}"
             msg += earnings_note
         else:
-            # Stop = dip fiyatı (sabit)
             sl = last_sig['low_price']
             tp1 = entry * (1 + RB_TP1_PCT / 100)
             tp2 = entry * (1 + RB_TP2_PCT / 100)
@@ -930,13 +937,13 @@ async def check_active_trades():
 
         t_type = trade["type"]
 
-        # === RSI BÜYÜSÜ ve ATR DÜNYASI aynı lifecycle ===
         if trade.get("signal_type") in ("rsi_buyusu", "atr_dunyasi"):
             entry = trade["entry"]
             tp1 = trade["tp1"]
             tp2 = trade["tp2"]
             sl_orig = trade["sl"]
             hit_tp1 = trade.get("hit_tp1", False)
+
             current_sl = entry if hit_tp1 else sl_orig
 
             if (t_type == "LONG" and current_low <= current_sl) or (t_type == "SHORT" and current_high >= current_sl):
@@ -1134,6 +1141,7 @@ async def task_afternoon_summary():
 async def clear_daily_state():
     last_rsi_alert_msgs.clear()
     last_atr_dunyasi_msgs.clear()
+    instant_states.clear()
     earnings_cache.clear()
     print("🧹 Günlük state temizlendi.")
 
@@ -1157,8 +1165,9 @@ async def main():
     sched = AsyncIOScheduler(timezone=TIMEZONE)
 
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
-    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="0,30", timezone=TIMEZONE))
-    sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="15,45", timezone=TIMEZONE))
+    # Gecikmeyi önlemek için tarama sıklığını :15 ve :45 olarak güncelledik (Saat başından 15 dk sonra veri kesin düşmüş olur)
+    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="15,45", timezone=TIMEZONE))
+    sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="0,30", timezone=TIMEZONE))
 
     sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=15, timezone=TIMEZONE))
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=17, minute=55, timezone=TIMEZONE))
