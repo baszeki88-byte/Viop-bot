@@ -105,6 +105,7 @@ active_trades = {}
 rsi_alarm_states = {}
 atr_dunyasi_states = {}
 instant_states = {}       
+divergence_states = {} # YENİ: Uyumsuzluk durum takibi
 last_rsi_alert_msgs = {}
 last_atr_dunyasi_msgs = {}
 earnings_cache = {}
@@ -271,20 +272,56 @@ def calculate_psar(df, af=0.02, max_af=0.2):
     return df
 
 
-def create_chart_image(df, symbol, tf):
+def create_chart_image(df, symbol, tf, divergence_info=None):
     try:
         df_chart = df.copy()
         df_chart['ema50'] = df_chart['close'].ewm(span=50, adjust=False).mean()
         df_chart['ema200'] = df_chart['close'].ewm(span=EMA_PERIOD, adjust=False).mean()
         plot_df = df_chart.tail(30)
+        
         mc = mpf.make_marketcolors(up='g', down='r', edge='inherit', wick='inherit', volume='in')
         s = mpf.make_mpf_style(marketcolors=mc, gridstyle='', facecolor='#1e1e1e', figcolor='#1e1e1e',
                                 rc={'axes.labelcolor': 'white', 'xtick.color': 'white', 'ytick.color': 'white'})
+        
         addplots = [mpf.make_addplot(plot_df['ema50'], color='orange', width=1),
                     mpf.make_addplot(plot_df['ema200'], color='blue', width=1)]
+        
         buf = io.BytesIO()
-        mpf.plot(plot_df, type='candle', style=s, title=f'\n{symbol} - {tf.upper()}',
-                 volume=True, addplot=addplots, savefig=buf)
+        
+        # Eğer uyumsuzluk bilgisi varsa özel grafik çiz
+        if divergence_info:
+            # RSI hesapla ve panele ekle
+            rsi = get_rsi(plot_df['close'], RSI_PERIOD)
+            rsi_plot = mpf.make_addplot(rsi, panel=2, color='purple', width=1.5, ylabel='RSI')
+            
+            # Çizgileri oluştur (Fiyat için mavi, RSI için kırmızı)
+            p1_idx, p2_idx = divergence_info['p1_idx'], divergence_info['p2_idx']
+            # 30 barlık dilime denk gelecek indexleri bul
+            offset = len(df_chart) - len(plot_df)
+            p1_plot_idx = p1_idx - offset
+            p2_plot_idx = p2_idx - offset
+            
+            if p1_plot_idx >= 0 and p2_plot_idx >= 0:
+                # Fiyat çizgisi
+                price_line = [(p1_plot_idx, df_chart['high'].iloc[p1_idx]), (p2_plot_idx, df_chart['high'].iloc[p2_idx])]
+                # RSI çizgisi (panel 2'de)
+                rsi_line = [(p1_plot_idx, rsi.iloc[p1_plot_idx]), (p2_plot_idx, rsi.iloc[p2_plot_idx])]
+                
+                addplots.append(rsi_plot)
+                mpf.plot(plot_df, type='candle', style=s, title=f'\n{symbol} - {tf.upper()} (UYUMSUZLUK)',
+                         volume=True, addplot=addplots, savefig=buf,
+                         alines=dict(alines=[price_line, rsi_line], 
+                                     colors=['blue', 'red'], 
+                                     linewidths=2))
+            else:
+                # Eğer çizgiler 30 bar dışına taşıyorsa normal çiz
+                addplots.append(rsi_plot)
+                mpf.plot(plot_df, type='candle', style=s, title=f'\n{symbol} - {tf.upper()}',
+                         volume=True, addplot=addplots, savefig=buf)
+        else:
+            mpf.plot(plot_df, type='candle', style=s, title=f'\n{symbol} - {tf.upper()}',
+                     volume=True, addplot=addplots, savefig=buf)
+                     
         buf.seek(0)
         plt.close('all')
         return buf
@@ -302,6 +339,50 @@ class State(Enum):
 states = {}
 
 
+def check_divergence(df, symbol, tf):
+    """Son 30 mumda uyumsuzluk var mı diye kontrol eder."""
+    if len(df) < 30: return None
+    
+    df_recent = df.tail(30).copy()
+    df_recent['rsi'] = get_rsi(df_recent['close'], RSI_PERIOD)
+    
+    # Basit Pivot Bulucu (Son 5 barın en yükseği/en düşüğü)
+    # Daha isabetli olması için scipy kullanılabilir ama ekstra bağımlılık olmasın diye rolling kullanıyoruz.
+    df_recent['pivot_high'] = df_recent['high'].rolling(5, center=True).max() == df_recent['high']
+    df_recent['pivot_low'] = df_recent['low'].rolling(5, center=True).min() == df_recent['low']
+    
+    highs = df_recent[df_recent['pivot_high']].tail(2)
+    lows = df_recent[df_recent['pivot_low']].tail(2)
+    
+    # --- NEGATİF UYUMSUZLUK (SHORT) ---
+    if len(highs) == 2:
+        idx1, idx2 = highs.index[0], highs.index[1]
+        p1, p2 = highs['high'].iloc[0], highs['high'].iloc[1]
+        r1, r2 = highs['rsi'].iloc[0], highs['rsi'].iloc[1]
+        
+        # Fiyat yukarı (p2 > p1) ama RSI aşağı (r2 < r1)
+        if p2 > p1 and r2 < r1 and r2 < 70: # RSI çok düşükse de uyumsuzluk sayılır
+            return {
+                'type': 'SHORT', 'p1_idx': df.index.get_loc(idx1), 'p2_idx': df.index.get_loc(idx2),
+                'desc': f"Fiyat zirvesi yükseldi ({p1:.2f} -> {p2:.2f}), ancak RSI zirvesi düştü ({r1:.1f} -> {r2:.1f})."
+            }
+
+    # --- POZİTİF UYUMSUZLUK (LONG) ---
+    if len(lows) == 2:
+        idx1, idx2 = lows.index[0], lows.index[1]
+        p1, p2 = lows['low'].iloc[0], lows['low'].iloc[1]
+        r1, r2 = lows['rsi'].iloc[0], lows['rsi'].iloc[1]
+        
+        # Fiyat aşağı (p2 < p1) ama RSI yukarı (r2 > r1)
+        if p2 < p1 and r2 > r1 and r2 > 30:
+            return {
+                'type': 'LONG', 'p1_idx': df.index.get_loc(idx1), 'p2_idx': df.index.get_loc(idx2),
+                'desc': f"Fiyat dibi düştü ({p1:.2f} -> {p2:.2f}), ancak RSI dibi yükseldi ({r1:.1f} -> {r2:.1f})."
+            }
+            
+    return None
+
+
 def process_signals(symbol, dfs):
     msgs = []
     ctx_df = dfs.get("15m")
@@ -313,6 +394,21 @@ def process_signals(symbol, dfs):
     rsi_alerts_instant = {"LONG": [], "SHORT": []}
     rsi_alerts_confirmed = {"LONG": [], "SHORT": []}
     atr_dunyasi_signals = {"LONG": [], "SHORT": []}
+    divergence_signals = {"LONG": [], "SHORT": []} # YENİ
+
+    # === YENİ: SADECE 1H İÇİN UYUMSUZLUK TARAMASI ===
+    df_1h = dfs.get("1h")
+    if df_1h is not None and len(df_1h) >= 30:
+        # Mükerrer uyumsuzluk mesajı atmamak için son bar kontrolü
+        div_key = f"div_{symbol}_1h"
+        if div_key not in divergence_states:
+            divergence_states[div_key] = {"last_bar": None}
+            
+        if divergence_states[div_key]["last_bar"] != df_1h.index[-1]:
+            div_result = check_divergence(df_1h, symbol, "1h")
+            if div_result:
+                divergence_signals[div_result['type']].append(div_result)
+                divergence_states[div_key]["last_bar"] = df_1h.index[-1]
 
     for tf in TIME_FRAMES:
         df = dfs.get(tf)
@@ -348,7 +444,7 @@ def process_signals(symbol, dfs):
                     st["state"] = State.LONG
                 st["last_bar"] = bar_time
 
-        # --- İLK UYARI SADECE 1H'DE ÇALIŞACAK (15m çok sinyal atmasın diye) ---
+        # --- İLK UYARI SADECE 1H'DE ÇALIŞACAK ---
         if tf == "1h":
             inst_key = f"inst_{symbol}_{tf}"
             if inst_key not in instant_states:
@@ -517,6 +613,30 @@ def process_signals(symbol, dfs):
                             "low_rsi": 100, "low_price": 0,
                             "last_bar": df.index[-1], "reject_count": 0
                         }
+
+    # --- YENİ: UYUMSUZLUK (DIVERGENCE) MESAJLARI ---
+    for direction, sig_list in [("SHORT", divergence_signals["SHORT"]), ("LONG", divergence_signals["LONG"])]:
+        if not sig_list: continue
+        last_sig = sig_list[-1]
+        
+        trend_info = get_symbol_trend_label(direction, dfs.get("1h"), dfs.get("4h"))
+        earnings_note = get_earnings_note(symbol)
+
+        emoji = "🔴" if direction == "SHORT" else "🟢"
+        
+        msg = f"✨ <b>RSI UYUMSUZLUĞU (DIVERGENCE)</b> ✨\n"
+        msg += f"{emoji} <b>{symbol}</b> — {direction} [1H]\n\n"
+        msg += f"📊 <b>Durum:</b> {last_sig['desc']}\n"
+        msg += f"⚠️ <i>Fiyat ile momentum ters düştü. Trend dönüşü çok yakın olabilir.</i>\n\n"
+        msg += f"{trend_info}\n"
+        msg += f"💡 <b>Strateji:</b> Bu bir dönüş uyarısıdır. Fiyatın teyit vermesini (destek/direnç kırılımı) bekleyin."
+        msg += earnings_note
+        
+        msgs.append({
+            "text": msg, "df": dfs.get("1h"), "symbol": symbol, "tf": "1h",
+            "type": "divergence", "direction": direction,
+            "div_info": last_sig
+        })
 
     # --- STANDART & NİŞANCI MESAJLARI ---
     for direction, sig_list, title, emoji in [
@@ -1056,7 +1176,10 @@ async def send_signal_message(msg_data):
 
     buf = None
     if df is not None:
-        buf = create_chart_image(df, symbol, tf)
+        if msg_type == "divergence":
+            buf = create_chart_image(df, symbol, tf, divergence_info=msg_data.get("div_info"))
+        else:
+            buf = create_chart_image(df, symbol, tf)
 
     msg_ids = {}
     for cid in CHAT_IDS:
@@ -1161,6 +1284,7 @@ async def clear_daily_state():
     last_rsi_alert_msgs.clear()
     last_atr_dunyasi_msgs.clear()
     instant_states.clear()
+    divergence_states.clear() # YENİ
     earnings_cache.clear()
     print("🧹 Günlük state temizlendi.")
 
