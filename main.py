@@ -78,8 +78,8 @@ ALARM_ATR_DROP = 2.0
 
 EMA_PERIOD = 200
 SL_MULTIPLIER = 1.5
-# --- DEĞİŞTİ: 15m ve 1h olarak ayarlandı ---
-TIME_FRAMES = ["15m", "1h"]
+# --- DEĞİŞTİ: 15m, 30m ve 1h olarak ayarlandı ---
+TIME_FRAMES = ["15m", "30m", "1h"]
 
 # --- KISA VADE ---
 KV_RSI_PERIOD = 14
@@ -348,20 +348,21 @@ def process_signals(symbol, dfs):
                     st["state"] = State.LONG
                 st["last_bar"] = bar_time
 
-        # İLK UYARI (Mükerrer mesaj engelleme) - Hem 15m Hem 1h
-        inst_key = f"inst_{symbol}_{tf}"
-        if inst_key not in instant_states:
-            instant_states[inst_key] = {"last_bar": None}
-            
-        if instant_states[inst_key]["last_bar"] != bar_time:
-            if r_prev <= INSTANT_SHORT < r_now:
-                rsi_alerts_instant["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
-                instant_states[inst_key]["last_bar"] = bar_time
-            elif r_prev >= INSTANT_LONG > r_now:
-                rsi_alerts_instant["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
-                instant_states[inst_key]["last_bar"] = bar_time
+        # --- İLK UYARI SADECE 1H'DE ÇALIŞACAK (15m çok sinyal atmasın diye) ---
+        if tf == "1h":
+            inst_key = f"inst_{symbol}_{tf}"
+            if inst_key not in instant_states:
+                instant_states[inst_key] = {"last_bar": None}
+                
+            if instant_states[inst_key]["last_bar"] != bar_time:
+                if r_prev <= INSTANT_SHORT < r_now:
+                    rsi_alerts_instant["SHORT"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
+                    instant_states[inst_key]["last_bar"] = bar_time
+                elif r_prev >= INSTANT_LONG > r_now:
+                    rsi_alerts_instant["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
+                    instant_states[inst_key]["last_bar"] = bar_time
 
-        # === RSI BÜYÜSÜ (ARMED + ATR 2.0 teyit) - Hem 15m Hem 1h ===
+        # === RSI BÜYÜSÜ ARMED/TEYİT - 15M, 30M, 1H ===
         alarm_key = f"{symbol}_{tf}"
         if alarm_key not in rsi_alarm_states:
             rsi_alarm_states[alarm_key] = {
@@ -439,7 +440,7 @@ def process_signals(symbol, dfs):
                             "last_bar": df.index[-1], "reject_count": 0
                         }
 
-        # === YENİ: ATR DÜNYASI - Hem 15m Hem 1h ===
+        # === ATR DÜNYASI - 15M, 30M, 1H ===
         atr_key = f"atr_{symbol}_{tf}"
         if atr_key not in atr_dunyasi_states:
             atr_dunyasi_states[atr_key] = {
@@ -1095,7 +1096,7 @@ async def send_signal_message(msg_data):
                 print(f"send_signal_message fallback {symbol} chat {cid}: {e2}")
 
     if "direction" in msg_data and msg_type in ["standard", "kisa_vade", "rsi_buyusu", "atr_dunyasi"]:
-        trade_key = f"{symbol}_{msg_data['direction']}_{msg_type}"
+        trade_key = f"{symbol}_{msg_data['direction']}_{msg_type}_{tf}"
         trade_info = {
             "symbol": symbol, "type": msg_data["direction"], "entry": msg_data["price"],
             "msg_ids": msg_ids, "signal_type": msg_type,
