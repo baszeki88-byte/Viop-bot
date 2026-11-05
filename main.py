@@ -78,7 +78,8 @@ ALARM_ATR_DROP = 2.0
 
 EMA_PERIOD = 200
 SL_MULTIPLIER = 1.5
-TIME_FRAMES = ["1h"]
+# --- DEĞİŞTİ: 15m ve 1h olarak ayarlandı ---
+TIME_FRAMES = ["15m", "1h"]
 
 # --- KISA VADE ---
 KV_RSI_PERIOD = 14
@@ -103,7 +104,7 @@ MACD_SIGNAL = 9
 active_trades = {}
 rsi_alarm_states = {}
 atr_dunyasi_states = {}
-instant_states = {}       # Aynı bar için tekrar tekrar ilk uyarı atmasını engeller
+instant_states = {}       
 last_rsi_alert_msgs = {}
 last_atr_dunyasi_msgs = {}
 earnings_cache = {}
@@ -119,7 +120,6 @@ def is_market_open(now=None):
 
 
 def get_earnings_note(symbol):
-    """Son 5 gün içinde bilanço açıklaması varsa uyarı döner."""
     today = datetime.now(TIMEZONE).date()
     cache_key = f"{symbol}_{today}"
     if cache_key in earnings_cache:
@@ -330,23 +330,25 @@ def process_signals(symbol, dfs):
         close_price = float(df["close"].iloc[-1])
         bar_time = df.index[-1]
 
-        st = states.setdefault((symbol, tf), {"state": State.IDLE, "last_bar": None})
-        if st["last_bar"] != bar_time:
-            if r_prev <= RSI_SHORT_STD < r_now:
-                if trend_4h == -1 and macd_now < macd_sig_now:
-                    sig_data = {"tf": tf, "price": close_price, "atr": atr, "df": df}
-                    if trend_15m == -1: sniper_signals["SHORT"].append(sig_data)
-                    else: standard_signals["SHORT"].append(sig_data)
-                st["state"] = State.SHORT
-            elif r_prev >= RSI_LONG_STD > r_now:
-                if trend_4h == 1 and macd_now > macd_sig_now:
-                    sig_data = {"tf": tf, "price": close_price, "atr": atr, "df": df}
-                    if trend_15m == 1: sniper_signals["LONG"].append(sig_data)
-                    else: standard_signals["LONG"].append(sig_data)
-                st["state"] = State.LONG
-            st["last_bar"] = bar_time
+        # --- STANDART & NİŞANCI SADECE 1H'DE ÇALIŞACAK ---
+        if tf == "1h":
+            st = states.setdefault((symbol, tf), {"state": State.IDLE, "last_bar": None})
+            if st["last_bar"] != bar_time:
+                if r_prev <= RSI_SHORT_STD < r_now:
+                    if trend_4h == -1 and macd_now < macd_sig_now:
+                        sig_data = {"tf": tf, "price": close_price, "atr": atr, "df": df}
+                        if trend_15m == -1: sniper_signals["SHORT"].append(sig_data)
+                        else: standard_signals["SHORT"].append(sig_data)
+                    st["state"] = State.SHORT
+                elif r_prev >= RSI_LONG_STD > r_now:
+                    if trend_4h == 1 and macd_now > macd_sig_now:
+                        sig_data = {"tf": tf, "price": close_price, "atr": atr, "df": df}
+                        if trend_15m == 1: sniper_signals["LONG"].append(sig_data)
+                        else: standard_signals["LONG"].append(sig_data)
+                    st["state"] = State.LONG
+                st["last_bar"] = bar_time
 
-        # İLK UYARI (Mükerrer mesaj engelleme)
+        # İLK UYARI (Mükerrer mesaj engelleme) - Hem 15m Hem 1h
         inst_key = f"inst_{symbol}_{tf}"
         if inst_key not in instant_states:
             instant_states[inst_key] = {"last_bar": None}
@@ -359,7 +361,7 @@ def process_signals(symbol, dfs):
                 rsi_alerts_instant["LONG"].append({"tf": tf, "prev": r_prev, "now": r_now, "price": close_price})
                 instant_states[inst_key]["last_bar"] = bar_time
 
-        # === RSI BÜYÜSÜ (ARMED + ATR 2.0 teyit) ===
+        # === RSI BÜYÜSÜ (ARMED + ATR 2.0 teyit) - Hem 15m Hem 1h ===
         alarm_key = f"{symbol}_{tf}"
         if alarm_key not in rsi_alarm_states:
             rsi_alarm_states[alarm_key] = {
@@ -437,7 +439,7 @@ def process_signals(symbol, dfs):
                             "last_bar": df.index[-1], "reject_count": 0
                         }
 
-        # === YENİ: ATR DÜNYASI ===
+        # === YENİ: ATR DÜNYASI - Hem 15m Hem 1h ===
         atr_key = f"atr_{symbol}_{tf}"
         if atr_key not in atr_dunyasi_states:
             atr_dunyasi_states[atr_key] = {
@@ -515,7 +517,7 @@ def process_signals(symbol, dfs):
                             "last_bar": df.index[-1], "reject_count": 0
                         }
 
-    # --- STANDART & NİŞANCI ---
+    # --- STANDART & NİŞANCI MESAJLARI ---
     for direction, sig_list, title, emoji in [
         ("SHORT", sniper_signals["SHORT"], "🔥🎯 KESKİN NİŞANCI SİNYALİ", "🔴"),
         ("LONG", sniper_signals["LONG"], "🔥🎯 KESKİN NİŞANCI SİNYALİ", "🟢"),
@@ -532,7 +534,7 @@ def process_signals(symbol, dfs):
         msgs.append({"text": msg, "df": last_sig["df"], "symbol": symbol, "tf": last_sig["tf"],
                      "direction": direction, "price": last_sig["price"], "sl": sl_price, "type": "standard"})
 
-    # --- KISA VADE ---
+    # --- KISA VADE MESAJLARI ---
     df_30m = dfs.get("30m")
     if df_30m is not None and len(df_30m) > KV_EMA_SLOW + 10:
         df_30m = df_30m.copy()
@@ -566,21 +568,19 @@ def process_signals(symbol, dfs):
                          "direction": "SHORT", "price": close_kv, "sl": sl_price,
                          "tp": tp_price, "atr": atr_kv, "type": "kisa_vade"})
 
-    # --- RSI BÜYÜSÜ: İLK UYARI (YENİ: Hedef Giriş Fiyatı Eklendi) ---
+    # --- RSI BÜYÜSÜ: İLK UYARI MESAJLARI ---
     for direction, sig_list in [("SHORT", rsi_alerts_instant["SHORT"]), ("LONG", rsi_alerts_instant["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
         earnings_note = get_earnings_note(symbol)
 
         if direction == "SHORT":
-            # Backtest sonucuna göre SHORT sinyali sonrası zirve ortalama +%2 yukarıda oluşuyor
             hedef_fiyat = last_sig['price'] * 1.02
             msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Alım)\n\n"
             msg += f"🚨 <b>Alarm Fiyatı:</b> {last_sig['price']:,.2f}\n"
             msg += f"🎯 <b>Olası Giriş (Zirve Hedefi):</b> {hedef_fiyat:,.2f} (Tahmini +%2)\n\n"
             msg += f"👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
         else:
-            # Backtest sonucuna göre LONG sinyali sonrası dip ortalama -%2 aşağıda oluşuyor
             hedef_fiyat = last_sig['price'] * 0.98
             msg = f"✨ <b>RSI BÜYÜSÜ</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI [{last_sig['tf'].upper()}]\nRSI 8: {last_sig['prev']:.1f} → {last_sig['now']:.1f} (Aşırı Satım)\n\n"
             msg += f"🚨 <b>Alarm Fiyatı:</b> {last_sig['price']:,.2f}\n"
@@ -591,7 +591,7 @@ def process_signals(symbol, dfs):
         msgs.append({"text": msg, "df": None, "symbol": symbol, "tf": last_sig['tf'],
                      "type": "alert_instant", "direction": direction})
 
-    # --- RSI BÜYÜSÜ: TEYİTLİ ---
+    # --- RSI BÜYÜSÜ: TEYİTLİ MESAJLARI ---
     for direction, sig_list in [("SHORT", rsi_alerts_confirmed["SHORT"]), ("LONG", rsi_alerts_confirmed["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
@@ -608,7 +608,7 @@ def process_signals(symbol, dfs):
             tp2 = entry * (1 - RB_TP2_PCT / 100)
             sl_pct = ((sl - entry) / entry) * 100
 
-            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Short) - {symbol}</b>\n"
+            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Short) - {symbol} [{last_sig['tf'].upper()}]</b>\n"
             msg += f"RSI 8 zirveyi ({last_sig['peak_rsi']:.1f}) gördü.\n"
             msg += f"📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n"
             msg += f"📉 <b>Zirveden Düşüş:</b> {((last_sig['peak_price'] - entry) / entry) * 100:.2f}% (≈ {ALARM_ATR_DROP} ATR)\n\n"
@@ -625,7 +625,7 @@ def process_signals(symbol, dfs):
             tp2 = entry * (1 + RB_TP2_PCT / 100)
             sl_pct = ((entry - sl) / entry) * 100
 
-            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Long) - {symbol}</b>\n"
+            msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Long) - {symbol} [{last_sig['tf'].upper()}]</b>\n"
             msg += f"RSI 8 dibi ({last_sig['low_rsi']:.1f}) gördü.\n"
             msg += f"📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n"
             msg += f"📈 <b>Dipten Yükseliş:</b> {((entry - last_sig['low_price']) / last_sig['low_price']) * 100:.2f}% (≈ {ALARM_ATR_DROP} ATR)\n\n"
@@ -644,7 +644,7 @@ def process_signals(symbol, dfs):
             "ref_tf": last_sig['tf']
         })
 
-    # === YENİ: ATR DÜNYASI MESAJLARI ===
+    # --- ATR DÜNYASI MESAJLARI ---
     for direction, sig_list in [("SHORT", atr_dunyasi_signals["SHORT"]), ("LONG", atr_dunyasi_signals["LONG"])]:
         if not sig_list: continue
         last_sig = sig_list[-1]
@@ -663,7 +663,7 @@ def process_signals(symbol, dfs):
             drop_pct = ((last_sig['peak_price'] - entry) / entry) * 100
 
             msg = f"✨ <b>ATR DÜNYASI</b> ✨\n"
-            msg += f"🎯 <b>ATR ONAYLI SİNYAL (Short) - {symbol}</b>\n"
+            msg += f"🎯 <b>ATR ONAYLI SİNYAL (Short) - {symbol} [{last_sig['tf'].upper()}]</b>\n"
             msg += f"🔴 <b>RSI Aşırı Alım:</b> {last_sig['peak_rsi']:.1f} (Zirve)\n"
             msg += f"📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n"
             msg += f"📉 <b>Zirveden Düşüş:</b> %{drop_pct:.2f} (≈ {ALARM_ATR_DROP} ATR onayı)\n\n"
@@ -682,7 +682,7 @@ def process_signals(symbol, dfs):
             rise_pct = ((entry - last_sig['low_price']) / last_sig['low_price']) * 100
 
             msg = f"✨ <b>ATR DÜNYASI</b> ✨\n"
-            msg += f"🎯 <b>ATR ONAYLI SİNYAL (Long) - {symbol}</b>\n"
+            msg += f"🎯 <b>ATR ONAYLI SİNYAL (Long) - {symbol} [{last_sig['tf'].upper()}]</b>\n"
             msg += f"🟢 <b>RSI Aşırı Satım:</b> {last_sig['low_rsi']:.1f} (Dip)\n"
             msg += f"📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n"
             msg += f"📈 <b>Dipten Yükseliş:</b> %{rise_pct:.2f} (≈ {ALARM_ATR_DROP} ATR onayı)\n\n"
@@ -1099,7 +1099,8 @@ async def send_signal_message(msg_data):
         trade_info = {
             "symbol": symbol, "type": msg_data["direction"], "entry": msg_data["price"],
             "msg_ids": msg_ids, "signal_type": msg_type,
-            "hit_3pct": False, "tp_hit": False, "sl": msg_data.get("sl")
+            "hit_3pct": False, "tp_hit": False, "sl": msg_data.get("sl"),
+            "tf": tf
         }
         if msg_type == "kisa_vade":
             trade_info["tp"] = msg_data.get("tp")
