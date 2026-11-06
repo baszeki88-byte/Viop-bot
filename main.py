@@ -97,7 +97,6 @@ active_trades = {}
 rsi_alarm_states = {}
 atr_dunyasi_states = {}
 instant_states = {}       
-divergence_states = {}
 last_rsi_alert_msgs = {}
 last_atr_dunyasi_msgs = {}
 earnings_cache = {}
@@ -229,7 +228,7 @@ def get_ema_trend(df, period=200):
     return 1 if close_price > ema_val else -1
 
 
-def create_chart_image(df, symbol, tf, divergence_info=None):
+def create_chart_image(df, symbol, tf):
     try:
         df_chart = df.copy()
         df_chart['ema50'] = df_chart['close'].ewm(span=50, adjust=False).mean()
@@ -244,34 +243,8 @@ def create_chart_image(df, symbol, tf, divergence_info=None):
                     mpf.make_addplot(plot_df['ema200'], color='blue', width=1)]
         
         buf = io.BytesIO()
-        
-        if divergence_info:
-            rsi = get_rsi(plot_df['close'], RSI_PERIOD)
-            rsi_plot = mpf.make_addplot(rsi, panel=2, color='purple', width=1.5, ylabel='RSI')
-            
-            p1_idx, p2_idx = divergence_info['p1_idx'], divergence_info['p2_idx']
-            offset = len(df_chart) - len(plot_df)
-            p1_plot_idx = p1_idx - offset
-            p2_plot_idx = p2_idx - offset
-            
-            if p1_plot_idx >= 0 and p2_plot_idx >= 0:
-                price_line = [(p1_plot_idx, df_chart['high'].iloc[p1_idx]), (p2_plot_idx, df_chart['high'].iloc[p2_idx])]
-                rsi_line = [(p1_plot_idx, rsi.iloc[p1_plot_idx]), (p2_plot_idx, rsi.iloc[p2_plot_idx])]
-                
-                addplots.append(rsi_plot)
-                mpf.plot(plot_df, type='candle', style=s, title=f'\n{symbol} - {tf.upper()} (UYUMSUZLUK)',
-                         volume=True, addplot=addplots, savefig=buf,
-                         alines=dict(alines=[price_line, rsi_line], 
-                                     colors=['blue', 'red'], 
-                                     linewidths=2))
-            else:
-                addplots.append(rsi_plot)
-                mpf.plot(plot_df, type='candle', style=s, title=f'\n{symbol} - {tf.upper()}',
-                         volume=True, addplot=addplots, savefig=buf)
-        else:
-            mpf.plot(plot_df, type='candle', style=s, title=f'\n{symbol} - {tf.upper()}',
-                     volume=True, addplot=addplots, savefig=buf)
-                     
+        mpf.plot(plot_df, type='candle', style=s, title=f'\n{symbol} - {tf.upper()}',
+                 volume=True, addplot=addplots, savefig=buf)
         buf.seek(0)
         plt.close('all')
         return buf
@@ -331,20 +304,6 @@ def process_signals(symbol, dfs):
     rsi_alerts_instant = {"LONG": [], "SHORT": []}
     rsi_alerts_confirmed = {"LONG": [], "SHORT": []}
     atr_dunyasi_signals = {"LONG": [], "SHORT": []}
-    divergence_signals = {"LONG": [], "SHORT": []}
-
-    # 1H İçin Bağımsız Uyumsuzluk Taraması
-    df_1h = dfs.get("1h")
-    if df_1h is not None and len(df_1h) >= 30:
-        div_key = f"div_{symbol}_1h"
-        if div_key not in divergence_states:
-            divergence_states[div_key] = {"last_bar": None}
-            
-        if divergence_states[div_key]["last_bar"] != df_1h.index[-1]:
-            div_result = check_divergence(df_1h, symbol, "1h")
-            if div_result:
-                divergence_signals[div_result['type']].append(div_result)
-                divergence_states[div_key]["last_bar"] = df_1h.index[-1]
 
     for tf in TIME_FRAMES:
         df = dfs.get(tf)
@@ -558,30 +517,6 @@ def process_signals(symbol, dfs):
                             "last_bar": df.index[-1], "reject_count": 0
                         }
 
-    # --- YENİ: UYUMSUZLUK (DIVERGENCE) MESAJLARI ---
-    for direction, sig_list in [("SHORT", divergence_signals["SHORT"]), ("LONG", divergence_signals["LONG"])]:
-        if not sig_list: continue
-        last_sig = sig_list[-1]
-        
-        trend_info = get_symbol_trend_label(direction, dfs.get("1h"), dfs.get("4h"))
-        earnings_note = get_earnings_note(symbol)
-
-        emoji = "🔴" if direction == "SHORT" else "🟢"
-        
-        msg = f"✨ <b>RSI UYUMSUZLUĞU (DIVERGENCE)</b> ✨\n"
-        msg += f"{emoji} <b>{symbol}</b> — {direction} [1H]\n\n"
-        msg += f"📊 <b>Durum:</b> {last_sig['desc']}\n"
-        msg += f"⚠️ <i>Fiyat ile momentum ters düştü. Trend dönüşü çok yakın olabilir.</i>\n\n"
-        msg += f"{trend_info}\n"
-        msg += f"💡 <b>Strateji:</b> Bu bir dönüş uyarısıdır. Fiyatın teyit vermesini (destek/direnç kırılımı) bekleyin."
-        msg += earnings_note
-        
-        msgs.append({
-            "text": msg, "df": dfs.get("1h"), "symbol": symbol, "tf": "1h",
-            "type": "divergence", "direction": direction,
-            "div_info": last_sig
-        })
-
     # --- STANDART & NİŞANCI MESAJLARI ---
     for direction, sig_list, title, emoji in [
         ("SHORT", sniper_signals["SHORT"], "🔥🎯 KESKİN NİŞANCI SİNYALİ", "🔴"),
@@ -646,7 +581,7 @@ def process_signals(symbol, dfs):
             msg += f"RSI 8 zirveyi ({last_sig['peak_rsi']:.1f}) gördü.\n"
             msg += f"📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n"
             msg += f"📉 <b>Zirveden Düşüş:</b> {((last_sig['peak_price'] - entry) / entry) * 100:.2f}% (≈ {ALARM_ATR_DROP} ATR)\n"
-            msg += f"{div_warning}\n\n" # Uyumsuzluk uyarısı eklendi
+            msg += f"{div_warning}\n\n" 
             msg += f"{trend_info}\n\n"
             msg += f"💰 <b>Giriş:</b> {entry:,.2f}\n"
             msg += f"🛑 <b>SL (2.5 ATR):</b> {sl:,.2f} (%{sl_pct:.2f})\n"
@@ -664,7 +599,7 @@ def process_signals(symbol, dfs):
             msg += f"RSI 8 dibi ({last_sig['low_rsi']:.1f}) gördü.\n"
             msg += f"📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n"
             msg += f"📈 <b>Dipten Yükseliş:</b> {((entry - last_sig['low_price']) / last_sig['low_price']) * 100:.2f}% (≈ {ALARM_ATR_DROP} ATR)\n"
-            msg += f"{div_warning}\n\n" # Uyumsuzluk uyarısı eklendi
+            msg += f"{div_warning}\n\n" 
             msg += f"{trend_info}\n\n"
             msg += f"💰 <b>Giriş:</b> {entry:,.2f}\n"
             msg += f"🛑 <b>SL (2.5 ATR):</b> {sl:,.2f} (%{sl_pct:.2f})\n"
@@ -706,7 +641,7 @@ def process_signals(symbol, dfs):
             msg += f"🔴 <b>RSI Aşırı Alım:</b> {last_sig['peak_rsi']:.1f} (Zirve)\n"
             msg += f"📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n"
             msg += f"📉 <b>Zirveden Düşüş:</b> %{drop_pct:.2f} (≈ {ALARM_ATR_DROP} ATR onayı)\n"
-            msg += f"{div_warning}\n\n" # Uyumsuzluk uyarısı eklendi
+            msg += f"{div_warning}\n\n" 
             msg += f"{trend_info}\n\n"
             msg += f"💰 <b>Giriş:</b> {entry:,.2f}\n"
             msg += f"🛑 <b>Stop (Zirve):</b> {sl:,.2f} (+%{sl_pct:.2f})\n"
@@ -726,7 +661,7 @@ def process_signals(symbol, dfs):
             msg += f"🟢 <b>RSI Aşırı Satım:</b> {last_sig['low_rsi']:.1f} (Dip)\n"
             msg += f"📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n"
             msg += f"📈 <b>Dipten Yükseliş:</b> %{rise_pct:.2f} (≈ {ALARM_ATR_DROP} ATR onayı)\n"
-            msg += f"{div_warning}\n\n" # Uyumsuzluk uyarısı eklendi
+            msg += f"{div_warning}\n\n" 
             msg += f"{trend_info}\n\n"
             msg += f"💰 <b>Giriş:</b> {entry:,.2f}\n"
             msg += f"🛑 <b>Stop (Dip):</b> {sl:,.2f} (-%{sl_pct:.2f})\n"
@@ -1062,10 +997,7 @@ async def send_signal_message(msg_data):
 
     buf = None
     if df is not None:
-        if msg_type == "divergence":
-            buf = create_chart_image(df, symbol, tf, divergence_info=msg_data.get("div_info"))
-        else:
-            buf = create_chart_image(df, symbol, tf)
+        buf = create_chart_image(df, symbol, tf)
 
     msg_ids = {}
     for cid in CHAT_IDS:
@@ -1168,7 +1100,6 @@ async def clear_daily_state():
     last_rsi_alert_msgs.clear()
     last_atr_dunyasi_msgs.clear()
     instant_states.clear()
-    divergence_states.clear()
     earnings_cache.clear()
     print("🧹 Günlük state temizlendi.")
 
@@ -1193,7 +1124,6 @@ async def main():
 
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
     
-    # Gecikmeyi önlemek için tarama sıklığını :15 ve :45 olarak güncelledik
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="15,45", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="0,30", timezone=TIMEZONE))
 
