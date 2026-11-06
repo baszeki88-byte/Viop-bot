@@ -73,8 +73,8 @@ ALARM_LONG_LOWER = 20
 ALARM_ATR_DROP = 2.0
 
 # Zaman Dilimleri
-TIME_FRAMES_RSI = ["1h"]            # İlk uyarı için
-TIME_FRAMES_ATR = ["15m", "30m", "1h"] # ATR Dünyası için
+TIME_FRAMES_RSI = ["1h"]            
+TIME_FRAMES_ATR = ["15m", "30m", "1h"] 
 FETCH_TFS = ["15m", "30m", "1h", "4h"]
 
 # Hacim Filtresi
@@ -84,7 +84,10 @@ VOLUME_MULT = 1.5
 # ATR İşlem Ayarları
 ATR_TP1_PCT = 1.5
 ATR_TP2_PCT = 3.0
-TIMEOUT_HOURS = 24 # Saat bazında zaman aşımı
+TIMEOUT_HOURS = 24 
+
+# SLIPPAGE (Fiyat Kaçma) Ayarı
+SLIPPAGE_THRESHOLD = 0.5 # %0.5
 
 active_trades = {}
 instant_states = {}       
@@ -124,24 +127,19 @@ def get_earnings_note(symbol):
             earnings_cache[cache_key] = note
             return note
     except Exception as e:
-        print(f"⚠️ Bilanço verisi çekilemedi ({symbol}): {e}")
+        pass
     earnings_cache[cache_key] = ""
     return ""
 
 def get_volume_and_trend_tag(df_current, df_4h):
-    # 1. Hacim Kontrolü
     vol_ma = df_current['volume'].rolling(VOLUME_LOOKBACK).mean()
     current_vol = df_current['volume'].iloc[-1]
     avg_vol = vol_ma.iloc[-1]
     
-    vol_tag = ""
-    if pd.notna(avg_vol) and avg_vol > 0:
-        if current_vol >= (avg_vol * VOLUME_MULT):
-            vol_tag = "🔥 <b>Hacim Onaylı</b>"
-        else:
-            vol_tag = "⚠️ <b>Hacimsiz</b>"
+    vol_tag = "⚠️ <b>Hacimsiz</b>"
+    if pd.notna(avg_vol) and avg_vol > 0 and current_vol >= (avg_vol * VOLUME_MULT):
+        vol_tag = "🔥 <b>Hacim Onaylı</b>"
             
-    # 2. 4H RSI Trend Kontrolü
     trend_tag = ""
     if df_4h is not None and len(df_4h) > 10:
         rsi_4h = get_rsi(df_4h['close'], RSI_PERIOD).iloc[-1]
@@ -165,9 +163,8 @@ def fetch_ohlc(symbol, interval, limit=300):
                             df.index = df.index.tz_convert(TIMEZONE)
                     except Exception:
                         pass
-                return df.iloc[:-1] # Son barı (henüz kapanmamış) at
+                return df.iloc[:-1] # Son henüz kapanmamış barı at
         except Exception as e:
-            print(f"⚠️ fetch_ohlc {symbol} {interval} Hata (Deneme {attempt+1}/3): {e}")
             time.sleep(1)
     return None
 
@@ -213,8 +210,22 @@ def create_chart_image(df, symbol, tf):
         plt.close('all')
         return buf
     except Exception as e:
-        print(f"⚠️ create_chart_image {symbol} {tf}: {e}")
         return None
+
+def check_slippage(symbol, signal_price):
+    """Sinyal fiyatı ile anlık fiyat arasındaki sapmayı kontrol eder."""
+    try:
+        live_df = bp.Ticker(symbol).history(period="1d", interval="5m")
+        if live_df is not None and not live_df.empty:
+            live_df.columns = [str(c).lower() for c in live_df.columns]
+            live_price = float(live_df['close'].iloc[-1])
+            
+            slippage_pct = abs(live_price - signal_price) / signal_price * 100
+            if slippage_pct >= SLIPPAGE_THRESHOLD:
+                return f"\n\n🚨 <b>DİKKAT: SİNYAL FİYATI KAÇTI!</b>\n<i>Sinyal Girişi: {signal_price:,.2f} | Anlık Fiyat: {live_price:,.2f} (%{slippage_pct:.2f} fark)</i>\nLütfen bu işlemi kovalamayın, geri çekilmesini bekleyin."
+    except Exception as e:
+        pass
+    return ""
 
 def process_signals(symbol, dfs):
     msgs = []
@@ -235,31 +246,35 @@ def process_signals(symbol, dfs):
             instant_states[inst_key] = {"last_bar": None}
             
         if instant_states[inst_key]["last_bar"] != bar_time:
+            # Gecikme Kontrolü
+            delay_min = (datetime.now(TIMEZONE) - bar_time).total_seconds() / 60
+            if delay_min > 75: # 1H için 75 dk gecikme toleransı
+                continue
+
             direction = None
-            if r_prev <= INSTANT_SHORT < r_now:
-                direction = "SHORT"
-            elif r_prev >= INSTANT_LONG > r_now:
-                direction = "LONG"
+            if r_prev <= INSTANT_SHORT < r_now: direction = "SHORT"
+            elif r_prev >= INSTANT_LONG > r_now: direction = "LONG"
                 
             if direction:
                 instant_states[inst_key]["last_bar"] = bar_time
                 tags = get_volume_and_trend_tag(df, df_4h)
                 earnings_note = get_earnings_note(symbol)
+                current_price = float(df['close'].iloc[-1])
                 
                 if direction == "SHORT":
-                    hedef_fiyat = float(df['close'].iloc[-1]) * 1.02
+                    hedef_fiyat = current_price * 1.02
                     msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI\n"
                     msg += f"RSI 8: {r_prev:.1f} → {r_now:.1f} (Aşırı Alım)\n"
                     msg += f"📊 {tags}\n\n"
-                    msg += f"🚨 <b>Alarm Fiyatı:</b> {df['close'].iloc[-1]:,.2f}\n"
+                    msg += f"🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n"
                     msg += f"🎯 <b>Olası Giriş:</b> {hedef_fiyat:,.2f} (Tahmini +%2)\n\n"
                     msg += f"👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
                 else:
-                    hedef_fiyat = float(df['close'].iloc[-1]) * 0.98
+                    hedef_fiyat = current_price * 0.98
                     msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI\n"
                     msg += f"RSI 8: {r_prev:.1f} → {r_now:.1f} (Aşırı Satım)\n"
                     msg += f"📊 {tags}\n\n"
-                    msg += f"🚨 <b>Alarm Fiyatı:</b> {df['close'].iloc[-1]:,.2f}\n"
+                    msg += f"🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n"
                     msg += f"🎯 <b>Olası Giriş:</b> {hedef_fiyat:,.2f} (Tahmini -%2)\n\n"
                     msg += f"👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
                 
@@ -290,6 +305,13 @@ def process_signals(symbol, dfs):
 
         atr_data = atr_states[atr_key]
         if atr_data.get("last_bar") != bar_time:
+            
+            # --- DİNAMİK GECİKME KONTROLÜ ---
+            delay_min = (datetime.now(TIMEZONE) - bar_time).total_seconds() / 60
+            max_delay = 20 if tf == "15m" else (40 if tf == "30m" else 75)
+            if delay_min > max_delay:
+                continue
+
             atr_data["last_bar"] = bar_time
             state = atr_data["state"]
 
@@ -312,13 +334,13 @@ def process_signals(symbol, dfs):
                     atr_data["peak_rsi"] = r_now
                     atr_data["peak_price"] = close_price
                 
-                # 2 ATR Teyit
                 price_ok = (atr_data["peak_price"] - close_price) >= atr * ALARM_ATR_DROP
                 candle_ok = close_price < float(df['open'].iloc[-1])
                 
                 if price_ok and candle_ok:
                     tags = get_volume_and_trend_tag(df, df_4h)
                     earnings_note = get_earnings_note(symbol)
+                    slippage_warning = check_slippage(symbol, close_price)
                     
                     sl = atr_data["peak_price"]
                     tp1 = close_price * (1 - ATR_TP1_PCT / 100)
@@ -329,7 +351,8 @@ def process_signals(symbol, dfs):
                     msg = f"✨ <b>ATR DÜNYASI (Short) - {symbol} [{tf.upper()}]</b> ✨\n"
                     msg += f"🔴 RSI Aşırı Alım Zirvesi: {atr_data['peak_rsi']:.1f}\n"
                     msg += f"📈 Zirve Fiyatı: {atr_data['peak_price']:,.2f} (Düşüş: %{drop_pct:.2f})\n"
-                    msg += f"📊 {tags}\n\n"
+                    msg += f"📊 {tags}\n"
+                    msg += f"{slippage_warning}\n\n"
                     msg += f"💰 <b>Giriş:</b> {close_price:,.2f}\n"
                     msg += f"🛑 <b>Stop (Zirve):</b> {sl:,.2f} (+%{sl_pct:.2f})\n"
                     msg += f"🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n"
@@ -362,6 +385,7 @@ def process_signals(symbol, dfs):
                 if price_ok and candle_ok:
                     tags = get_volume_and_trend_tag(df, df_4h)
                     earnings_note = get_earnings_note(symbol)
+                    slippage_warning = check_slippage(symbol, close_price)
                     
                     sl = atr_data["low_price"]
                     tp1 = close_price * (1 + ATR_TP1_PCT / 100)
@@ -372,7 +396,8 @@ def process_signals(symbol, dfs):
                     msg = f"✨ <b>ATR DÜNYASI (Long) - {symbol} [{tf.upper()}]</b> ✨\n"
                     msg += f"🟢 RSI Aşırı Satım Dibi: {atr_data['low_rsi']:.1f}\n"
                     msg += f"📉 Dip Fiyatı: {atr_data['low_price']:,.2f} (Yükseliş: %{rise_pct:.2f})\n"
-                    msg += f"📊 {tags}\n\n"
+                    msg += f"📊 {tags}\n"
+                    msg += f"{slippage_warning}\n\n"
                     msg += f"💰 <b>Giriş:</b> {close_price:,.2f}\n"
                     msg += f"🛑 <b>Stop (Dip):</b> {sl:,.2f} (-%{sl_pct:.2f})\n"
                     msg += f"🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n"
@@ -405,28 +430,22 @@ async def _fetch_stock_change(sym):
                 last = h['Close'].iloc[-1]
                 return sym, ((last - prev) / prev) * 100
         except Exception as e:
-            print(f"_fetch_stock_change {sym}: {e}")
+            pass
         return sym, None
     return await asyncio.to_thread(_inner)
 
 async def generate_market_summary(session_name):
-    print(f"▶️ Piyasa özeti başlıyor: {session_name} @ {datetime.now(TIMEZONE).strftime('%H:%M:%S')}")
     try:
         df_30m, df_1h = await asyncio.gather(
             fetch_ohlc_async("XU030", "30m", limit=250),
             fetch_ohlc_async("XU030", "1h",  limit=250),
         )
 
-        if df_30m is None or df_1h is None:
-            print(f"⚠️ Özet({session_name}): XU030 verisi çekilemedi")
-            return
+        if df_30m is None or df_1h is None: return
 
         today = datetime.now(TIMEZONE).date()
         df_today = df_30m[df_30m.index.date == today]
-
-        if df_today.empty:
-            print(f"⚠️ Özet({session_name}): Bugün için XU030 30m verisi yok")
-            return
+        if df_today.empty: return
 
         if "Sabah" in session_name:
             session_df = df_today.between_time('09:55', '14:00')
@@ -435,9 +454,7 @@ async def generate_market_summary(session_name):
             session_df = df_today.between_time('14:01', '17:54')
             time_str = "14:01 - 17:54"
 
-        if session_df.empty:
-            print(f"⚠️ Özet({session_name}): '{time_str}' aralığında veri yok")
-            return
+        if session_df.empty: return
 
         open_price = session_df['open'].iloc[0]
         close_price = session_df['close'].iloc[-1]
@@ -448,12 +465,9 @@ async def generate_market_summary(session_name):
         dist_to_high = ((high_price - close_price) / high_price) * 100
         dist_to_low = ((close_price - low_price) / low_price) * 100
 
-        if dist_to_high < 0.2:
-            close_status = "🟢 Zirvede Kapattı (Güçlü)"
-        elif dist_to_low < 0.2:
-            close_status = "🔴 Dipte Kapattı (Zayıf)"
-        else:
-            close_status = "⚪ Orta Bölgede Kapattı"
+        if dist_to_high < 0.2: close_status = "🟢 Zirvede Kapattı (Güçlü)"
+        elif dist_to_low < 0.2: close_status = "🔴 Dipte Kapattı (Zayıf)"
+        else: close_status = "⚪ Orta Bölgede Kapattı"
 
         session_vol = session_df['volume'].sum()
         past_vols = []
@@ -470,12 +484,9 @@ async def generate_market_summary(session_name):
         avg_3d_vol = sum(past_vols) / len(past_vols) if past_vols else session_vol
         vol_change = ((session_vol - avg_3d_vol) / avg_3d_vol) * 100 if avg_3d_vol > 0 else 0
 
-        if vol_change > 10:
-            vol_status = f"🟢 Son 3 günün %{vol_change:.1f} ÜZERİNDE (Hacimli)"
-        elif vol_change < -10:
-            vol_status = f"🔴 Son 3 günün %{abs(vol_change):.1f} ALTINDA (Sessiz)"
-        else:
-            vol_status = "⚪ Normal Seviyede"
+        if vol_change > 10: vol_status = f"🟢 Son 3 günün %{vol_change:.1f} ÜZERİNDE (Hacimli)"
+        elif vol_change < -10: vol_status = f"🔴 Son 3 günün %{abs(vol_change):.1f} ALTINDA (Sessiz)"
+        else: vol_status = "⚪ Normal Seviyede"
 
         stock_changes = {}
         green_count = 0
@@ -483,27 +494,20 @@ async def generate_market_summary(session_name):
 
         results = await asyncio.gather(*[_fetch_stock_change(s) for s in BIST_STOCKS])
         for sym, change in results:
-            if change is None:
-                continue
+            if change is None: continue
             stock_changes[sym] = change
-            if change > 0:
-                green_count += 1
-            else:
-                red_count += 1
+            if change > 0: green_count += 1
+            else: red_count += 1
 
         sector_lines = []
         for sector_name, stocks in SECTORS.items():
             sector_stocks = [s for s in stocks if s in stock_changes]
-            if not sector_stocks:
-                continue
+            if not sector_stocks: continue
             greens = sum(1 for s in sector_stocks if stock_changes[s] > 0)
             reds = len(sector_stocks) - greens
             avg_chg = sum(stock_changes[s] for s in sector_stocks) / len(sector_stocks)
 
-            if greens > reds: emoji = "🟢"
-            elif reds > greens: emoji = "🔴"
-            else: emoji = "⚪"
-
+            emoji = "🟢" if greens > reds else ("🔴" if reds > greens else "⚪")
             sector_lines.append((avg_chg, f"{emoji} {sector_name}: {greens}Y/{reds}K (Ort: %{avg_chg:+.2f})"))
 
         sector_lines.sort(key=lambda x: x[0], reverse=True)
@@ -537,32 +541,20 @@ async def generate_market_summary(session_name):
         msg += f"🏭 <b>Sektör Performansı:</b>\n{sector_text}\n\n"
         msg += f"💡 <b>Yorum:</b> {yorum}"
 
-        sent_count = 0
         for cid in CHAT_IDS:
-            try:
-                await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-                sent_count += 1
-            except Exception as send_err:
-                print(f"Özet gönderim hatası chat {cid}: {send_err}")
-        print(f"✅ Özet tamamlandı: {session_name} → {sent_count}/{len(CHAT_IDS)} gönderildi")
-
+            try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+            except: pass
     except Exception as e:
-        print(f"❌ Piyasa Özeti Hatası ({session_name}): {e}")
-        import traceback
-        traceback.print_exc()
+        pass
 
 async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.upper().replace("/", "").strip()
-
-    if text == "START":
-        return
-
+    if text == "START": return
     if text not in SYMBOLS:
         await update.message.reply_text(f"❌ '{text}' tarama listesinde bulunamadı. Lütfen geçerli bir sembol girin (Örn: /ASELS).")
         return
 
     await update.message.reply_text(f"🔍 {text} analiz ediliyor, lütfen bekleyin...")
-
     try:
         df_30m, df_1h, df_4h, df_1d = await asyncio.gather(
             fetch_ohlc_async(text, "30m", limit=250),
@@ -570,54 +562,34 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             fetch_ohlc_async(text, "4h",  limit=250),
             fetch_ohlc_async(text, "1d",  limit=250),
         )
-
         if df_1h is None or df_4h is None:
             await update.message.reply_text("❌ Veri çekilemedi.")
             return
 
         msg = f"🤖 <b>{text} — Kapsamlı Analiz</b>\n"
         price = df_1h['close'].iloc[-1]
-
         rsi_1h = get_rsi(df_1h['close'], RSI_PERIOD).iloc[-1]
-        ema200_1h = df_1h['close'].ewm(span=200).mean().iloc[-1]
-        trend_1h = "🟢 Yukarı" if price > ema200_1h else "🔴 Aşağı"
-
-        msg += f"\n📊 <b>1 Saatlik (1H)</b>\n"
-        msg += f"• Fiyat: {price:,.2f}\n"
-        msg += f"• RSI(8): {rsi_1h:.1f}\n"
-        msg += f"• Trend: {trend_1h} (EMA 200)\n"
+        trend_1h = "🟢 Yukarı" if price > df_1h['close'].ewm(span=200).mean().iloc[-1] else "🔴 Aşağı"
+        msg += f"\n📊 <b>1 Saatlik (1H)</b>\n• Fiyat: {price:,.2f}\n• RSI(8): {rsi_1h:.1f}\n• Trend: {trend_1h} (EMA 200)\n"
 
         rsi_4h = get_rsi(df_4h['close'], RSI_PERIOD).iloc[-1]
-        ema200_4h = df_4h['close'].ewm(span=200).mean().iloc[-1]
-        trend_4h = "🟢 Yukarı" if price > ema200_4h else "🔴 Aşağı"
-
-        msg += f"\n📊 <b>4 Saatlik (4H)</b>\n"
-        msg += f"• RSI(8): {rsi_4h:.1f}\n"
-        msg += f"• Trend: {trend_4h} (EMA 200)\n"
+        trend_4h = "🟢 Yukarı" if price > df_4h['close'].ewm(span=200).mean().iloc[-1] else "🔴 Aşağı"
+        msg += f"\n📊 <b>4 Saatlik (4H)</b>\n• RSI(8): {rsi_4h:.1f}\n• Trend: {trend_4h} (EMA 200)\n"
 
         if df_1d is not None:
-            rsi_1d = get_rsi(df_1d['close'], 14).iloc[-1]
-            msg += f"\n📊 <b>Günlük (1D)</b>\n"
-            msg += f"• RSI(14): {rsi_1d:.1f}\n"
+            msg += f"\n📊 <b>Günlük (1D)</b>\n• RSI(14): {get_rsi(df_1d['close'], 14).iloc[-1]:.1f}\n"
 
-        ema50_30m = 0
+        ema50_30m = df_30m['close'].ewm(span=50).mean().iloc[-1] if df_30m is not None else 0
         if df_30m is not None:
-            ema50_30m = df_30m['close'].ewm(span=50).mean().iloc[-1]
-            msg += f"\n⚓ <b>30 Dakikalık (30M)</b>\n"
-            msg += f"• EMA 50: {ema50_30m:,.2f}\n"
+            msg += f"\n⚓ <b>30 Dakikalık (30M)</b>\n• EMA 50: {ema50_30m:,.2f}\n"
 
         msg += f"\n💡 <b>Yorum ve Strateji:</b>\n"
         if trend_4h == "🟢 Yukarı":
-            msg += f"Ana trend YUKARI. Alım yönlü işlemler düşünülebilir.\n"
-            if df_30m is not None:
-                msg += f"🛒 <b>Olası Alım Yeri (Destek):</b> 30m EMA 50 seviyesi olan <b>{ema50_30m:,.2f}</b> civarı takip edilebilir."
+            msg += f"Ana trend YUKARI. Alım yönlü işlemler düşünülebilir.\n🛒 <b>Olası Alım Yeri:</b> 30m EMA 50 seviyesi olan <b>{ema50_30m:,.2f}</b>."
         else:
-            msg += f"Ana trend AŞAĞI. Satış (Short) yönlü işlemler düşünülebilir.\n"
-            if df_30m is not None:
-                msg += f"🛒 <b>Olası Satım Yeri (Direnç):</b> 30m EMA 50 seviyesi olan <b>{ema50_30m:,.2f}</b> civarı takip edilebilir."
+            msg += f"Ana trend AŞAĞI. Satış yönlü işlemler düşünülebilir.\n🛒 <b>Olası Satım Yeri:</b> 30m EMA 50 seviyesi olan <b>{ema50_30m:,.2f}</b>."
 
         await update.message.reply_text(msg, parse_mode="HTML")
-
     except Exception as e:
         await update.message.reply_text(f"❌ Analiz hatası: {e}")
 
@@ -692,7 +664,6 @@ async def check_active_trades():
                 del active_trades[trade_key]
                 continue
 
-
 bot_app = Application.builder().token(BOT_TOKEN).build()
 
 async def send_signal_message(msg_data):
@@ -719,7 +690,6 @@ async def send_signal_message(msg_data):
                 msg_ids[str(cid)] = sent.message_id
 
         except Exception as e:
-            print(f"send_signal_message {symbol} chat {cid}: {e}")
             try:
                 if buf:
                     buf.seek(0)
@@ -729,7 +699,7 @@ async def send_signal_message(msg_data):
                 if "direction" in msg_data:
                     msg_ids[str(cid)] = sent.message_id
             except Exception as e2:
-                print(f"send_signal_message fallback {symbol} chat {cid}: {e2}")
+                pass
 
     if msg_type == "atr_dunyasi" and "direction" in msg_data:
         trade_key = f"{symbol}_{msg_data['direction']}_atr_{tf}"
@@ -740,7 +710,6 @@ async def send_signal_message(msg_data):
             "hit_tp1": False, "tf": tf, "entry_time": datetime.now(TIMEZONE)
         }
         active_trades[trade_key] = trade_info
-
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Sistem çalışıyor. Analiz için /ASELS gibi komut yazabilirsiniz.")
@@ -758,7 +727,7 @@ async def tick(force=False):
             for msg_data in process_signals(sym, dfs):
                 await send_signal_message(msg_data)
         except Exception as e:
-            print(f"tick {sym}: {e}")
+            pass
 
 async def tracker_tick():
     # Hassas takip için her 5 dakikada bir çalışır (Piyasa açıkken)
@@ -782,7 +751,6 @@ async def clear_daily_state():
     instant_states.clear()
     atr_states.clear()
     earnings_cache.clear()
-    print("🧹 Günlük state temizlendi.")
 
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -802,8 +770,8 @@ async def main():
 
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
     
-    # Tarama :15 ve :45'te
-    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="15,45", timezone=TIMEZONE))
+    # YENİ TARAMA SAATLERİ: Borsapy gecikmesini tolere etmek için :05, :20, :35, :50
+    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="5,20,35,50", timezone=TIMEZONE))
     
     # Hassas İşlem Takibi: Her 5 dakikada bir (15m mumlarına göre TP/SL yakalamak için)
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
