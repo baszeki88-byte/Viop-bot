@@ -66,8 +66,9 @@ RSI_PERIOD = 8
 RSI_SHORT_STD = 75
 RSI_LONG_STD = 25
 
-INSTANT_SHORT = 80
-INSTANT_LONG = 20
+# --- GÜNCELLENDİ: 82.5 ve 18 ---
+INSTANT_SHORT = 82.5
+INSTANT_LONG = 18
 
 ALARM_SHORT_UPPER = 80
 ALARM_SHORT_LOWER = 65
@@ -80,15 +81,6 @@ EMA_PERIOD = 200
 SL_MULTIPLIER = 1.5
 # --- DEĞİŞTİ: 15m, 30m ve 1h olarak ayarlandı ---
 TIME_FRAMES = ["15m", "30m", "1h"]
-
-# --- KISA VADE ---
-KV_RSI_PERIOD = 14
-KV_RSI_LONG = 60
-KV_RSI_SHORT = 40
-KV_TP1_PCT = 5
-KV_SL_MULT = 3.0
-KV_EMA_FAST = 13
-KV_EMA_SLOW = 34
 
 # --- RSI BÜYÜSÜ H1 ---
 RB_SL_ATR_MULT = 2.5
@@ -105,7 +97,7 @@ active_trades = {}
 rsi_alarm_states = {}
 atr_dunyasi_states = {}
 instant_states = {}       
-divergence_states = {} # YENİ: Uyumsuzluk durum takibi
+divergence_states = {}
 last_rsi_alert_msgs = {}
 last_atr_dunyasi_msgs = {}
 earnings_cache = {}
@@ -237,41 +229,6 @@ def get_ema_trend(df, period=200):
     return 1 if close_price > ema_val else -1
 
 
-def calculate_psar(df, af=0.02, max_af=0.2):
-    high = df['high'].values
-    low = df['low'].values
-    n = len(df)
-    psar = np.zeros(n)
-    trend = np.zeros(n)
-    if n == 0: return df
-    psar[0] = low[0]
-    trend[0] = 1
-    ep = high[0]
-    acc = af
-    for i in range(1, n):
-        prev_psar = psar[i-1]
-        if trend[i-1] == 1:
-            psar[i] = prev_psar + acc * (ep - prev_psar)
-            if i >= 2: psar[i] = min(psar[i], low[i-1], low[i-2])
-            elif i >= 1: psar[i] = min(psar[i], low[i-1])
-            if low[i] < psar[i]:
-                trend[i] = -1; psar[i] = ep; ep = low[i]; acc = af
-            else:
-                trend[i] = 1
-                if high[i] > ep: ep = high[i]; acc = min(acc + af, max_af)
-        else:
-            psar[i] = prev_psar + acc * (ep - prev_psar)
-            if i >= 2: psar[i] = max(psar[i], high[i-1], high[i-2])
-            elif i >= 1: psar[i] = max(psar[i], high[i-1])
-            if high[i] > psar[i]:
-                trend[i] = 1; psar[i] = ep; ep = high[i]; acc = af
-            else:
-                trend[i] = -1
-                if low[i] < ep: ep = low[i]; acc = min(acc + af, max_af)
-    df['psar_trend'] = trend
-    return df
-
-
 def create_chart_image(df, symbol, tf, divergence_info=None):
     try:
         df_chart = df.copy()
@@ -288,23 +245,17 @@ def create_chart_image(df, symbol, tf, divergence_info=None):
         
         buf = io.BytesIO()
         
-        # Eğer uyumsuzluk bilgisi varsa özel grafik çiz
         if divergence_info:
-            # RSI hesapla ve panele ekle
             rsi = get_rsi(plot_df['close'], RSI_PERIOD)
             rsi_plot = mpf.make_addplot(rsi, panel=2, color='purple', width=1.5, ylabel='RSI')
             
-            # Çizgileri oluştur (Fiyat için mavi, RSI için kırmızı)
             p1_idx, p2_idx = divergence_info['p1_idx'], divergence_info['p2_idx']
-            # 30 barlık dilime denk gelecek indexleri bul
             offset = len(df_chart) - len(plot_df)
             p1_plot_idx = p1_idx - offset
             p2_plot_idx = p2_idx - offset
             
             if p1_plot_idx >= 0 and p2_plot_idx >= 0:
-                # Fiyat çizgisi
                 price_line = [(p1_plot_idx, df_chart['high'].iloc[p1_idx]), (p2_plot_idx, df_chart['high'].iloc[p2_idx])]
-                # RSI çizgisi (panel 2'de)
                 rsi_line = [(p1_plot_idx, rsi.iloc[p1_plot_idx]), (p2_plot_idx, rsi.iloc[p2_plot_idx])]
                 
                 addplots.append(rsi_plot)
@@ -314,7 +265,6 @@ def create_chart_image(df, symbol, tf, divergence_info=None):
                                      colors=['blue', 'red'], 
                                      linewidths=2))
             else:
-                # Eğer çizgiler 30 bar dışına taşıyorsa normal çiz
                 addplots.append(rsi_plot)
                 mpf.plot(plot_df, type='candle', style=s, title=f'\n{symbol} - {tf.upper()}',
                          volume=True, addplot=addplots, savefig=buf)
@@ -338,48 +288,35 @@ class State(Enum):
 
 states = {}
 
-
 def check_divergence(df, symbol, tf):
-    """Son 30 mumda uyumsuzluk var mı diye kontrol eder."""
     if len(df) < 30: return None
-    
     df_recent = df.tail(30).copy()
     df_recent['rsi'] = get_rsi(df_recent['close'], RSI_PERIOD)
     
-    # Basit Pivot Bulucu (Son 5 barın en yükseği/en düşüğü)
-    # Daha isabetli olması için scipy kullanılabilir ama ekstra bağımlılık olmasın diye rolling kullanıyoruz.
     df_recent['pivot_high'] = df_recent['high'].rolling(5, center=True).max() == df_recent['high']
     df_recent['pivot_low'] = df_recent['low'].rolling(5, center=True).min() == df_recent['low']
     
     highs = df_recent[df_recent['pivot_high']].tail(2)
     lows = df_recent[df_recent['pivot_low']].tail(2)
     
-    # --- NEGATİF UYUMSUZLUK (SHORT) ---
     if len(highs) == 2:
         idx1, idx2 = highs.index[0], highs.index[1]
         p1, p2 = highs['high'].iloc[0], highs['high'].iloc[1]
         r1, r2 = highs['rsi'].iloc[0], highs['rsi'].iloc[1]
-        
-        # Fiyat yukarı (p2 > p1) ama RSI aşağı (r2 < r1)
-        if p2 > p1 and r2 < r1 and r2 < 70: # RSI çok düşükse de uyumsuzluk sayılır
+        if p2 > p1 and r2 < r1 and r2 < 70:
             return {
                 'type': 'SHORT', 'p1_idx': df.index.get_loc(idx1), 'p2_idx': df.index.get_loc(idx2),
                 'desc': f"Fiyat zirvesi yükseldi ({p1:.2f} -> {p2:.2f}), ancak RSI zirvesi düştü ({r1:.1f} -> {r2:.1f})."
             }
-
-    # --- POZİTİF UYUMSUZLUK (LONG) ---
     if len(lows) == 2:
         idx1, idx2 = lows.index[0], lows.index[1]
         p1, p2 = lows['low'].iloc[0], lows['low'].iloc[1]
         r1, r2 = lows['rsi'].iloc[0], lows['rsi'].iloc[1]
-        
-        # Fiyat aşağı (p2 < p1) ama RSI yukarı (r2 > r1)
         if p2 < p1 and r2 > r1 and r2 > 30:
             return {
                 'type': 'LONG', 'p1_idx': df.index.get_loc(idx1), 'p2_idx': df.index.get_loc(idx2),
                 'desc': f"Fiyat dibi düştü ({p1:.2f} -> {p2:.2f}), ancak RSI dibi yükseldi ({r1:.1f} -> {r2:.1f})."
             }
-            
     return None
 
 
@@ -394,12 +331,11 @@ def process_signals(symbol, dfs):
     rsi_alerts_instant = {"LONG": [], "SHORT": []}
     rsi_alerts_confirmed = {"LONG": [], "SHORT": []}
     atr_dunyasi_signals = {"LONG": [], "SHORT": []}
-    divergence_signals = {"LONG": [], "SHORT": []} # YENİ
+    divergence_signals = {"LONG": [], "SHORT": []}
 
-    # === YENİ: SADECE 1H İÇİN UYUMSUZLUK TARAMASI ===
+    # 1H İçin Bağımsız Uyumsuzluk Taraması
     df_1h = dfs.get("1h")
     if df_1h is not None and len(df_1h) >= 30:
-        # Mükerrer uyumsuzluk mesajı atmamak için son bar kontrolü
         div_key = f"div_{symbol}_1h"
         if div_key not in divergence_states:
             divergence_states[div_key] = {"last_bar": None}
@@ -494,10 +430,12 @@ def process_signals(symbol, dfs):
                 candle_ok = close_price < float(df['open'].iloc[-1])
                 macd_ok = macd_now < macd_sig_now
                 if price_ok and candle_ok and macd_ok:
+                    div_check = check_divergence(df, symbol, tf)
+                    has_div = True if div_check and div_check['type'] == 'SHORT' else False
                     rsi_alerts_confirmed["SHORT"].append({
                         "tf": tf, "prev": r_prev, "now": r_now, "price": close_price,
                         "peak_rsi": alarm_data["peak_rsi"], "peak_price": alarm_data["peak_price"],
-                        "atr": atr
+                        "atr": atr, "has_divergence": has_div
                     })
                     rsi_alarm_states[alarm_key]["state"] = "IDLE"
                 else:
@@ -519,10 +457,12 @@ def process_signals(symbol, dfs):
                 candle_ok = close_price > float(df['open'].iloc[-1])
                 macd_ok = macd_now > macd_sig_now
                 if price_ok and candle_ok and macd_ok:
+                    div_check = check_divergence(df, symbol, tf)
+                    has_div = True if div_check and div_check['type'] == 'LONG' else False
                     rsi_alerts_confirmed["LONG"].append({
                         "tf": tf, "prev": r_prev, "now": r_now, "price": close_price,
                         "low_rsi": alarm_data["low_rsi"], "low_price": alarm_data["low_price"],
-                        "atr": atr
+                        "atr": atr, "has_divergence": has_div
                     })
                     rsi_alarm_states[alarm_key]["state"] = "IDLE"
                 else:
@@ -572,10 +512,12 @@ def process_signals(symbol, dfs):
                 candle_ok = close_price < float(df['open'].iloc[-1])
                 macd_ok = macd_now < macd_sig_now
                 if price_ok and candle_ok and macd_ok:
+                    div_check = check_divergence(df, symbol, tf)
+                    has_div = True if div_check and div_check['type'] == 'SHORT' else False
                     atr_dunyasi_signals["SHORT"].append({
                         "tf": tf, "now_rsi": r_now,
                         "peak_rsi": atr_data["peak_rsi"], "peak_price": atr_data["peak_price"],
-                        "price": close_price, "atr": atr
+                        "price": close_price, "atr": atr, "has_divergence": has_div
                     })
                     atr_dunyasi_states[atr_key]["state"] = "IDLE"
                 else:
@@ -597,10 +539,12 @@ def process_signals(symbol, dfs):
                 candle_ok = close_price > float(df['open'].iloc[-1])
                 macd_ok = macd_now > macd_sig_now
                 if price_ok and candle_ok and macd_ok:
+                    div_check = check_divergence(df, symbol, tf)
+                    has_div = True if div_check and div_check['type'] == 'LONG' else False
                     atr_dunyasi_signals["LONG"].append({
                         "tf": tf, "now_rsi": r_now,
                         "low_rsi": atr_data["low_rsi"], "low_price": atr_data["low_price"],
-                        "price": close_price, "atr": atr
+                        "price": close_price, "atr": atr, "has_divergence": has_div
                     })
                     atr_dunyasi_states[atr_key]["state"] = "IDLE"
                 else:
@@ -655,40 +599,6 @@ def process_signals(symbol, dfs):
         msgs.append({"text": msg, "df": last_sig["df"], "symbol": symbol, "tf": last_sig["tf"],
                      "direction": direction, "price": last_sig["price"], "sl": sl_price, "type": "standard"})
 
-    # --- KISA VADE MESAJLARI ---
-    df_30m = dfs.get("30m")
-    if df_30m is not None and len(df_30m) > KV_EMA_SLOW + 10:
-        df_30m = df_30m.copy()
-        df_30m['ema_fast'] = df_30m['close'].ewm(span=KV_EMA_FAST, adjust=False).mean()
-        df_30m['ema_slow'] = df_30m['close'].ewm(span=KV_EMA_SLOW, adjust=False).mean()
-        df_30m['rsi14'] = get_rsi(df_30m['close'], KV_RSI_PERIOD)
-        df_30m = calculate_psar(df_30m)
-
-        trend_4h_50 = get_ema_trend(dfs.get("4h"), 50)
-        i = len(df_30m) - 1
-        cross_up = (df_30m['ema_fast'].iloc[i-1] <= df_30m['ema_slow'].iloc[i-1]) and (df_30m['ema_fast'].iloc[i] > df_30m['ema_slow'].iloc[i])
-        cross_down = (df_30m['ema_fast'].iloc[i-1] >= df_30m['ema_slow'].iloc[i-1]) and (df_30m['ema_fast'].iloc[i] < df_30m['ema_slow'].iloc[i])
-        atr_kv = calculate_atr(df_30m, 10)
-        close_kv = float(df_30m['close'].iloc[i])
-
-        is_kv_long = cross_up and (df_30m['rsi14'].iloc[i] > KV_RSI_LONG) and (trend_4h_50 == 1) and (df_30m['psar_trend'].iloc[i] == 1)
-        is_kv_short = cross_down and (df_30m['rsi14'].iloc[i] < KV_RSI_SHORT) and (trend_4h_50 == -1) and (df_30m['psar_trend'].iloc[i] == -1)
-
-        if is_kv_long and atr_kv:
-            sl_price = close_kv - (atr_kv * KV_SL_MULT)
-            tp_price = close_kv * (1 + KV_TP1_PCT/100)
-            msg = f"⚡ <b>30M KISA VADE SİNYALİ (LONG)</b>\n🟢 <b>{symbol}</b> — LONG [30M] ✅ PSAR & 4H EMA50 ONAYLI\n\n💰 <b>Giriş Fiyatı:</b> {close_kv:,.2f}\n🛑 <b>İlk Stop:</b> {sl_price:,.2f} (3 ATR)\n🎯 <b>1. Hedef (TP1):</b> {tp_price:,.2f} (%{KV_TP1_PCT} Kâr)\n💡 <b>Çıkış:</b> TP1'de yarısını kapat, stopu maliyete çek, kalanı 30m EMA50 ile takip et."
-            msgs.append({"text": msg, "df": df_30m, "symbol": symbol, "tf": "30m",
-                         "direction": "LONG", "price": close_kv, "sl": sl_price,
-                         "tp": tp_price, "atr": atr_kv, "type": "kisa_vade"})
-        elif is_kv_short and atr_kv:
-            sl_price = close_kv + (atr_kv * KV_SL_MULT)
-            tp_price = close_kv * (1 - KV_TP1_PCT/100)
-            msg = f"⚡ <b>30M KISA VADE SİNYALİ (SHORT)</b>\n🔴 <b>{symbol}</b> — SHORT [30M] ✅ PSAR & 4H EMA50 ONAYLI\n\n💰 <b>Giriş Fiyatı:</b> {close_kv:,.2f}\n🛑 <b>İlk Stop:</b> {sl_price:,.2f} (3 ATR)\n🎯 <b>1. Hedef (TP1):</b> {tp_price:,.2f} (%{KV_TP1_PCT} Kâr)\n💡 <b>Çıkış:</b> TP1'de yarısını kapat, stopu maliyete çek, kalanı 30m EMA50 ile takip et."
-            msgs.append({"text": msg, "df": df_30m, "symbol": symbol, "tf": "30m",
-                         "direction": "SHORT", "price": close_kv, "sl": sl_price,
-                         "tp": tp_price, "atr": atr_kv, "type": "kisa_vade"})
-
     # --- RSI BÜYÜSÜ: İLK UYARI MESAJLARI ---
     for direction, sig_list in [("SHORT", rsi_alerts_instant["SHORT"]), ("LONG", rsi_alerts_instant["LONG"])]:
         if not sig_list: continue
@@ -719,9 +629,12 @@ def process_signals(symbol, dfs):
 
         entry = last_sig['price']
         atr = last_sig.get('atr', 0)
+        has_div = last_sig.get('has_divergence', False)
 
         trend_info = get_symbol_trend_label(direction, dfs.get("1h"), dfs.get("4h"))
         earnings_note = get_earnings_note(symbol)
+        
+        div_warning = "\n\n🚨 <b>DİKKAT: RSI Uyumsuzluğu Tespit Edildi!</b> (Fiyat ile RSI ters düşüyor, dönüş teyidi güçlü.)" if has_div else ""
 
         if direction == "SHORT":
             sl = entry + (atr * RB_SL_ATR_MULT)
@@ -732,7 +645,8 @@ def process_signals(symbol, dfs):
             msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Short) - {symbol} [{last_sig['tf'].upper()}]</b>\n"
             msg += f"RSI 8 zirveyi ({last_sig['peak_rsi']:.1f}) gördü.\n"
             msg += f"📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n"
-            msg += f"📉 <b>Zirveden Düşüş:</b> {((last_sig['peak_price'] - entry) / entry) * 100:.2f}% (≈ {ALARM_ATR_DROP} ATR)\n\n"
+            msg += f"📉 <b>Zirveden Düşüş:</b> {((last_sig['peak_price'] - entry) / entry) * 100:.2f}% (≈ {ALARM_ATR_DROP} ATR)\n"
+            msg += f"{div_warning}\n\n" # Uyumsuzluk uyarısı eklendi
             msg += f"{trend_info}\n\n"
             msg += f"💰 <b>Giriş:</b> {entry:,.2f}\n"
             msg += f"🛑 <b>SL (2.5 ATR):</b> {sl:,.2f} (%{sl_pct:.2f})\n"
@@ -749,7 +663,8 @@ def process_signals(symbol, dfs):
             msg = f"✨ <b>RSI BÜYÜSÜ (Teyit)</b> ✨\n🎯 <b>TEYİTLİ SİNYAL (Long) - {symbol} [{last_sig['tf'].upper()}]</b>\n"
             msg += f"RSI 8 dibi ({last_sig['low_rsi']:.1f}) gördü.\n"
             msg += f"📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n"
-            msg += f"📈 <b>Dipten Yükseliş:</b> {((entry - last_sig['low_price']) / last_sig['low_price']) * 100:.2f}% (≈ {ALARM_ATR_DROP} ATR)\n\n"
+            msg += f"📈 <b>Dipten Yükseliş:</b> {((entry - last_sig['low_price']) / last_sig['low_price']) * 100:.2f}% (≈ {ALARM_ATR_DROP} ATR)\n"
+            msg += f"{div_warning}\n\n" # Uyumsuzluk uyarısı eklendi
             msg += f"{trend_info}\n\n"
             msg += f"💰 <b>Giriş:</b> {entry:,.2f}\n"
             msg += f"🛑 <b>SL (2.5 ATR):</b> {sl:,.2f} (%{sl_pct:.2f})\n"
@@ -772,9 +687,12 @@ def process_signals(symbol, dfs):
 
         entry = last_sig['price']
         atr = last_sig.get('atr', 0)
+        has_div = last_sig.get('has_divergence', False)
 
         trend_info = get_symbol_trend_label(direction, dfs.get("1h"), dfs.get("4h"))
         earnings_note = get_earnings_note(symbol)
+        
+        div_warning = "\n\n🚨 <b>DİKKAT: RSI Uyumsuzluğu Tespit Edildi!</b> (Fiyat ile RSI ters düşüyor, dönüş teyidi güçlü.)" if has_div else ""
 
         if direction == "SHORT":
             sl = last_sig['peak_price']
@@ -787,7 +705,8 @@ def process_signals(symbol, dfs):
             msg += f"🎯 <b>ATR ONAYLI SİNYAL (Short) - {symbol} [{last_sig['tf'].upper()}]</b>\n"
             msg += f"🔴 <b>RSI Aşırı Alım:</b> {last_sig['peak_rsi']:.1f} (Zirve)\n"
             msg += f"📈 <b>Zirve Fiyatı:</b> {last_sig['peak_price']:,.2f}\n"
-            msg += f"📉 <b>Zirveden Düşüş:</b> %{drop_pct:.2f} (≈ {ALARM_ATR_DROP} ATR onayı)\n\n"
+            msg += f"📉 <b>Zirveden Düşüş:</b> %{drop_pct:.2f} (≈ {ALARM_ATR_DROP} ATR onayı)\n"
+            msg += f"{div_warning}\n\n" # Uyumsuzluk uyarısı eklendi
             msg += f"{trend_info}\n\n"
             msg += f"💰 <b>Giriş:</b> {entry:,.2f}\n"
             msg += f"🛑 <b>Stop (Zirve):</b> {sl:,.2f} (+%{sl_pct:.2f})\n"
@@ -806,7 +725,8 @@ def process_signals(symbol, dfs):
             msg += f"🎯 <b>ATR ONAYLI SİNYAL (Long) - {symbol} [{last_sig['tf'].upper()}]</b>\n"
             msg += f"🟢 <b>RSI Aşırı Satım:</b> {last_sig['low_rsi']:.1f} (Dip)\n"
             msg += f"📉 <b>Dip Fiyatı:</b> {last_sig['low_price']:,.2f}\n"
-            msg += f"📈 <b>Dipten Yükseliş:</b> %{rise_pct:.2f} (≈ {ALARM_ATR_DROP} ATR onayı)\n\n"
+            msg += f"📈 <b>Dipten Yükseliş:</b> %{rise_pct:.2f} (≈ {ALARM_ATR_DROP} ATR onayı)\n"
+            msg += f"{div_warning}\n\n" # Uyumsuzluk uyarısı eklendi
             msg += f"{trend_info}\n\n"
             msg += f"💰 <b>Giriş:</b> {entry:,.2f}\n"
             msg += f"🛑 <b>Stop (Dip):</b> {sl:,.2f} (-%{sl_pct:.2f})\n"
@@ -1111,40 +1031,6 @@ async def check_active_trades():
                     del active_trades[trade_key]
                     continue
 
-        elif trade.get("signal_type") == "kisa_vade":
-            tp_hit = trade.get("tp_hit", False)
-            init_sl = trade["sl"]
-            entry_price = trade["entry"]
-
-            if (t_type == "LONG" and current_low <= init_sl) or (t_type == "SHORT" and current_high >= init_sl):
-                msg = f"🛑 <b>STOP OLDU - {sym}</b>\nİlk Stop Seviyesine ({init_sl:,.2f}) değdi. Pozisyonu kapatın."
-                for cid in CHAT_IDS:
-                    reply_id = trade.get("msg_ids", {}).get(str(cid))
-                    try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
-                    except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-                del active_trades[trade_key]
-                continue
-
-            target_tp = trade["tp"]
-            if not tp_hit:
-                if (t_type == "LONG" and current_high >= target_tp) or (t_type == "SHORT" and current_low <= target_tp):
-                    trade["tp_hit"] = True
-                    msg = f"🎯 <b>TP1 VURULDU (%5 Kâr) - {sym}</b>\n👉 <b>Pozisyonun yarısını (%50) kapatın.</b>\n🛑 <b>Stop-Loss'u maliyete çekin: {entry_price:,.2f}</b>"
-                    for cid in CHAT_IDS:
-                        reply_id = trade.get("msg_ids", {}).get(str(cid))
-                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
-                        except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-                    continue
-
-            if tp_hit:
-                if (t_type == "LONG" and current_price <= current_ema50) or (t_type == "SHORT" and current_price >= current_ema50):
-                    msg = f"⚪ <b>EMA 50 ÇIKIŞI - {sym}</b>\n👉 <b>Kalan pozisyonu kapatın.</b>"
-                    for cid in CHAT_IDS:
-                        reply_id = trade.get("msg_ids", {}).get(str(cid))
-                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
-                        except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-                    del active_trades[trade_key]
-
         else:
             if not trade.get("hit_3pct", False):
                 if (t_type == "LONG" and current_high >= trade["entry"] * 1.03) or (t_type == "SHORT" and current_low <= trade["entry"] * 0.97):
@@ -1202,7 +1088,7 @@ async def send_signal_message(msg_data):
                     last_rsi_alert_msgs[key] = {}
                 last_rsi_alert_msgs[key][str(cid)] = sent.message_id
 
-            if "direction" in msg_data and msg_type in ["standard", "kisa_vade", "rsi_buyusu", "atr_dunyasi"]:
+            if "direction" in msg_data and msg_type in ["standard", "rsi_buyusu", "atr_dunyasi"]:
                 msg_ids[str(cid)] = sent.message_id
 
         except Exception as e:
@@ -1213,12 +1099,12 @@ async def send_signal_message(msg_data):
                     sent = await bot_app.bot.send_photo(chat_id=cid, photo=buf, caption=text, parse_mode="HTML")
                 else:
                     sent = await bot_app.bot.send_message(chat_id=cid, text=text, parse_mode="HTML")
-                if "direction" in msg_data and msg_type in ["standard", "kisa_vade", "rsi_buyusu", "atr_dunyasi"]:
+                if "direction" in msg_data and msg_type in ["standard", "rsi_buyusu", "atr_dunyasi"]:
                     msg_ids[str(cid)] = sent.message_id
             except Exception as e2:
                 print(f"send_signal_message fallback {symbol} chat {cid}: {e2}")
 
-    if "direction" in msg_data and msg_type in ["standard", "kisa_vade", "rsi_buyusu", "atr_dunyasi"]:
+    if "direction" in msg_data and msg_type in ["standard", "rsi_buyusu", "atr_dunyasi"]:
         trade_key = f"{symbol}_{msg_data['direction']}_{msg_type}_{tf}"
         trade_info = {
             "symbol": symbol, "type": msg_data["direction"], "entry": msg_data["price"],
@@ -1226,9 +1112,7 @@ async def send_signal_message(msg_data):
             "hit_3pct": False, "tp_hit": False, "sl": msg_data.get("sl"),
             "tf": tf
         }
-        if msg_type == "kisa_vade":
-            trade_info["tp"] = msg_data.get("tp")
-        elif msg_type in ("rsi_buyusu", "atr_dunyasi"):
+        if msg_type in ("rsi_buyusu", "atr_dunyasi"):
             trade_info["tp1"] = msg_data.get("tp1")
             trade_info["tp2"] = msg_data.get("tp2")
             trade_info["hit_tp1"] = False
@@ -1284,7 +1168,7 @@ async def clear_daily_state():
     last_rsi_alert_msgs.clear()
     last_atr_dunyasi_msgs.clear()
     instant_states.clear()
-    divergence_states.clear() # YENİ
+    divergence_states.clear()
     earnings_cache.clear()
     print("🧹 Günlük state temizlendi.")
 
