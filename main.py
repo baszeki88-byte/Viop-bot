@@ -86,6 +86,9 @@ ATR_TP1_PCT = 1.5
 ATR_TP2_PCT = 3.0
 TIMEOUT_HOURS = 24 
 
+# 1H İçin Özel SL Ayarı
+SL_PCT_1H = 3.5
+
 # SLIPPAGE (Fiyat Kaçma) Ayarı
 SLIPPAGE_THRESHOLD = 0.5 # %0.5
 
@@ -163,7 +166,7 @@ def fetch_ohlc(symbol, interval, limit=300):
                             df.index = df.index.tz_convert(TIMEZONE)
                     except Exception:
                         pass
-                return df.iloc[:-1] # Son henüz kapanmamış barı at
+                return df.iloc[:-1] 
         except Exception as e:
             time.sleep(1)
     return None
@@ -213,7 +216,6 @@ def create_chart_image(df, symbol, tf):
         return None
 
 def check_slippage(symbol, signal_price):
-    """Sinyal fiyatı ile anlık fiyat arasındaki sapmayı kontrol eder."""
     try:
         live_df = bp.Ticker(symbol).history(period="1d", interval="5m")
         if live_df is not None and not live_df.empty:
@@ -246,10 +248,8 @@ def process_signals(symbol, dfs):
             instant_states[inst_key] = {"last_bar": None}
             
         if instant_states[inst_key]["last_bar"] != bar_time:
-            # Gecikme Kontrolü
             delay_min = (datetime.now(TIMEZONE) - bar_time).total_seconds() / 60
-            if delay_min > 75: # 1H için 75 dk gecikme toleransı
-                continue
+            if delay_min > 75: continue
 
             direction = None
             if r_prev <= INSTANT_SHORT < r_now: direction = "SHORT"
@@ -306,7 +306,6 @@ def process_signals(symbol, dfs):
         atr_data = atr_states[atr_key]
         if atr_data.get("last_bar") != bar_time:
             
-            # --- DİNAMİK GECİKME KONTROLÜ ---
             delay_min = (datetime.now(TIMEZONE) - bar_time).total_seconds() / 60
             max_delay = 20 if tf == "15m" else (40 if tf == "30m" else 75)
             if delay_min > max_delay:
@@ -342,21 +341,31 @@ def process_signals(symbol, dfs):
                     earnings_note = get_earnings_note(symbol)
                     slippage_warning = check_slippage(symbol, close_price)
                     
-                    sl = atr_data["peak_price"]
+                    # 1H İÇİN ÖZEL SL
+                    if tf == "1h":
+                        sl = close_price * (1 + SL_PCT_1H / 100)
+                    else:
+                        sl = atr_data["peak_price"]
+                        
                     tp1 = close_price * (1 - ATR_TP1_PCT / 100)
                     tp2 = close_price * (1 - ATR_TP2_PCT / 100)
+                    
+                    # DCA Seviyeleri
+                    dca1 = close_price * (1 + 2.2 / 100)
+                    dca2 = close_price * (1 + 2.9 / 100)
+                    
                     sl_pct = ((sl - close_price) / close_price) * 100
-                    drop_pct = ((atr_data["peak_price"] - close_price) / close_price) * 100
 
                     msg = f"✨ <b>ATR DÜNYASI (Short) - {symbol} [{tf.upper()}]</b> ✨\n"
                     msg += f"🔴 RSI Aşırı Alım Zirvesi: {atr_data['peak_rsi']:.1f}\n"
-                    msg += f"📈 Zirve Fiyatı: {atr_data['peak_price']:,.2f} (Düşüş: %{drop_pct:.2f})\n"
                     msg += f"📊 {tags}\n"
                     msg += f"{slippage_warning}\n\n"
                     msg += f"💰 <b>Giriş:</b> {close_price:,.2f}\n"
-                    msg += f"🛑 <b>Stop (Zirve):</b> {sl:,.2f} (+%{sl_pct:.2f})\n"
+                    msg += f"🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n"
                     msg += f"🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n"
                     msg += f"🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n"
+                    msg += f"➕ <b>1. Ekleme (DCA1):</b> {dca1:,.2f}\n"
+                    msg += f"➕ <b>2. Ekleme (DCA2):</b> {dca2:,.2f}\n"
                     msg += f"⏳ <i>Zaman Aşımı: 24 Saat</i>\n"
                     msg += earnings_note
                     
@@ -387,21 +396,31 @@ def process_signals(symbol, dfs):
                     earnings_note = get_earnings_note(symbol)
                     slippage_warning = check_slippage(symbol, close_price)
                     
-                    sl = atr_data["low_price"]
+                    # 1H İÇİN ÖZEL SL
+                    if tf == "1h":
+                        sl = close_price * (1 - SL_PCT_1H / 100)
+                    else:
+                        sl = atr_data["low_price"]
+                        
                     tp1 = close_price * (1 + ATR_TP1_PCT / 100)
                     tp2 = close_price * (1 + ATR_TP2_PCT / 100)
+                    
+                    # DCA Seviyeleri
+                    dca1 = close_price * (1 - 2.2 / 100)
+                    dca2 = close_price * (1 - 2.9 / 100)
+                    
                     sl_pct = ((close_price - sl) / close_price) * 100
-                    rise_pct = ((close_price - atr_data["low_price"]) / atr_data["low_price"]) * 100
 
                     msg = f"✨ <b>ATR DÜNYASI (Long) - {symbol} [{tf.upper()}]</b> ✨\n"
                     msg += f"🟢 RSI Aşırı Satım Dibi: {atr_data['low_rsi']:.1f}\n"
-                    msg += f"📉 Dip Fiyatı: {atr_data['low_price']:,.2f} (Yükseliş: %{rise_pct:.2f})\n"
                     msg += f"📊 {tags}\n"
                     msg += f"{slippage_warning}\n\n"
                     msg += f"💰 <b>Giriş:</b> {close_price:,.2f}\n"
-                    msg += f"🛑 <b>Stop (Dip):</b> {sl:,.2f} (-%{sl_pct:.2f})\n"
+                    msg += f"🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n"
                     msg += f"🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n"
                     msg += f"🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n"
+                    msg += f"➕ <b>1. Ekleme (DCA1):</b> {dca1:,.2f}\n"
+                    msg += f"➕ <b>2. Ekleme (DCA2):</b> {dca2:,.2f}\n"
                     msg += f"⏳ <i>Zaman Aşımı: 24 Saat</i>\n"
                     msg += earnings_note
                     
@@ -613,11 +632,35 @@ async def check_active_trades():
         sl_orig = trade["sl"]
         hit_tp1 = trade.get("hit_tp1", False)
         entry_time = trade["entry_time"]
+        tf = trade["tf"]
         
+        time_diff_hours = (datetime.now(TIMEZONE) - entry_time).total_seconds() / 3600
+
+        # --- 1H ÖZEL ZAMAN UYARILARI ---
+        if tf == "1h":
+            # 6. Saat Uyarısı
+            if time_diff_hours >= 6 and not trade.get("warning_6h_sent", False):
+                trade["warning_6h_sent"] = True
+                msg = f"⏰ <b>6. SAAT UYARISI - {sym} [1H]</b>\n"
+                msg += f"Backtest verilerine göre en iyi kâr seviyesine ulaştınız. Kârı korumak için stop seviyenizi güncelleyebilirsiniz."
+                for cid in CHAT_IDS:
+                    reply_id = trade.get("msg_ids", {}).get(str(cid))
+                    try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                    except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+
+            # 10. Saat Uyarısı
+            if time_diff_hours >= 10 and not trade.get("warning_10h_sent", False):
+                trade["warning_10h_sent"] = True
+                msg = f"⏳ <b>10. SAAT UYARISI - {sym} [1H]</b>\n"
+                msg += f"{t_type} işlemlerinde 10. saatten sonra kâr oranı düşüyor. Lütfen işlemi mevcut fiyattan <b>KAPATIN</b>.\nMevcut Fiyat: {current_price:,.2f}"
+                for cid in CHAT_IDS:
+                    reply_id = trade.get("msg_ids", {}).get(str(cid))
+                    try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                    except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+
         # Timeout Kontrolü (24 Saat)
-        time_diff = (datetime.now(TIMEZONE) - entry_time).total_seconds()
-        if time_diff >= (TIMEOUT_HOURS * 3600):
-            msg = f"⏳ <b>ZAMAN AŞIMI - {sym} [{trade['tf'].upper()}]</b>\n"
+        if time_diff_hours >= TIMEOUT_HOURS:
+            msg = f"⏳ <b>ZAMAN AŞIMI - {sym} [{tf.upper()}]</b>\n"
             msg += f"İşlem 24 saattir devam ediyor ve hedefe ulaşamadı.\n"
             msg += f"👉 <b>Mevcut fiyattan kapatın: {current_price:,.2f}</b>"
             for cid in CHAT_IDS:
@@ -632,9 +675,9 @@ async def check_active_trades():
         # SL Kontrolü
         if (t_type == "LONG" and current_low <= current_sl) or (t_type == "SHORT" and current_high >= current_sl):
             if hit_tp1:
-                msg = f"🛑 <b>STOP (Breakeven) - {sym} [{trade['tf'].upper()}]</b>\nTP1 sonrası SL maliyete çekilmişti. Kalan pozisyon kapatıldı.\n<b>Net kâr:</b> +%{ATR_TP1_PCT/2:.2f} (TP1'den)"
+                msg = f"🛑 <b>STOP (Breakeven) - {sym} [{tf.upper()}]</b>\nTP1 sonrası SL maliyete çekilmişti. Kalan pozisyon kapatıldı.\n<b>Net kâr:</b> +%{ATR_TP1_PCT/2:.2f} (TP1'den)"
             else:
-                msg = f"🛑 <b>STOP OLDU - {sym} [{trade['tf'].upper()}]</b>\nİlk Stop ({sl_orig:,.2f}) seviyesine değdi. Pozisyon kapatıldı."
+                msg = f"🛑 <b>STOP OLDU - {sym} [{tf.upper()}]</b>\nİlk Stop ({sl_orig:,.2f}) seviyesine değdi. Pozisyon kapatıldı."
             for cid in CHAT_IDS:
                 reply_id = trade.get("msg_ids", {}).get(str(cid))
                 try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
@@ -646,7 +689,7 @@ async def check_active_trades():
         if not hit_tp1:
             if (t_type == "LONG" and current_high >= tp1) or (t_type == "SHORT" and current_low <= tp1):
                 trade["hit_tp1"] = True
-                msg = f"🎯 <b>TP1 VURULDU (%{ATR_TP1_PCT}) - {sym} [{trade['tf'].upper()}]</b>\n👉 <b>Pozisyonun yarısını kapat.</b>\n🛑 <b>SL'yi maliyete çek:</b> {entry:,.2f}\n⏳ <i>Kalan yarıyı TP2 ({tp2:,.2f}) veya breakeven'a kadar tut.</i>"
+                msg = f"🎯 <b>TP1 VURULDU (%{ATR_TP1_PCT}) - {sym} [{tf.upper()}]</b>\n👉 <b>Pozisyonun yarısını kapat.</b>\n🛑 <b>SL'yi maliyete çek:</b> {entry:,.2f}\n⏳ <i>Kalan yarıyı TP2 ({tp2:,.2f}) veya breakeven'a kadar tut.</i>"
                 for cid in CHAT_IDS:
                     reply_id = trade.get("msg_ids", {}).get(str(cid))
                     try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
@@ -656,7 +699,7 @@ async def check_active_trades():
         # TP2 Kontrolü
         if hit_tp1:
             if (t_type == "LONG" and current_high >= tp2) or (t_type == "SHORT" and current_low <= tp2):
-                msg = f"🎯🎯 <b>TP2 VURULDU (%{ATR_TP2_PCT}) - {sym} [{trade['tf'].upper()}]</b>\n👉 <b>Kalan pozisyonu kapat.</b>\n<b>Net kâr:</b> ~%{(ATR_TP1_PCT+ATR_TP2_PCT)/2:.2f} (yarı yarıya)"
+                msg = f"🎯🎯 <b>TP2 VURULDU (%{ATR_TP2_PCT}) - {sym} [{tf.upper()}]</b>\n👉 <b>Kalan pozisyonu kapat.</b>\n<b>Net kâr:</b> ~%{(ATR_TP1_PCT+ATR_TP2_PCT)/2:.2f} (yarı yarıya)"
                 for cid in CHAT_IDS:
                     reply_id = trade.get("msg_ids", {}).get(str(cid))
                     try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
@@ -707,7 +750,8 @@ async def send_signal_message(msg_data):
             "symbol": symbol, "type": msg_data["direction"], "entry": msg_data["price"],
             "msg_ids": msg_ids, "signal_type": msg_type,
             "sl": msg_data.get("sl"), "tp1": msg_data.get("tp1"), "tp2": msg_data.get("tp2"),
-            "hit_tp1": False, "tf": tf, "entry_time": datetime.now(TIMEZONE)
+            "hit_tp1": False, "tf": tf, "entry_time": datetime.now(TIMEZONE),
+            "warning_6h_sent": False, "warning_10h_sent": False
         }
         active_trades[trade_key] = trade_info
 
@@ -770,10 +814,10 @@ async def main():
 
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
     
-    # YENİ TARAMA SAATLERİ: Borsapy gecikmesini tolere etmek için :05, :20, :35, :50
+    # Tarama Saatleri
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="5,20,35,50", timezone=TIMEZONE))
     
-    # Hassas İşlem Takibi: Her 5 dakikada bir (15m mumlarına göre TP/SL yakalamak için)
+    # Hassas İşlem Takibi
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
 
     sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=15, timezone=TIMEZONE))
