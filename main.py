@@ -84,12 +84,13 @@ VOLUME_MULT = 1.5
 # ATR İşlem Ayarları
 ATR_TP1_PCT = 1.5
 ATR_TP2_PCT = 3.0
-SLIPPAGE_THRESHOLD = 0.5 # %0.5
+SLIPPAGE_THRESHOLD = 0.5
 
 # Tüm Zaman Dilimleri İçin Sabit SL
 SL_PCT = 3.5 
 
-TIMEOUT_HOURS = 24 
+# ATR İçin Timeout Süresi (Efektif Piyasa Saati)
+TIMEOUT_HOURS = 10 
 
 active_trades = {}
 instant_states = {}       
@@ -103,6 +104,41 @@ def is_market_open(now=None):
     tr_holidays = holidays.Turkey()
     if now.date() in tr_holidays: return False
     return time(9, 55) <= now.time() <= time(18, 0)
+
+def get_effective_market_hours(entry_time, now_time):
+    """
+    İki zaman arasında sadece BIST seans saatlerinde (10:00 - 18:00) geçen 
+    efektif süreyi saat cinsinden hesaplar. Gece ve hafta sonlarını saymaz.
+    """
+    if now_time <= entry_time: return 0.0
+    
+    total_hours = 0.0
+    current = entry_time
+    
+    market_open = time(10, 0)
+    market_close = time(18, 0)
+    
+    while current.date() <= now_time.date():
+        # Hafta sonu ise atla
+        if current.weekday() > 4:
+            current = TIMEZONE.localize(datetime.combine(current.date() + timedelta(days=1), market_open))
+            continue
+            
+        day_open = TIMEZONE.localize(datetime.combine(current.date(), market_open))
+        day_close = TIMEZONE.localize(datetime.combine(current.date(), market_close))
+        
+        if now_time < day_open:
+            break
+            
+        start_of_period = max(current, day_open)
+        end_of_period = min(now_time, day_close)
+        
+        if end_of_period > start_of_period:
+            total_hours += (end_of_period - start_of_period).total_seconds() / 3600
+            
+        current = TIMEZONE.localize(datetime.combine(current.date() + timedelta(days=1), market_open))
+        
+    return total_hours
 
 def get_earnings_note(symbol):
     today = datetime.now(TIMEZONE).date()
@@ -340,7 +376,6 @@ def process_signals(symbol, dfs):
                     earnings_note = get_earnings_note(symbol)
                     slippage_warning = check_slippage(symbol, close_price)
                     
-                    # Tüm TF'ler için Sabit %3.5 SL
                     sl = close_price * (1 + SL_PCT / 100)
                     tp1 = close_price * (1 - ATR_TP1_PCT / 100)
                     tp2 = close_price * (1 - ATR_TP2_PCT / 100)
@@ -355,7 +390,7 @@ def process_signals(symbol, dfs):
                     msg += f"🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n"
                     msg += f"🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n"
                     msg += f"🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n"
-                    msg += f"⏳ <i>Zaman Aşımı: 24 Saat</i>\n"
+                    msg += f"⏳ <i>Zaman Aşımı: 10 Seans Saati</i>\n"
                     msg += earnings_note
                     
                     msgs.append({"text": msg, "df": df, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "SHORT",
@@ -385,7 +420,6 @@ def process_signals(symbol, dfs):
                     earnings_note = get_earnings_note(symbol)
                     slippage_warning = check_slippage(symbol, close_price)
                     
-                    # Tüm TF'ler için Sabit %3.5 SL
                     sl = close_price * (1 - SL_PCT / 100)
                     tp1 = close_price * (1 + ATR_TP1_PCT / 100)
                     tp2 = close_price * (1 + ATR_TP2_PCT / 100)
@@ -400,7 +434,7 @@ def process_signals(symbol, dfs):
                     msg += f"🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n"
                     msg += f"🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n"
                     msg += f"🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n"
-                    msg += f"⏳ <i>Zaman Aşımı: 24 Saat</i>\n"
+                    msg += f"⏳ <i>Zaman Aşımı: 10 Seans Saati</i>\n"
                     msg += earnings_note
                     
                     msgs.append({"text": msg, "df": df, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "LONG",
@@ -613,11 +647,11 @@ async def check_active_trades():
         entry_time = trade["entry_time"]
         tf = trade["tf"]
         
-        time_diff_hours = (datetime.now(TIMEZONE) - entry_time).total_seconds() / 3600
+        # Sadece seans saatlerini sayan efektif süre hesabı
+        effective_hours = get_effective_market_hours(entry_time, datetime.now(TIMEZONE))
 
-        # --- ZAMAN UYARILARI (Tüm TF'ler için) ---
-        # 6. Saat Uyarısı
-        if time_diff_hours >= 6 and not trade.get("warning_6h_sent", False):
+        # 6. Saat Uyarısı (En iyi kâr saati)
+        if effective_hours >= 6 and not trade.get("warning_6h_sent", False):
             trade["warning_6h_sent"] = True
             msg = f"⏰ <b>En iyi kâr saati geldi!</b>\n"
             msg += f"Backtest verilerine göre bu saatlerde kârın zirvesindesin. Pozisyonu kâr al veya stopu güncelle.\n"
@@ -627,22 +661,11 @@ async def check_active_trades():
                 try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
                 except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
 
-        # 10. Saat Uyarısı
-        if time_diff_hours >= 10 and not trade.get("warning_10h_sent", False):
-            trade["warning_10h_sent"] = True
-            msg = f"⏳ <b>İşlemi Kapat!</b>\n"
-            msg += f"10. saatten sonra kâr ihtimali düşüyor. Lütfen işlemi mevcut fiyattan kapat.\n"
-            msg += f"Mevcut Fiyat: {current_price:,.2f}"
-            for cid in CHAT_IDS:
-                reply_id = trade.get("msg_ids", {}).get(str(cid))
-                try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
-                except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-
-        # Timeout Kontrolü (24 Saat)
-        if time_diff_hours >= TIMEOUT_HOURS:
-            msg = f"⏳ <b>ZAMAN AŞIMI - {sym} [{tf.upper()}]</b>\n"
-            msg += f"İşlem 24 saattir devam ediyor ve hedefe ulaşamadı.\n"
-            msg += f"👉 <b>Mevcut fiyattan kapatın: {current_price:,.2f}</b>"
+        # 10. Seans Saati Timeout (Net ve Kısa Kapatma)
+        if effective_hours >= TIMEOUT_HOURS:
+            msg = f"⏳ <b>ZAMAN AŞIMI (10. Seans Saati) - {sym} [{tf.upper()}]</b>\n"
+            msg += f"Süre doldu. Lütfen kapatın.\n"
+            msg += f"👉 <b>Mevcut Fiyat: {current_price:,.2f}</b>"
             for cid in CHAT_IDS:
                 reply_id = trade.get("msg_ids", {}).get(str(cid))
                 try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
@@ -731,7 +754,7 @@ async def send_signal_message(msg_data):
             "msg_ids": msg_ids, "signal_type": msg_type,
             "sl": msg_data.get("sl"), "tp1": msg_data.get("tp1"), "tp2": msg_data.get("tp2"),
             "hit_tp1": False, "tf": tf, "entry_time": datetime.now(TIMEZONE),
-            "warning_6h_sent": False, "warning_10h_sent": False
+            "warning_6h_sent": False
         }
         active_trades[trade_key] = trade_info
 
