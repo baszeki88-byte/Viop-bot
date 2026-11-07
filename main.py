@@ -106,20 +106,13 @@ def is_market_open(now=None):
     return time(9, 55) <= now.time() <= time(18, 0)
 
 def get_effective_market_hours(entry_time, now_time):
-    """
-    İki zaman arasında sadece BIST seans saatlerinde (10:00 - 18:00) geçen 
-    efektif süreyi saat cinsinden hesaplar. Gece ve hafta sonlarını saymaz.
-    """
     if now_time <= entry_time: return 0.0
-    
     total_hours = 0.0
     current = entry_time
-    
     market_open = time(10, 0)
     market_close = time(18, 0)
     
     while current.date() <= now_time.date():
-        # Hafta sonu ise atla
         if current.weekday() > 4:
             current = TIMEZONE.localize(datetime.combine(current.date() + timedelta(days=1), market_open))
             continue
@@ -137,7 +130,6 @@ def get_effective_market_hours(entry_time, now_time):
             total_hours += (end_of_period - start_of_period).total_seconds() / 3600
             
         current = TIMEZONE.localize(datetime.combine(current.date() + timedelta(days=1), market_open))
-        
     return total_hours
 
 def get_earnings_note(symbol):
@@ -647,8 +639,25 @@ async def check_active_trades():
         entry_time = trade["entry_time"]
         tf = trade["tf"]
         
-        # Sadece seans saatlerini sayan efektif süre hesabı
         effective_hours = get_effective_market_hours(entry_time, datetime.now(TIMEZONE))
+
+        # --- YENİ: SADECE 15M İÇİN %1 KÂR KORUMASI ---
+        if tf == "15m" and not trade.get("hit_1pct_alert_sent", False):
+            profit_pct = 0
+            if t_type == "LONG":
+                profit_pct = ((current_price - entry) / entry) * 100
+            else:
+                profit_pct = ((entry - current_price) / entry) * 100
+
+            if profit_pct >= 1.0:
+                trade["hit_1pct_alert_sent"] = True
+                msg = f"🔔 <b>15M Kâr Koruması - {sym}</b>\n"
+                msg += f"Fiyat %1 kâra ulaştı! (Mevcut: {current_price:,.2f})\n"
+                msg += f"👉 <b>Stop seviyenizi maliyete (Giriş: {entry:,.2f}) çekin.</b>"
+                for cid in CHAT_IDS:
+                    reply_id = trade.get("msg_ids", {}).get(str(cid))
+                    try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                    except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
 
         # 6. Saat Uyarısı (En iyi kâr saati)
         if effective_hours >= 6 and not trade.get("warning_6h_sent", False):
@@ -673,12 +682,14 @@ async def check_active_trades():
             del active_trades[trade_key]
             continue
 
-        current_sl = entry if hit_tp1 else sl_orig
+        # SL Kontrolü (Eğer TP1 veya %1 Koruması vurulduysa SL maliyet kabul edilir)
+        current_sl = entry if (hit_tp1 or trade.get("hit_1pct_alert_sent")) else sl_orig
 
-        # SL Kontrolü
         if (t_type == "LONG" and current_low <= current_sl) or (t_type == "SHORT" and current_high >= current_sl):
             if hit_tp1:
                 msg = f"🛑 <b>STOP (Breakeven) - {sym} [{tf.upper()}]</b>\nTP1 sonrası SL maliyete çekilmişti. Kalan pozisyon kapatıldı.\n<b>Net kâr:</b> +%{ATR_TP1_PCT/2:.2f} (TP1'den)"
+            elif trade.get("hit_1pct_alert_sent"):
+                msg = f"🛑 <b>STOP (Breakeven) - {sym} [{tf.upper()}]</b>\n%1 kâr sonrası SL maliyete çekilmişti. Pozisyon kapatıldı.\n<b>Net kâr:</b> 0 (Sıfır zarar)"
             else:
                 msg = f"🛑 <b>STOP OLDU - {sym} [{tf.upper()}]</b>\nİlk Stop ({sl_orig:,.2f}) seviyesine değdi. Pozisyon kapatıldı."
             for cid in CHAT_IDS:
@@ -754,7 +765,7 @@ async def send_signal_message(msg_data):
             "msg_ids": msg_ids, "signal_type": msg_type,
             "sl": msg_data.get("sl"), "tp1": msg_data.get("tp1"), "tp2": msg_data.get("tp2"),
             "hit_tp1": False, "tf": tf, "entry_time": datetime.now(TIMEZONE),
-            "warning_6h_sent": False
+            "warning_6h_sent": False, "hit_1pct_alert_sent": False
         }
         active_trades[trade_key] = trade_info
 
@@ -780,11 +791,15 @@ async def tracker_tick():
     if not is_market_open(): return
     await check_active_trades()
 
+# === YENİ: SEANS AÇILIŞ MESAJLARI ===
 async def market_open_scan():
     if not is_market_open(): return
     for cid in CHAT_IDS:
-        try: await bot_app.bot.send_message(chat_id=cid, text="🟢 Seans açıldı, tarama ve takip başladı, MZB gururla sunar.", parse_mode="HTML")
-        except: pass
+        try: 
+            await bot_app.bot.send_message(chat_id=cid, text="🟢 Seans açıldı, tarama ve takip başladı.", parse_mode="HTML")
+            await bot_app.bot.send_message(chat_id=cid, text="Sistem her zaman senin için çalışıyor, kazanmak istiyorsan sadece sistemle kal... MZB 😉", parse_mode="HTML")
+        except: 
+            pass
     await tick(force=True)
 
 async def task_morning_summary():
