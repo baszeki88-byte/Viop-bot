@@ -84,13 +84,12 @@ VOLUME_MULT = 1.5
 # ATR İşlem Ayarları
 ATR_TP1_PCT = 1.5
 ATR_TP2_PCT = 3.0
-TIMEOUT_HOURS = 24 
-
-# 1H İçin Özel SL Ayarı
-SL_PCT_1H = 3.5
-
-# SLIPPAGE (Fiyat Kaçma) Ayarı
 SLIPPAGE_THRESHOLD = 0.5 # %0.5
+
+# Tüm Zaman Dilimleri İçin Sabit SL
+SL_PCT = 3.5 
+
+TIMEOUT_HOURS = 24 
 
 active_trades = {}
 instant_states = {}       
@@ -129,7 +128,7 @@ def get_earnings_note(symbol):
             note = f"\n\n📅 <b>Bilanço Uyarısı:</b> Bilançoya {days_left} gün kaldı! (Dikkatli olun)"
             earnings_cache[cache_key] = note
             return note
-    except Exception as e:
+    except Exception:
         pass
     earnings_cache[cache_key] = ""
     return ""
@@ -212,7 +211,7 @@ def create_chart_image(df, symbol, tf):
         buf.seek(0)
         plt.close('all')
         return buf
-    except Exception as e:
+    except Exception:
         return None
 
 def check_slippage(symbol, signal_price):
@@ -225,7 +224,7 @@ def check_slippage(symbol, signal_price):
             slippage_pct = abs(live_price - signal_price) / signal_price * 100
             if slippage_pct >= SLIPPAGE_THRESHOLD:
                 return f"\n\n🚨 <b>DİKKAT: SİNYAL FİYATI KAÇTI!</b>\n<i>Sinyal Girişi: {signal_price:,.2f} | Anlık Fiyat: {live_price:,.2f} (%{slippage_pct:.2f} fark)</i>\nLütfen bu işlemi kovalamayın, geri çekilmesini bekleyin."
-    except Exception as e:
+    except Exception:
         pass
     return ""
 
@@ -341,18 +340,10 @@ def process_signals(symbol, dfs):
                     earnings_note = get_earnings_note(symbol)
                     slippage_warning = check_slippage(symbol, close_price)
                     
-                    # 1H İÇİN ÖZEL SL
-                    if tf == "1h":
-                        sl = close_price * (1 + SL_PCT_1H / 100)
-                    else:
-                        sl = atr_data["peak_price"]
-                        
+                    # Tüm TF'ler için Sabit %3.5 SL
+                    sl = close_price * (1 + SL_PCT / 100)
                     tp1 = close_price * (1 - ATR_TP1_PCT / 100)
                     tp2 = close_price * (1 - ATR_TP2_PCT / 100)
-                    
-                    # DCA Seviyeleri
-                    dca1 = close_price * (1 + 2.2 / 100)
-                    dca2 = close_price * (1 + 2.9 / 100)
                     
                     sl_pct = ((sl - close_price) / close_price) * 100
 
@@ -364,8 +355,6 @@ def process_signals(symbol, dfs):
                     msg += f"🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n"
                     msg += f"🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n"
                     msg += f"🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n"
-                    msg += f"➕ <b>1. Ekleme (DCA1):</b> {dca1:,.2f}\n"
-                    msg += f"➕ <b>2. Ekleme (DCA2):</b> {dca2:,.2f}\n"
                     msg += f"⏳ <i>Zaman Aşımı: 24 Saat</i>\n"
                     msg += earnings_note
                     
@@ -396,18 +385,10 @@ def process_signals(symbol, dfs):
                     earnings_note = get_earnings_note(symbol)
                     slippage_warning = check_slippage(symbol, close_price)
                     
-                    # 1H İÇİN ÖZEL SL
-                    if tf == "1h":
-                        sl = close_price * (1 - SL_PCT_1H / 100)
-                    else:
-                        sl = atr_data["low_price"]
-                        
+                    # Tüm TF'ler için Sabit %3.5 SL
+                    sl = close_price * (1 - SL_PCT / 100)
                     tp1 = close_price * (1 + ATR_TP1_PCT / 100)
                     tp2 = close_price * (1 + ATR_TP2_PCT / 100)
-                    
-                    # DCA Seviyeleri
-                    dca1 = close_price * (1 - 2.2 / 100)
-                    dca2 = close_price * (1 - 2.9 / 100)
                     
                     sl_pct = ((close_price - sl) / close_price) * 100
 
@@ -419,8 +400,6 @@ def process_signals(symbol, dfs):
                     msg += f"🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n"
                     msg += f"🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n"
                     msg += f"🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n"
-                    msg += f"➕ <b>1. Ekleme (DCA1):</b> {dca1:,.2f}\n"
-                    msg += f"➕ <b>2. Ekleme (DCA2):</b> {dca2:,.2f}\n"
                     msg += f"⏳ <i>Zaman Aşımı: 24 Saat</i>\n"
                     msg += earnings_note
                     
@@ -448,7 +427,7 @@ async def _fetch_stock_change(sym):
                 prev = h['Close'].iloc[-2]
                 last = h['Close'].iloc[-1]
                 return sym, ((last - prev) / prev) * 100
-        except Exception as e:
+        except Exception:
             pass
         return sym, None
     return await asyncio.to_thread(_inner)
@@ -563,7 +542,7 @@ async def generate_market_summary(session_name):
         for cid in CHAT_IDS:
             try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
             except: pass
-    except Exception as e:
+    except Exception:
         pass
 
 async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -636,27 +615,28 @@ async def check_active_trades():
         
         time_diff_hours = (datetime.now(TIMEZONE) - entry_time).total_seconds() / 3600
 
-        # --- 1H ÖZEL ZAMAN UYARILARI ---
-        if tf == "1h":
-            # 6. Saat Uyarısı
-            if time_diff_hours >= 6 and not trade.get("warning_6h_sent", False):
-                trade["warning_6h_sent"] = True
-                msg = f"⏰ <b>6. SAAT UYARISI - {sym} [1H]</b>\n"
-                msg += f"Backtest verilerine göre en iyi kâr seviyesine ulaştınız. Kârı korumak için stop seviyenizi güncelleyebilirsiniz."
-                for cid in CHAT_IDS:
-                    reply_id = trade.get("msg_ids", {}).get(str(cid))
-                    try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
-                    except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+        # --- ZAMAN UYARILARI (Tüm TF'ler için) ---
+        # 6. Saat Uyarısı
+        if time_diff_hours >= 6 and not trade.get("warning_6h_sent", False):
+            trade["warning_6h_sent"] = True
+            msg = f"⏰ <b>En iyi kâr saati geldi!</b>\n"
+            msg += f"Backtest verilerine göre bu saatlerde kârın zirvesindesin. Pozisyonu kâr al veya stopu güncelle.\n"
+            msg += f"Mevcut Fiyat: {current_price:,.2f}"
+            for cid in CHAT_IDS:
+                reply_id = trade.get("msg_ids", {}).get(str(cid))
+                try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
 
-            # 10. Saat Uyarısı
-            if time_diff_hours >= 10 and not trade.get("warning_10h_sent", False):
-                trade["warning_10h_sent"] = True
-                msg = f"⏳ <b>10. SAAT UYARISI - {sym} [1H]</b>\n"
-                msg += f"{t_type} işlemlerinde 10. saatten sonra kâr oranı düşüyor. Lütfen işlemi mevcut fiyattan <b>KAPATIN</b>.\nMevcut Fiyat: {current_price:,.2f}"
-                for cid in CHAT_IDS:
-                    reply_id = trade.get("msg_ids", {}).get(str(cid))
-                    try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
-                    except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+        # 10. Saat Uyarısı
+        if time_diff_hours >= 10 and not trade.get("warning_10h_sent", False):
+            trade["warning_10h_sent"] = True
+            msg = f"⏳ <b>İşlemi Kapat!</b>\n"
+            msg += f"10. saatten sonra kâr ihtimali düşüyor. Lütfen işlemi mevcut fiyattan kapat.\n"
+            msg += f"Mevcut Fiyat: {current_price:,.2f}"
+            for cid in CHAT_IDS:
+                reply_id = trade.get("msg_ids", {}).get(str(cid))
+                try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                except: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
 
         # Timeout Kontrolü (24 Saat)
         if time_diff_hours >= TIMEOUT_HOURS:
@@ -689,7 +669,7 @@ async def check_active_trades():
         if not hit_tp1:
             if (t_type == "LONG" and current_high >= tp1) or (t_type == "SHORT" and current_low <= tp1):
                 trade["hit_tp1"] = True
-                msg = f"🎯 <b>TP1 VURULDU (%{ATR_TP1_PCT}) - {sym} [{tf.upper()}]</b>\n👉 <b>Pozisyonun yarısını kapat.</b>\n🛑 <b>SL'yi maliyete çek:</b> {entry:,.2f}\n⏳ <i>Kalan yarıyı TP2 ({tp2:,.2f}) veya breakeven'a kadar tut.</i>"
+                msg = f"🎯 <b>TP1 VURULDU (%{ATR_TP1_PCT}) - {sym} [{tf.upper()}]</b>\n👉 <b>Yarısını kapat.</b>\n🛑 <b>SL'yi maliyete çek:</b> {entry:,.2f}"
                 for cid in CHAT_IDS:
                     reply_id = trade.get("msg_ids", {}).get(str(cid))
                     try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
@@ -699,7 +679,7 @@ async def check_active_trades():
         # TP2 Kontrolü
         if hit_tp1:
             if (t_type == "LONG" and current_high >= tp2) or (t_type == "SHORT" and current_low <= tp2):
-                msg = f"🎯🎯 <b>TP2 VURULDU (%{ATR_TP2_PCT}) - {sym} [{tf.upper()}]</b>\n👉 <b>Kalan pozisyonu kapat.</b>\n<b>Net kâr:</b> ~%{(ATR_TP1_PCT+ATR_TP2_PCT)/2:.2f} (yarı yarıya)"
+                msg = f"🎯🎯 <b>TP2 VURULDU (%{ATR_TP2_PCT}) - {sym} [{tf.upper()}]</b>\n👉 <b>Kalanı kapat.</b>\n<b>Net kâr:</b> ~%{(ATR_TP1_PCT+ATR_TP2_PCT)/2:.2f}"
                 for cid in CHAT_IDS:
                     reply_id = trade.get("msg_ids", {}).get(str(cid))
                     try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
@@ -732,7 +712,7 @@ async def send_signal_message(msg_data):
             if "direction" in msg_data:
                 msg_ids[str(cid)] = sent.message_id
 
-        except Exception as e:
+        except Exception:
             try:
                 if buf:
                     buf.seek(0)
@@ -741,7 +721,7 @@ async def send_signal_message(msg_data):
                     sent = await bot_app.bot.send_message(chat_id=cid, text=text, parse_mode="HTML")
                 if "direction" in msg_data:
                     msg_ids[str(cid)] = sent.message_id
-            except Exception as e2:
+            except Exception:
                 pass
 
     if msg_type == "atr_dunyasi" and "direction" in msg_data:
@@ -770,11 +750,10 @@ async def tick(force=False):
             dfs = await fetch_all_tfs_async(sym)
             for msg_data in process_signals(sym, dfs):
                 await send_signal_message(msg_data)
-        except Exception as e:
+        except Exception:
             pass
 
 async def tracker_tick():
-    # Hassas takip için her 5 dakikada bir çalışır (Piyasa açıkken)
     if not is_market_open(): return
     await check_active_trades()
 
@@ -814,10 +793,8 @@ async def main():
 
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
     
-    # Tarama Saatleri
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="5,20,35,50", timezone=TIMEZONE))
     
-    # Hassas İşlem Takibi
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
 
     sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=15, timezone=TIMEZONE))
