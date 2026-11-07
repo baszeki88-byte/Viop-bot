@@ -783,7 +783,7 @@ async def tracker_tick():
 async def market_open_scan():
     if not is_market_open(): return
     for cid in CHAT_IDS:
-        try: await bot_app.bot.send_message(chat_id=cid, text="🟢 Seans açıldı, tarama ve takip başladı.", parse_mode="HTML")
+        try: await bot_app.bot.send_message(chat_id=cid, text="🟢 Seans açıldı, tarama ve takip başladı, MZB gururla sunar.", parse_mode="HTML")
         except: pass
     await tick(force=True)
 
