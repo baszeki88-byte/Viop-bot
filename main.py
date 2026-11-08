@@ -60,9 +60,10 @@ ALARM_SHORT_UPPER = 80
 ALARM_LONG_LOWER = 20
 ALARM_ATR_DROP = 2.0
 
+# DÜZELTİLDİ: 15m çıkarıldı
 TIME_FRAMES_RSI = ["1h"]            
-TIME_FRAMES_ATR = ["15m", "30m", "1h", "4h"] 
-FETCH_TFS = ["15m", "30m", "1h", "4h"]
+TIME_FRAMES_ATR = ["30m", "1h", "4h"] 
+FETCH_TFS = ["30m", "1h", "4h"]
 
 VOLUME_LOOKBACK = 20
 VOLUME_MULT = 1.5
@@ -72,7 +73,7 @@ SLIPPAGE_THRESHOLD = 0.5
 SL_PCT = 3.5 
 
 # ZAMAN AŞIMI AYARLARI 
-TIMEOUT_HOURS_KISA = 10    # 15m ve 30m için
+TIMEOUT_HOURS_KISA = 10    # 30m için
 TIMEOUT_HOURS_UZUN = 120   # 1h ve 4h için (Swing - 5 işlem günü)
 
 SWING_TARGET_PCT = 10.0 
@@ -246,6 +247,7 @@ async def process_signals(symbol, dfs):
     msgs = []
     df_4h = dfs.get("4h")
     
+    # === 1. RSI İLK UYARI (Sadece 1H) ===
     for tf in TIME_FRAMES_RSI:
         df = dfs.get(tf)
         if df is None or len(df) < 30: continue
@@ -282,6 +284,7 @@ async def process_signals(symbol, dfs):
                 msg += earnings_note
                 msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "alert_instant", "direction": direction})
 
+    # === 2. ATR DÜNYASI (30m, 1h, 4h) ===
     for tf in TIME_FRAMES_ATR:
         df = dfs.get(tf)
         if df is None or len(df) < 30: continue
@@ -302,7 +305,7 @@ async def process_signals(symbol, dfs):
         atr_data = atr_states[atr_key]
         if atr_data.get("last_bar") != bar_time:
             delay_min = (datetime.now(TIMEZONE) - bar_time).total_seconds() / 60
-            max_delay = 20 if tf == "15m" else (40 if tf == "30m" else (75 if tf == "1h" else 120))
+            max_delay = 40 if tf == "30m" else (75 if tf == "1h" else 120)
             if delay_min > max_delay: continue
 
             atr_data["last_bar"] = bar_time
@@ -331,7 +334,7 @@ async def process_signals(symbol, dfs):
                     tp2 = close_price * (1 - ATR_TP2_PCT / 100)
                     sl_pct = ((sl - close_price) / close_price) * 100
                     
-                    timeout_msg = "10 Seans Saati" if tf in ['15m', '30m'] else "120 Seans Saati (Swing)"
+                    timeout_msg = "10 Seans Saati" if tf == "30m" else "120 Seans Saati (Swing)"
 
                     msg = f"✨ <b>ATR DÜNYASI (Short) - {symbol} [{tf.upper()}]</b> ✨\n🔴 RSI Aşırı Alım Zirvesi: {atr_data['peak_rsi']:.1f}\n📊 {tags}\n{slippage_warning}\n\n💰 <b>Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n⏳ <i>Zaman Aşımı: {timeout_msg}</i>\n{earnings_note}"
                     msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "SHORT", "price": close_price, "sl": sl, "tp1": tp1, "tp2": tp2})
@@ -359,7 +362,7 @@ async def process_signals(symbol, dfs):
                     tp2 = close_price * (1 + ATR_TP2_PCT / 100)
                     sl_pct = ((close_price - sl) / close_price) * 100
                     
-                    timeout_msg = "10 Seans Saati" if tf in ['15m', '30m'] else "120 Seans Saati (Swing)"
+                    timeout_msg = "10 Seans Saati" if tf == "30m" else "120 Seans Saati (Swing)"
 
                     msg = f"✨ <b>ATR DÜNYASI (Long) - {symbol} [{tf.upper()}]</b> ✨\n🟢 RSI Aşırı Satım Dibi: {atr_data['low_rsi']:.1f}\n📊 {tags}\n{slippage_warning}\n\n💰 <b>Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n⏳ <i>Zaman Aşımı: {timeout_msg}</i>\n{earnings_note}"
                     msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "LONG", "price": close_price, "sl": sl, "tp1": tp1, "tp2": tp2})
@@ -462,11 +465,10 @@ async def generate_market_summary(session_name):
     except Exception: pass
 
 async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # DÜZELTİLDİ: Slash temizleme ve komutları es geçme
     text = update.message.text.upper().replace("/", "").strip()
     
     if text in ["START", "HELP", "YARDIM", "DURUM"]: 
-        return # CommandHandler zaten cevap veriyor, çift mesajı engelle
+        return 
         
     if not text.isalnum() or len(text) < 2 or len(text) > 10:
         return
@@ -520,23 +522,24 @@ async def check_active_trades():
     trades_snapshot = list(active_trades.items())
     price_data = {}
     
+    # DÜZELTİLDİ: Takip verisi 30m'ye çekildi
     for trade_key, trade in trades_snapshot:
         sym = trade["symbol"]
-        df_15m = await fetch_ohlc_async(sym, "15m", limit=100)
-        if df_15m is not None and len(df_15m) >= 50:
-            price_data[trade_key] = df_15m
+        df_30m = await fetch_ohlc_async(sym, "30m", limit=100)
+        if df_30m is not None and len(df_30m) >= 50:
+            price_data[trade_key] = df_30m
 
     notifications = [] 
     
     async with trade_lock:
         dirty = False 
-        for trade_key, df_15m in price_data.items():
+        for trade_key, df_30m in price_data.items():
             if trade_key not in active_trades: continue 
             trade = active_trades[trade_key]
             
-            current_price = float(df_15m['close'].iloc[-1])
-            current_high = float(df_15m['high'].iloc[-1])
-            current_low = float(df_15m['low'].iloc[-1])
+            current_price = float(df_30m['close'].iloc[-1])
+            current_high = float(df_30m['high'].iloc[-1])
+            current_low = float(df_30m['low'].iloc[-1])
             
             t_type = trade["type"]
             entry = trade["entry"]
@@ -550,18 +553,9 @@ async def check_active_trades():
             
             effective_hours = get_effective_market_hours(entry_time, datetime.now(TIMEZONE))
             
-            # DÜZELTİLDİ: Zaman aşımı süresi TF'e göre belirlenir
+            # DÜZELTİLDİ: 15m kalmadığı için sadece 30m için kısa süre, diğerleri uzun süre
             max_timeout = TIMEOUT_HOURS_UZUN if tf in ["1h", "4h"] else TIMEOUT_HOURS_KISA
 
-            if tf == "15m" and not trade.get("hit_1pct_alert_sent", False):
-                profit_pct = ((current_price - entry) / entry) * 100 if t_type == "LONG" else ((entry - current_price) / entry) * 100
-                if profit_pct >= 1.0:
-                    trade["hit_1pct_alert_sent"] = True
-                    dirty = True
-                    msg = f"🔔 <b>15M Kâr Koruması - {sym}</b>\nFiyat %1 kâra ulaştı! (Mevcut: {current_price:,.2f})\n👉 <b>Stop seviyenizi maliyete (Giriş: {entry:,.2f}) çekin.</b>"
-                    notifications.append((trade_key, msg, trade.get("msg_ids", {})))
-
-            # DÜZELTİLDİ: Tüm işlemler için zaman aşımı kontrolü en başta yapılır
             if effective_hours >= max_timeout:
                 pct = ATR_TP1_PCT / 2 if hit_tp1 else 0.0 
                 msg = f"⏳ <b>ZAMAN AŞIMI ({max_timeout} Seans Saati) - {sym} [{tf.upper()}]</b>\nSüre doldu. Lütfen kapatın.\n👉 <b>Mevcut Fiyat: {current_price:,.2f}</b>"
@@ -571,17 +565,13 @@ async def check_active_trades():
                 dirty = True
                 continue
 
-            current_sl = entry if (hit_tp1 or trade.get("hit_1pct_alert_sent")) else sl_orig
+            current_sl = entry if hit_tp1 else sl_orig
             if (t_type == "LONG" and current_low <= current_sl) or (t_type == "SHORT" and current_high >= current_sl):
                 res_type = "SL"
                 pct = 0.0
                 if hit_tp1:
                     msg = f"🛑 <b>STOP (Breakeven) - {sym} [{tf.upper()}]</b>\nTP1 sonrası SL maliyete çekilmişti. Kalan pozisyon kapatıldı.\n<b>Net kâr:</b> +%{ATR_TP1_PCT/2:.2f} (TP1'den)"
                     pct = ATR_TP1_PCT/2
-                    res_type = "BREAKEVEN"
-                elif trade.get("hit_1pct_alert_sent"):
-                    msg = f"🛑 <b>STOP (Breakeven) - {sym} [{tf.upper()}]</b>\n%1 kâr sonrası SL maliyete çekilmişti. Pozisyon kapatıldı.\n<b>Net kâr:</b> 0 (Sıfır zarar)"
-                    pct = 0.0
                     res_type = "BREAKEVEN"
                 else:
                     msg = f"🛑 <b>STOP OLDU - {sym} [{tf.upper()}]</b>\nİlk Stop ({sl_orig:,.2f}) seviyesine değdi. Pozisyon kapatıldı."
@@ -807,7 +797,8 @@ async def main():
     sched = AsyncIOScheduler(timezone=TIMEZONE)
 
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
-    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="5,20,35,50", timezone=TIMEZONE))
+    # DÜZELTİLDİ: 15m kalktığı için tarama 30 dakikada bire (:05 ve :35) düşürüldü
+    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="5,35", timezone=TIMEZONE))
     
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour=17, minute=58, timezone=TIMEZONE))
