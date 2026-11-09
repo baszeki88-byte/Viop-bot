@@ -30,10 +30,10 @@ SYMBOLS = [
     "TTKOM", "SAHOL", "SASA", "AEFES", "ASELS", "MGROS", "TUPRS", "AKBNK", "KCHOL", "KRDMD",
     "ISCTR", "THYAO", "BIMAS", "EREGL", "EKGYO", "PGSUS", "FROTO", "SISE", "VAKBN", "ALARK",
     "AKSEN", "ARCLK", "BRSAN", "CIMSA", "DOAS", "DOHOL", "ENJSA", "OYAKC", "PETKM", "SOKM",
-    "TKFEN", "ULKER", "VESTL", "XU030", "XU100", "XAUUSD", "XAGUSD"
+    "TKFEN", "ULKER", "VESTL", "XU030", "XU100"
 ]
 
-BIST_STOCKS = [s for s in SYMBOLS if not s.startswith("XU") and not s.endswith("USD")]
+BIST_STOCKS = [s for s in SYMBOLS if not s.startswith("XU")]
 
 SECTORS = {
     "🏦 Bankacılık": ["GARAN", "YKBNK", "AKBNK", "ISCTR", "VAKBN"],
@@ -192,11 +192,16 @@ def fetch_ohlc(symbol, interval, limit=300):
             df = bp.Ticker(symbol).history(period=f"{limit + 2} bar", interval=interval)
             if df is not None and not df.empty:
                 df.columns = [str(c).lower() for c in df.columns]
-                if hasattr(df.index, "tz") and df.index.tz is not None:
-                    try:
-                        if str(df.index.tz) != "Europe/Istanbul":
-                            df.index = df.index.tz_convert(TIMEZONE)
-                    except Exception: pass
+                
+                # --- Zaman Dilimi (Timezone) Koruması ---
+                if not isinstance(df.index, pd.DatetimeIndex):
+                    df.index = pd.to_datetime(df.index)
+                if df.index.tz is None:
+                    df.index = df.index.tz_localize(TIMEZONE)
+                else:
+                    df.index = df.index.tz_convert(TIMEZONE)
+                # ---------------------------------------
+
                 return df.iloc[:-1] 
         except Exception as e:
             print(f"⚠️ Veri çekme hatası ({symbol} {interval}): {e}")
@@ -245,7 +250,7 @@ async def process_signals(symbol, dfs):
             
         if instant_states[inst_key]["last_bar"] != bar_time:
             delay_min = (datetime.now(TIMEZONE) - bar_time).total_seconds() / 60
-            if delay_min > 75: 
+            if delay_min > 180: # 75'ten 180'e çıkarıldı
                 print(f"⏳ {symbol} {tf} RSI: Veri gecikmiş ({delay_min:.0f} dk), atlandı.")
                 continue
 
@@ -290,7 +295,10 @@ async def process_signals(symbol, dfs):
         atr_data = atr_states[atr_key]
         if atr_data.get("last_bar") != bar_time:
             delay_min = (datetime.now(TIMEZONE) - bar_time).total_seconds() / 60
-            max_delay = 20 if tf == "15m" else (40 if tf == "30m" else (75 if tf == "1h" else 120))
+            
+            # Gecikme eşikleri gevşetildi
+            max_delay = 60 if tf == "15m" else (90 if tf == "30m" else (180 if tf == "1h" else 300))
+            
             if delay_min > max_delay: 
                 print(f"⏳ {symbol} {tf} ATR: Veri gecikmiş ({delay_min:.0f} dk), atlandı.")
                 continue
@@ -368,9 +376,10 @@ async def _fetch_stock_change(sym):
     def _inner():
         try:
             h = bp.Ticker(sym).history(period="5d", interval="1d")
+            h.columns = [str(c).lower() for c in h.columns] # Küçük harf düzeltmesi eklendi
             if len(h) >= 2:
-                prev = h['Close'].iloc[-2]
-                last = h['Close'].iloc[-1]
+                prev = h['close'].iloc[-2]
+                last = h['close'].iloc[-1]
                 return sym, ((last - prev) / prev) * 100
         except Exception: pass
         return sym, None
@@ -761,8 +770,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = (
         "🤖 <b>Yardım Menüsü</b>\n\n"
         "• Hisse analizi için: <code>/ASELS</code> veya <code>ASELS</code>\n"
-        "• Endeks analizi için: <code>/XU030</code>\n"
-        "• Emtia analizi için: <code>/XAUUSD</code>\n\n"
+        "• Endeks analizi için: <code>/XU030</code>\n\n"
         "Sistem, RSI Büyüsü ve ATR Dünyası sinyallerini otomatik olarak takip eder ve sonuçları size bildirir."
     )
     await update.message.reply_text(msg, parse_mode="HTML")
