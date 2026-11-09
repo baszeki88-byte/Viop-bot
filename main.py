@@ -797,8 +797,19 @@ async def main():
     sched = AsyncIOScheduler(timezone=TIMEZONE)
 
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
-    # DÜZELTİLDİ: 15m kalktığı için tarama 30 dakikada bire (:05 ve :35) düşürüldü
-    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="5,35", timezone=TIMEZONE))
+    
+    # ==========================================
+    # DÜZENLENEN KISIM: Tarama 05, 20, 35, 50 (Her 15 dakikada bir)
+    # ==========================================
+    sched.add_job(
+        tick, 
+        CronTrigger(
+            day_of_week="mon-fri", 
+            hour="10-17", 
+            minute="5,20,35,50", 
+            timezone=TIMEZONE
+        )
+    )
     
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour=17, minute=58, timezone=TIMEZONE))
