@@ -19,8 +19,22 @@ from apscheduler.triggers.cron import CronTrigger
 # --- AYARLAR ---
 # ==========================================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+TV_SESSION = os.environ.get("TV_SESSION")
+TV_SESSION_SIGN = os.environ.get("TV_SESSION_SIGN")
+
 if not BOT_TOKEN:
     raise ValueError("❌ HATA: BOT_TOKEN bulunamadı! Lütfen Render Environment sekmesine ekleyin.")
+
+# --- TRADINGVIEW CANLI VERİ YETKİLENDİRMESİ ---
+if TV_SESSION and TV_SESSION_SIGN:
+    try:
+        bp.set_tradingview_auth(session=TV_SESSION, session_sign=TV_SESSION_SIGN)
+        print("✅ Borsapy: TradingView canlı veri yetkisi alındı!")
+    except Exception as e:
+        print(f"⚠️ TradingView Auth Hatası: {e}. Gecikmeli veriyle devam edilecek.")
+else:
+    print("ℹ️ TradingView çerezleri girilmedi. Gecikmeli veriyle devam ediliyor.")
+# ----------------------------------------------
 
 CHAT_IDS = [5066109900, 8776376951]
 TIMEZONE = pytz.timezone("Europe/Istanbul")
@@ -55,12 +69,12 @@ SECTORS = {
 
 RSI_PERIOD = 8
 # ==========================================
-# YENİ RSI SEVİYELERİ (İsteğin üzerine güncellendi)
+# YENİ RSI SEVİYELERİ
 # ==========================================
-INSTANT_SHORT = 87.5     # Eski: 82.5
-INSTANT_LONG = 13        # Eski: 18
-ALARM_SHORT_UPPER = 85   # Eski: 80
-ALARM_LONG_LOWER = 15    # Eski: 20
+INSTANT_SHORT = 87.5     
+INSTANT_LONG = 13        
+ALARM_SHORT_UPPER = 85   
+ALARM_LONG_LOWER = 15    
 # ==========================================
 ALARM_ATR_DROP = 2.0
 
@@ -197,14 +211,12 @@ def fetch_ohlc(symbol, interval, limit=300):
             if df is not None and not df.empty:
                 df.columns = [str(c).lower() for c in df.columns]
                 
-                # --- Zaman Dilimi (Timezone) Koruması ---
                 if not isinstance(df.index, pd.DatetimeIndex):
                     df.index = pd.to_datetime(df.index)
                 if df.index.tz is None:
                     df.index = df.index.tz_localize(TIMEZONE)
                 else:
                     df.index = df.index.tz_convert(TIMEZONE)
-                # ---------------------------------------
 
                 return df.iloc[:-1] 
         except Exception as e:
@@ -254,7 +266,6 @@ async def process_signals(symbol, dfs):
             
         if instant_states[inst_key]["last_bar"] != bar_time:
             delay_min = (datetime.now(TIMEZONE) - bar_time).total_seconds() / 60
-            # Gecikme toleransı 180 dakika (3 saat)
             if delay_min > 180: 
                 print(f"⏳ {symbol} {tf} RSI: Veri gecikmiş ({delay_min:.0f} dk), atlandı.")
                 continue
@@ -300,8 +311,6 @@ async def process_signals(symbol, dfs):
         atr_data = atr_states[atr_key]
         if atr_data.get("last_bar") != bar_time:
             delay_min = (datetime.now(TIMEZONE) - bar_time).total_seconds() / 60
-            
-            # Gecikme toleransları gevşetildi (60, 90, 180, 300)
             max_delay = 60 if tf == "15m" else (90 if tf == "30m" else (180 if tf == "1h" else 300))
             
             if delay_min > max_delay: 
@@ -381,7 +390,7 @@ async def _fetch_stock_change(sym):
     def _inner():
         try:
             h = bp.Ticker(sym).history(period="5d", interval="1d")
-            h.columns = [str(c).lower() for c in h.columns] # Küçük harf düzeltmesi
+            h.columns = [str(c).lower() for c in h.columns] 
             if len(h) >= 2:
                 prev = h['close'].iloc[-2]
                 last = h['close'].iloc[-1]
