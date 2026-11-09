@@ -84,7 +84,6 @@ VOLUME_MULT = 1.5
 # ATR İşlem Ayarları
 ATR_TP1_PCT = 1.5
 ATR_TP2_PCT = 3.0
-SLIPPAGE_THRESHOLD = 0.5
 
 # Tüm Zaman Dilimleri İçin Sabit SL
 SL_PCT = 3.5 
@@ -250,20 +249,6 @@ def create_chart_image(df, symbol, tf):
     except Exception:
         return None
 
-def check_slippage(symbol, signal_price):
-    try:
-        live_df = bp.Ticker(symbol).history(period="1d", interval="5m")
-        if live_df is not None and not live_df.empty:
-            live_df.columns = [str(c).lower() for c in live_df.columns]
-            live_price = float(live_df['close'].iloc[-1])
-            
-            slippage_pct = abs(live_price - signal_price) / signal_price * 100
-            if slippage_pct >= SLIPPAGE_THRESHOLD:
-                return f"\n\n🚨 <b>DİKKAT: SİNYAL FİYATI KAÇTI!</b>\n<i>Sinyal Girişi: {signal_price:,.2f} | Anlık Fiyat: {live_price:,.2f} (%{slippage_pct:.2f} fark)</i>\nLütfen bu işlemi kovalamayın, geri çekilmesini bekleyin."
-    except Exception:
-        pass
-    return ""
-
 def process_signals(symbol, dfs):
     msgs = []
     df_4h = dfs.get("4h")
@@ -374,7 +359,6 @@ def process_signals(symbol, dfs):
                 if price_ok and candle_ok:
                     tags = get_volume_and_trend_tag(df, df_4h)
                     earnings_note = get_earnings_note(symbol)
-                    slippage_warning = check_slippage(symbol, close_price)
                     
                     sl = close_price * (1 + SL_PCT / 100)
                     tp1 = close_price * (1 - ATR_TP1_PCT / 100)
@@ -384,8 +368,7 @@ def process_signals(symbol, dfs):
 
                     msg = f"✨ <b>ATR DÜNYASI (Short) - {symbol} [{tf.upper()}]</b> ✨\n"
                     msg += f"🔴 RSI Aşırı Alım Zirvesi: {atr_data['peak_rsi']:.1f}\n"
-                    msg += f"📊 {tags}\n"
-                    msg += f"{slippage_warning}\n\n"
+                    msg += f"📊 {tags}\n\n"
                     msg += f"💰 <b>Giriş:</b> {close_price:,.2f}\n"
                     msg += f"🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n"
                     msg += f"🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n"
@@ -418,7 +401,6 @@ def process_signals(symbol, dfs):
                 if price_ok and candle_ok:
                     tags = get_volume_and_trend_tag(df, df_4h)
                     earnings_note = get_earnings_note(symbol)
-                    slippage_warning = check_slippage(symbol, close_price)
                     
                     sl = close_price * (1 - SL_PCT / 100)
                     tp1 = close_price * (1 + ATR_TP1_PCT / 100)
@@ -428,8 +410,7 @@ def process_signals(symbol, dfs):
 
                     msg = f"✨ <b>ATR DÜNYASI (Long) - {symbol} [{tf.upper()}]</b> ✨\n"
                     msg += f"🟢 RSI Aşırı Satım Dibi: {atr_data['low_rsi']:.1f}\n"
-                    msg += f"📊 {tags}\n"
-                    msg += f"{slippage_warning}\n\n"
+                    msg += f"📊 {tags}\n\n"
                     msg += f"💰 <b>Giriş:</b> {close_price:,.2f}\n"
                     msg += f"🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n"
                     msg += f"🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n"
