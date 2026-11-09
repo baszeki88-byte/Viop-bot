@@ -813,7 +813,11 @@ def run_dummy_server():
 async def main():
     load_trades() 
     threading.Thread(target=run_dummy_server, daemon=True).start()
-    await bot_app.initialize(); await bot_app.start(); await bot_app.updater.start_polling()
+    await bot_app.initialize(); await bot_app.start()
+    
+    # ÇAKIŞMAYI ÖNLEYEN SATIR BURADA:
+    await bot_app.updater.start_polling(drop_pending_updates=True)
+    
     sched = AsyncIOScheduler(timezone=TIMEZONE)
 
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
@@ -829,7 +833,7 @@ async def main():
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=17, minute=55, timezone=TIMEZONE))
 
     sched.start()
-    print("✅ Bot çalışıyor.")
+    print("✅ Bot çalışıyor. Çakışma koruması aktif.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
