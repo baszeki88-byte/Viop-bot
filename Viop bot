@@ -198,7 +198,8 @@ def fetch_ohlc(symbol, interval, limit=300):
                             df.index = df.index.tz_convert(TIMEZONE)
                     except Exception: pass
                 return df.iloc[:-1] 
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ Veri çekme hatası ({symbol} {interval}): {e}")
             time_module.sleep(1)
     return None
 
@@ -244,7 +245,9 @@ async def process_signals(symbol, dfs):
             
         if instant_states[inst_key]["last_bar"] != bar_time:
             delay_min = (datetime.now(TIMEZONE) - bar_time).total_seconds() / 60
-            if delay_min > 75: continue
+            if delay_min > 75: 
+                print(f"⏳ {symbol} {tf} RSI: Veri gecikmiş ({delay_min:.0f} dk), atlandı.")
+                continue
 
             direction = None
             if r_prev <= INSTANT_SHORT < r_now: direction = "SHORT"
@@ -288,7 +291,9 @@ async def process_signals(symbol, dfs):
         if atr_data.get("last_bar") != bar_time:
             delay_min = (datetime.now(TIMEZONE) - bar_time).total_seconds() / 60
             max_delay = 20 if tf == "15m" else (40 if tf == "30m" else (75 if tf == "1h" else 120))
-            if delay_min > max_delay: continue
+            if delay_min > max_delay: 
+                print(f"⏳ {symbol} {tf} ATR: Veri gecikmiş ({delay_min:.0f} dk), atlandı.")
+                continue
 
             atr_data["last_bar"] = bar_time
             state = atr_data["state"]
@@ -296,8 +301,10 @@ async def process_signals(symbol, dfs):
             if state == "IDLE":
                 if r_now > ALARM_SHORT_UPPER:
                     atr_states[atr_key] = {"state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": close_price, "low_rsi": 100, "low_price": 0, "last_bar": bar_time, "reject_count": 0}
+                    print(f"🎯 {symbol} {tf} SHORT_ARMED (RSI: {r_now:.1f})")
                 elif r_now < ALARM_LONG_LOWER:
                     atr_states[atr_key] = {"state": "LONG_ARMED", "peak_rsi": 0, "peak_price": 0, "low_rsi": r_now, "low_price": close_price, "last_bar": bar_time, "reject_count": 0}
+                    print(f"🎯 {symbol} {tf} LONG_ARMED (RSI: {r_now:.1f})")
 
             elif state == "SHORT_ARMED":
                 if r_now > atr_data["peak_rsi"]:
@@ -320,6 +327,7 @@ async def process_signals(symbol, dfs):
                     msg = f"✨ <b>ATR DÜNYASI (Short) - {symbol} [{tf.upper()}]</b> ✨\n🔴 RSI Aşırı Alım Zirvesi: {atr_data['peak_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n⏳ <i>Zaman Aşımı: {timeout_msg}</i>\n{earnings_note}"
                     msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "SHORT", "price": close_price, "sl": sl, "tp1": tp1, "tp2": tp2})
                     atr_states[atr_key]["state"] = "IDLE"
+                    print(f"🚀 {symbol} {tf} SHORT SİNYALİ ÜRETİLDİ!")
                 else:
                     atr_data["reject_count"] += 1
                     if atr_data["reject_count"] >= 10: atr_states[atr_key]["state"] = "IDLE"
@@ -347,6 +355,7 @@ async def process_signals(symbol, dfs):
                     msg = f"✨ <b>ATR DÜNYASI (Long) - {symbol} [{tf.upper()}]</b> ✨\n🟢 RSI Aşırı Satım Dibi: {atr_data['low_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n⏳ <i>Zaman Aşımı: {timeout_msg}</i>\n{earnings_note}"
                     msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "LONG", "price": close_price, "sl": sl, "tp1": tp1, "tp2": tp2})
                     atr_states[atr_key]["state"] = "IDLE"
+                    print(f"🚀 {symbol} {tf} LONG SİNYALİ ÜRETİLDİ!")
                 else:
                     atr_data["reject_count"] += 1
                     if atr_data["reject_count"] >= 10: atr_states[atr_key]["state"] = "IDLE"
@@ -441,8 +450,9 @@ async def generate_market_summary(session_name):
         msg = f"🏛️ <b>BIST 30 (XU030) — {session_name} Özeti</b>\n⏱ ({time_str} Arası)\n\n📈 <b>Fiyat:</b> {close_price:,.2f} (%{pct_change:+.2f})\n📍 <b>Kapanış:</b> {close_status}\n\n📊 <b>Hacim:</b> {vol_status}\n\n🌡️ <b>Piyasa Genişliği:</b> {green_count} Yeşil / {red_count} Kırmızı\n\n🧭 <b>Trend:</b> 1H RSI: {rsi_1h:.1f} | 30m EMA 50: {ema50_30m:,.2f} ({trend_status})\n\n🏭 <b>Sektör Performansı:</b>\n{sector_text}\n\n💡 <b>Yorum:</b> {yorum}"
         for cid in CHAT_IDS:
             try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-            except: pass
-    except Exception: pass
+            except Exception as e: print(f"⚠️ Özet gönderme hatası: {e}")
+    except Exception as e: 
+        print(f"⚠️ Market summary hatası: {e}")
 
 async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.upper().replace("/", "").strip()
@@ -493,6 +503,7 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(msg, parse_mode="HTML")
     except Exception as e:
+        print(f"⚠️ Analiz hatası: {e}")
         await update.message.reply_text(f"❌ Analiz hatası: {e}")
 
 async def check_active_trades():
@@ -713,8 +724,8 @@ async def send_signal_message(msg_data):
                 sent = await bot_app.bot.send_message(chat_id=cid, text=text, parse_mode="HTML")
                 if "direction" in msg_data:
                     msg_ids[str(cid)] = sent.message_id
-            except Exception: 
-                pass
+            except Exception as e: 
+                print(f"⚠️ Telegram Mesaj Hatası ({cid}): {e}")
 
         if msg_type == "atr_dunyasi" and "direction" in msg_data:
             async with trade_lock:
@@ -764,12 +775,19 @@ bot_app.add_handler(MessageHandler(filters.TEXT & auth_filter, analyze_symbol))
 
 async def tick(force=False):
     if not force and not is_market_open(): return
+    
+    print(f"🔄 Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
+    
     for sym in SYMBOLS:
         try:
             dfs = await fetch_all_tfs_async(sym)
-            for msg_data in await process_signals(sym, dfs):
+            if dfs is None or not dfs:
+                continue
+            msgs = await process_signals(sym, dfs)
+            for msg_data in msgs:
                 await send_signal_message(msg_data)
-        except Exception: pass
+        except Exception as e:
+            print(f"❌ {sym} tarama hatası: {e}") 
 
 async def tracker_tick():
     if not is_market_open(): return
@@ -813,9 +831,9 @@ def run_dummy_server():
 async def main():
     load_trades() 
     threading.Thread(target=run_dummy_server, daemon=True).start()
+    
     await bot_app.initialize(); await bot_app.start()
     
-    # ÇAKIŞMAYI ÖNLEYEN SATIR BURADA:
     await bot_app.updater.start_polling(drop_pending_updates=True)
     
     sched = AsyncIOScheduler(timezone=TIMEZONE)
@@ -833,7 +851,7 @@ async def main():
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=17, minute=55, timezone=TIMEZONE))
 
     sched.start()
-    print("✅ Bot çalışıyor. Çakışma koruması aktif.")
+    print("✅ Bot çalışıyor. Çakışma koruması aktif. Loglar açık.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
