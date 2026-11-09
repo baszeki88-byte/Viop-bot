@@ -54,10 +54,14 @@ SECTORS = {
 }
 
 RSI_PERIOD = 8
-INSTANT_SHORT = 82.5
-INSTANT_LONG = 18
-ALARM_SHORT_UPPER = 80
-ALARM_LONG_LOWER = 20
+# ==========================================
+# YENİ RSI SEVİYELERİ (İsteğin üzerine güncellendi)
+# ==========================================
+INSTANT_SHORT = 87.5     # Eski: 82.5
+INSTANT_LONG = 13        # Eski: 18
+ALARM_SHORT_UPPER = 85   # Eski: 80
+ALARM_LONG_LOWER = 15    # Eski: 20
+# ==========================================
 ALARM_ATR_DROP = 2.0
 
 TIME_FRAMES_RSI = ["1h"]            
@@ -250,7 +254,8 @@ async def process_signals(symbol, dfs):
             
         if instant_states[inst_key]["last_bar"] != bar_time:
             delay_min = (datetime.now(TIMEZONE) - bar_time).total_seconds() / 60
-            if delay_min > 180: # 75'ten 180'e çıkarıldı
+            # Gecikme toleransı 180 dakika (3 saat)
+            if delay_min > 180: 
                 print(f"⏳ {symbol} {tf} RSI: Veri gecikmiş ({delay_min:.0f} dk), atlandı.")
                 continue
 
@@ -296,7 +301,7 @@ async def process_signals(symbol, dfs):
         if atr_data.get("last_bar") != bar_time:
             delay_min = (datetime.now(TIMEZONE) - bar_time).total_seconds() / 60
             
-            # Gecikme eşikleri gevşetildi
+            # Gecikme toleransları gevşetildi (60, 90, 180, 300)
             max_delay = 60 if tf == "15m" else (90 if tf == "30m" else (180 if tf == "1h" else 300))
             
             if delay_min > max_delay: 
@@ -376,7 +381,7 @@ async def _fetch_stock_change(sym):
     def _inner():
         try:
             h = bp.Ticker(sym).history(period="5d", interval="1d")
-            h.columns = [str(c).lower() for c in h.columns] # Küçük harf düzeltmesi eklendi
+            h.columns = [str(c).lower() for c in h.columns] # Küçük harf düzeltmesi
             if len(h) >= 2:
                 prev = h['close'].iloc[-2]
                 last = h['close'].iloc[-1]
