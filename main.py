@@ -159,22 +159,34 @@ def get_earnings_note(symbol):
     cache_key = f"{symbol}_{today}"
     if cache_key in earnings_cache:
         return earnings_cache[cache_key]
+    
     try:
         ticker = bp.Ticker(symbol)
         cal = ticker.calendar
-        if not cal: return ""
-        earnings_date = cal.get('Earnings Date') if hasattr(cal, 'get') else None
-        if not earnings_date: return ""
-        if isinstance(earnings_date, str):
-            earnings_date = datetime.strptime(earnings_date, "%Y-%m-%d").date()
-        elif hasattr(earnings_date, "date"):
-            earnings_date = earnings_date.date()
+        
+        # borsapy güncellemesi: Takvim artık DataFrame dönüyor
+        if not isinstance(cal, pd.DataFrame) or cal.empty:
+            earnings_cache[cache_key] = ""
+            return ""
+            
+        rapor_satirlari = cal[cal['Subject'].str.contains('Finansal Rapor', case=False, na=False)]
+        if rapor_satirlari.empty:
+            earnings_cache[cache_key] = ""
+            return ""
+            
+        tarih_str = rapor_satirlari.iloc[0]['EndDate']
+        earnings_date = datetime.strptime(tarih_str, "%d.%m.%Y").date()
+        
         days_left = (earnings_date - today).days
+        
         if 0 <= days_left <= 5:
-            note = f"\n\n📅 <b>Bilanço Uyarısı:</b> Bilançoya {days_left} gün kaldı!"
+            note = f"\n\n📅 <b>Bilanço Uyarısı:</b> Bilançoya {days_left} gün kaldı! (Dikkatli olun)"
             earnings_cache[cache_key] = note
             return note
-    except Exception: pass
+            
+    except Exception as e: 
+        print(f"Bilanço okuma hatası ({symbol}): {e}")
+        
     earnings_cache[cache_key] = ""
     return ""
 
@@ -686,10 +698,16 @@ bot_app.add_handler(MessageHandler(filters.TEXT & auth_filter, analyze_symbol))
 async def tick(force=False):
     if not force and not is_market_open(): return
     print(f"🔄 Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
+    
+    # ==========================================
+    # TEST MESAJI (Her tarama başladığında Telegram'a mesaj atar)
+    # ==========================================
     for cid in CHAT_IDS:
         try: 
             await bot_app.bot.send_message(chat_id=cid, text=f"🔄 Test: Bot arka planda tarama yaptı. Saat: {datetime.now(TIMEZONE).strftime('%H:%M')}", parse_mode="HTML")
         except: pass
+    # ==========================================
+
     for sym in SYMBOLS:
         try:
             dfs = await fetch_all_tfs_async(sym)
