@@ -94,6 +94,7 @@ instant_states = {}
 atr_states = {}
 earnings_cache = {}
 fibo_cache = {}
+pending_confirmations = {} # 5m Teyit Bekleyenler
 is_scanning = False
 
 trade_lock = asyncio.Lock()
@@ -407,6 +408,55 @@ async def process_signals(symbol, dfs):
                     elif r_now > ALARM_SHORT_UPPER:
                         atr_states[atr_key] = {"state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": close_price, "low_rsi": 100, "low_price": 0, "last_bar": bar_time, "reject_count": 0}
     return msgs
+
+# ==========================================
+# YENİ: 5 Dakikalık Teyit Kontrol Fonksiyonu
+# ==========================================
+async def check_5m_confirmations():
+    if not pending_confirmations: return
+    now = datetime.now(TIMEZONE)
+    
+    for key, data in list(pending_confirmations.items()):
+        sym = data["symbol"]
+        direction = data["direction"]
+        msg_id = data["msg_id"]
+        alert_time = data["time"]
+        
+        # 2 saat (120 dk) içinde teyit gelmezse listeden çıkar
+        if (now - alert_time).total_seconds() / 60 > 120:
+            del pending_confirmations[key]
+            continue
+            
+        df_5m = await fetch_ohlc_async(sym, "5m", limit=100)
+        if df_5m is None or len(df_5m) < 50: continue
+        
+        ema21 = df_5m['close'].ewm(span=21).mean()
+        ema50 = df_5m['close'].ewm(span=50).mean()
+        
+        last_close = df_5m['close'].iloc[-1]
+        last_ema21 = ema21.iloc[-1]
+        last_ema50 = ema50.iloc[-1]
+        
+        confirmed = False
+        if direction == "SHORT" and last_close < last_ema21:
+            confirmed = True
+        elif direction == "LONG" and last_close > last_ema21:
+            confirmed = True
+            
+        if confirmed:
+            msg = f"✅ <b>Teyit Sinyali (5M) - {sym}</b>\n"
+            msg += f"5 Dk mumu EMA 21'i {'aşağı' if direction == 'SHORT' else 'yukarı'} kırdı.\n"
+            msg += f"📊 <b>EMA 50 Değeri:</b> {last_ema50:,.2f}\n"
+            msg += f"👀 İlk RSI uyarınız teyit edildi, işlem değerlendirebilirsiniz."
+            
+            for cid in CHAT_IDS:
+                reply_id = msg_id.get(str(cid))
+                try:
+                    await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                except:
+                    await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                    
+            del pending_confirmations[key]
 
 async def _fetch_stock_change(sym):
     def _inner():
@@ -729,6 +779,14 @@ async def send_signal_message(msg_data):
         if msg_type == "alert_instant":
             async with trade_lock:
                 daily_alerts.append({"sym": symbol, "direction": msg_data["direction"]})
+            # İlk uyarı kaydedildi, 5m teyit listesine ekle
+            key = f"{symbol}_{msg_data['direction']}"
+            pending_confirmations[key] = {
+                "symbol": symbol,
+                "direction": msg_data['direction'],
+                "msg_id": msg_ids,
+                "time": datetime.now(TIMEZONE)
+            }
     finally:
         if trade_key:
             async with trade_lock: pending_trades.discard(trade_key)
@@ -798,6 +856,7 @@ async def tick(force=False):
 async def tracker_tick():
     if not is_market_open(): return
     await check_active_trades()
+    await check_5m_confirmations() # YENİ EKLENEN TEYİT KONTROLÜ
 
 async def market_open_scan():
     if not is_market_open(): return
@@ -820,6 +879,7 @@ async def clear_daily_state():
         fibo_cache.clear()
         closed_trades.clear()
         daily_alerts.clear()
+        pending_confirmations.clear() # Teyit listesini de temizle
         pending_trades.clear()
 
 class DummyHandler(BaseHTTPRequestHandler):
@@ -843,8 +903,10 @@ async def main():
     # Tarama saatleri mum kapanışından hemen sonraya (01, 16, 31, 46) çekildi
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="1,16,31,46", timezone=TIMEZONE))
     
+    # Her 5 dakikada bir çalışacak olan takipçi (Teyit kontrolünü de içeriyor)
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour=17, minute=58, timezone=TIMEZONE))
+    
     sched.add_job(daily_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=30, timezone=TIMEZONE))
     sched.add_job(clear_daily_state, CronTrigger(day_of_week="mon-fri", hour=18, minute=45, timezone=TIMEZONE))
     sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=15, timezone=TIMEZONE))
