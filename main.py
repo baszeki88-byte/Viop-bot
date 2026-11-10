@@ -410,7 +410,7 @@ async def process_signals(symbol, dfs):
     return msgs
 
 # ==========================================
-# YENİ: 5 Dakikalık Teyit Kontrol Fonksiyonu
+# YENİ: 5 Dakikalık Teyit Kontrol Fonksiyonu (EMA 21 & EMA 200)
 # ==========================================
 async def check_5m_confirmations():
     if not pending_confirmations: return
@@ -422,31 +422,40 @@ async def check_5m_confirmations():
         msg_id = data["msg_id"]
         alert_time = data["time"]
         
-        # 2 saat (120 dk) içinde teyit gelmezse listeden çıkar
         if (now - alert_time).total_seconds() / 60 > 120:
             del pending_confirmations[key]
             continue
             
-        df_5m = await fetch_ohlc_async(sym, "5m", limit=100)
-        if df_5m is None or len(df_5m) < 50: continue
+        # EMA 200 hesaplaması için limiti 300 yaptık
+        df_5m = await fetch_ohlc_async(sym, "5m", limit=300)
+        if df_5m is None or len(df_5m) < 200: continue
         
-        ema21 = df_5m['close'].ewm(span=21).mean()
-        ema50 = df_5m['close'].ewm(span=50).mean()
+        ema21 = df_5m['close'].ewm(span=21, adjust=False).mean()
+        ema200 = df_5m['close'].ewm(span=200, adjust=False).mean()
         
         last_close = df_5m['close'].iloc[-1]
         last_ema21 = ema21.iloc[-1]
-        last_ema50 = ema50.iloc[-1]
+        last_ema200 = ema200.iloc[-1]
         
-        confirmed = False
-        if direction == "SHORT" and last_close < last_ema21:
-            confirmed = True
-        elif direction == "LONG" and last_close > last_ema21:
-            confirmed = True
+        confirmed_21 = False
+        confirmed_200 = False
+        
+        if direction == "SHORT":
+            if last_close < last_ema21: confirmed_21 = True
+            if last_close < last_ema200: confirmed_200 = True
+        elif direction == "LONG":
+            if last_close > last_ema21: confirmed_21 = True
+            if last_close > last_ema200: confirmed_200 = True
             
-        if confirmed:
+        if confirmed_21 or confirmed_200:
+            ema_txt = ""
+            if confirmed_21 and confirmed_200: ema_txt = "EMA 21 ve EMA 200"
+            elif confirmed_21: ema_txt = "EMA 21"
+            elif confirmed_200: ema_txt = "EMA 200"
+            
             msg = f"✅ <b>Teyit Sinyali (5M) - {sym}</b>\n"
-            msg += f"5 Dk mumu EMA 21'i {'aşağı' if direction == 'SHORT' else 'yukarı'} kırdı.\n"
-            msg += f"📊 <b>EMA 50 Değeri:</b> {last_ema50:,.2f}\n"
+            msg += f"5 Dk mumu <b>{ema_txt}</b> seviyesini {'aşağı' if direction == 'SHORT' else 'yukarı'} kırdı.\n"
+            msg += f"📊 <b>EMA 21:</b> {last_ema21:,.2f} | <b>EMA 200:</b> {last_ema200:,.2f}\n"
             msg += f"👀 İlk RSI uyarınız teyit edildi, işlem değerlendirebilirsiniz."
             
             for cid in CHAT_IDS:
@@ -856,7 +865,7 @@ async def tick(force=False):
 async def tracker_tick():
     if not is_market_open(): return
     await check_active_trades()
-    await check_5m_confirmations() # YENİ EKLENEN TEYİT KONTROLÜ
+    await check_5m_confirmations()
 
 async def market_open_scan():
     if not is_market_open(): return
@@ -879,7 +888,7 @@ async def clear_daily_state():
         fibo_cache.clear()
         closed_trades.clear()
         daily_alerts.clear()
-        pending_confirmations.clear() # Teyit listesini de temizle
+        pending_confirmations.clear()
         pending_trades.clear()
 
 class DummyHandler(BaseHTTPRequestHandler):
@@ -900,10 +909,10 @@ async def main():
     sched = AsyncIOScheduler(timezone=TIMEZONE)
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
     
-    # Tarama saatleri mum kapanışından hemen sonraya (01, 16, 31, 46) çekildi
+    # Ana tarama saatleri
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="1,16,31,46", timezone=TIMEZONE))
     
-    # Her 5 dakikada bir çalışacak olan takipçi (Teyit kontrolünü de içeriyor)
+    # Teyit ve işlem takipçisi (Her 5 dakikada bir)
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour=17, minute=58, timezone=TIMEZONE))
     
