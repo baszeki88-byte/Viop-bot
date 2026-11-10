@@ -800,6 +800,15 @@ async def tick(force=False):
     
     print(f"🔄 Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
     
+    # ==========================================
+    # TEST MESAJI (Tarama başladığında Telegram'a mesaj atar)
+    # ==========================================
+    for cid in CHAT_IDS:
+        try: 
+            await bot_app.bot.send_message(chat_id=cid, text=f"🔄 Test: Bot arka planda tarama yaptı. Saat: {datetime.now(TIMEZONE).strftime('%H:%M')}", parse_mode="HTML")
+        except: pass
+    # ==========================================
+    
     for sym in SYMBOLS:
         try:
             dfs = await fetch_all_tfs_async(sym)
