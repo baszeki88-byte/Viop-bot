@@ -93,6 +93,7 @@ daily_alerts = []
 instant_states = {}       
 atr_states = {}
 earnings_cache = {}
+fibo_cache = {}
 
 trade_lock = asyncio.Lock()
 
@@ -163,32 +164,78 @@ def get_earnings_note(symbol):
     try:
         ticker = bp.Ticker(symbol)
         cal = ticker.calendar
-        
-        # borsapy güncellemesi: Takvim artık DataFrame dönüyor
         if not isinstance(cal, pd.DataFrame) or cal.empty:
             earnings_cache[cache_key] = ""
             return ""
-            
         rapor_satirlari = cal[cal['Subject'].str.contains('Finansal Rapor', case=False, na=False)]
         if rapor_satirlari.empty:
             earnings_cache[cache_key] = ""
             return ""
-            
         tarih_str = rapor_satirlari.iloc[0]['EndDate']
         earnings_date = datetime.strptime(tarih_str, "%d.%m.%Y").date()
-        
         days_left = (earnings_date - today).days
-        
         if 0 <= days_left <= 5:
             note = f"\n\n📅 <b>Bilanço Uyarısı:</b> Bilançoya {days_left} gün kaldı! (Dikkatli olun)"
             earnings_cache[cache_key] = note
             return note
-            
     except Exception as e: 
         print(f"Bilanço okuma hatası ({symbol}): {e}")
-        
     earnings_cache[cache_key] = ""
     return ""
+
+def get_nearest_fibo_levels(symbol, current_price):
+    today = datetime.now(TIMEZONE).date()
+    cache_key = f"{symbol}_{today}_{int(current_price)}"
+    if cache_key in fibo_cache:
+        return fibo_cache[cache_key]
+
+    try:
+        df = bp.Ticker(symbol).history(period="3 bar", interval="1wk")
+        if df is None or len(df) < 2:
+            fibo_cache[cache_key] = ""
+            return ""
+        
+        df.columns = [str(c).lower() for c in df.columns]
+        gecen_hafta = df.iloc[-2]
+        H, L, C = gecen_hafta['high'], gecen_hafta['low'], gecen_hafta['close']
+        
+        pivot = (H + L + C) / 3
+        fark = H - L
+        
+        raw_levels = []
+        # Fibonacci Oranları
+        ratios = [0.236, 0.382, 0.5, 0.618, 1.0, 1.272, 1.618, 2.618]
+        for r in ratios:
+            raw_levels.append((pivot - fark * r, str(r)))
+            raw_levels.append((pivot + fark * r, str(r)))
+            
+        # Fiyata mutlak mesafeye göre sırala
+        en_yakin_seviye = min(raw_levels, key=lambda x: abs(x[0] - current_price))
+        
+        note = "\n🎯 <b>FİBO SEVİYELERİ:</b>"
+        
+        # Eğer fiyat 0.5 veya 0.618'e çok yakınsa (aralarında veya etrafındaysa) İKİSİNİ de yaz
+        if en_yakin_seviye[1] in ["0.5", "0.618"]:
+            lvl_05 = next(l for l in raw_levels if l[1] == "0.5" and abs(l[0] - current_price) < fark * 2) # Aynı yöndeki 0.5
+            lvl_0618 = next(l for l in raw_levels if l[1] == "0.618" and abs(l[0] - current_price) < fark * 2) # Aynı yöndeki 0.618
+            
+            # Fiyata daha yakın olanı alta, uzak olanı üste yazalım (okunabilirlik için)
+            if lvl_05 and lvl_0618:
+                note += f"\n🎯 <b>0.5 Seviyesi:</b> {lvl_05[0]:,.2f}"
+                note += f"\n🎯 <b>0.618 Seviyesi:</b> {lvl_0618[0]:,.2f}"
+            else:
+                note += f"\n🎯 <b>En Yakın Seviye ({en_yakin_seviye[1]}):</b> {en_yakin_seviye[0]:,.2f}"
+        else:
+            # Sadece en yakın seviyeyi yaz
+            note += f"\n🎯 <b>En Yakın Seviye ({en_yakin_seviye[1]}):</b> {en_yakin_seviye[0]:,.2f}"
+                
+        note += "\n"
+        fibo_cache[cache_key] = note
+        return note
+    except Exception as e:
+        print(f"Fibo hesaplama hatası ({symbol}): {e}")
+        fibo_cache[cache_key] = ""
+        return ""
 
 def get_volume_and_trend_tag(df_current, df_4h):
     vol_ma = df_current['volume'].rolling(VOLUME_LOOKBACK).mean()
@@ -269,12 +316,17 @@ async def process_signals(symbol, dfs):
                 tags = get_volume_and_trend_tag(df, df_4h)
                 earnings_note = get_earnings_note(symbol)
                 current_price = float(df['close'].iloc[-1])
+                fibo_note = get_nearest_fibo_levels(symbol, current_price)
+                
                 if direction == "SHORT":
                     hedef_fiyat = current_price * 1.02
-                    msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI\nRSI 8: {r_prev:.1f} → {r_now:.1f} (Aşırı Alım)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {hedef_fiyat:,.2f} (Tahmini +%2)\n\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
+                    msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI\nRSI 8: {r_prev:.1f} → {r_now:.1f} (Aşırı Alım)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {hedef_fiyat:,.2f} (Tahmini +%2)"
                 else:
                     hedef_fiyat = current_price * 0.98
-                    msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI\nRSI 8: {r_prev:.1f} → {r_now:.1f} (Aşırı Satım)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {hedef_fiyat:,.2f} (Tahmini -%2)\n\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
+                    msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI\nRSI 8: {r_prev:.1f} → {r_now:.1f} (Aşırı Satım)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {hedef_fiyat:,.2f} (Tahmini -%2)"
+                
+                msg += fibo_note
+                msg += "\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
                 msg += earnings_note
                 msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "alert_instant", "direction": direction})
 
@@ -312,12 +364,15 @@ async def process_signals(symbol, dfs):
                 if price_ok and candle_ok:
                     tags = get_volume_and_trend_tag(df, df_4h)
                     earnings_note = get_earnings_note(symbol)
+                    fibo_note = get_nearest_fibo_levels(symbol, close_price)
                     sl = close_price * (1 + SL_PCT / 100)
                     tp1 = close_price * (1 - ATR_TP1_PCT / 100)
                     tp2 = close_price * (1 - ATR_TP2_PCT / 100)
                     sl_pct = ((sl - close_price) / close_price) * 100
                     timeout_msg = "10 Seans Saati" if tf in ['15m', '30m'] else "Swing (Uzun Vade)"
-                    msg = f"✨ <b>ATR DÜNYASI (Short) - {symbol} [{tf.upper()}]</b> ✨\n🔴 RSI Aşırı Alım Zirvesi: {atr_data['peak_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n⏳ <i>Zaman Aşımı: {timeout_msg}</i>\n{earnings_note}"
+                    msg = f"✨ <b>ATR DÜNYASI (Short) - {symbol} [{tf.upper()}]</b> ✨\n🔴 RSI Aşırı Alım Zirvesi: {atr_data['peak_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n⏳ <i>Zaman Aşımı: {timeout_msg}</i>"
+                    msg += fibo_note
+                    msg += earnings_note
                     msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "SHORT", "price": close_price, "sl": sl, "tp1": tp1, "tp2": tp2})
                     atr_states[atr_key]["state"] = "IDLE"
                 else:
@@ -334,12 +389,15 @@ async def process_signals(symbol, dfs):
                 if price_ok and candle_ok:
                     tags = get_volume_and_trend_tag(df, df_4h)
                     earnings_note = get_earnings_note(symbol)
+                    fibo_note = get_nearest_fibo_levels(symbol, close_price)
                     sl = close_price * (1 - SL_PCT / 100)
                     tp1 = close_price * (1 + ATR_TP1_PCT / 100)
                     tp2 = close_price * (1 + ATR_TP2_PCT / 100)
                     sl_pct = ((close_price - sl) / close_price) * 100
                     timeout_msg = "10 Seans Saati" if tf in ['15m', '30m'] else "Swing (Uzun Vade)"
-                    msg = f"✨ <b>ATR DÜNYASI (Long) - {symbol} [{tf.upper()}]</b> ✨\n🟢 RSI Aşırı Satım Dibi: {atr_data['low_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n⏳ <i>Zaman Aşımı: {timeout_msg}</i>\n{earnings_note}"
+                    msg = f"✨ <b>ATR DÜNYASI (Long) - {symbol} [{tf.upper()}]</b> ✨\n🟢 RSI Aşırı Satım Dibi: {atr_data['low_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n⏳ <i>Zaman Aşımı: {timeout_msg}</i>"
+                    msg += fibo_note
+                    msg += earnings_note
                     msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "LONG", "price": close_price, "sl": sl, "tp1": tp1, "tp2": tp2})
                     atr_states[atr_key]["state"] = "IDLE"
                 else:
@@ -455,6 +513,10 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             ema50_30m = 0
             msg += f"\n⚓ <b>30 Dakikalık (30M)</b>\n• EMA 50: Veri Yok\n"
+        
+        fibo_note = get_nearest_fibo_levels(text, price)
+        msg += fibo_note
+        
         msg += f"\n💡 <b>Yorum ve Strateji:</b>\n"
         if trend_4h == "🟢 Yukarı":
             msg += f"Ana trend YUKARI. Alım yönlü işlemler düşünülebilir.\n"
@@ -699,15 +761,6 @@ async def tick(force=False):
     if not force and not is_market_open(): return
     print(f"🔄 Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
     
-    # ==========================================
-    # TEST MESAJI (Her tarama başladığında Telegram'a mesaj atar)
-    # ==========================================
-    for cid in CHAT_IDS:
-        try: 
-            await bot_app.bot.send_message(chat_id=cid, text=f"🔄 Test: Bot arka planda tarama yaptı. Saat: {datetime.now(TIMEZONE).strftime('%H:%M')}", parse_mode="HTML")
-        except: pass
-    # ==========================================
-
     for sym in SYMBOLS:
         try:
             dfs = await fetch_all_tfs_async(sym)
@@ -739,6 +792,7 @@ async def clear_daily_state():
         instant_states.clear()
         atr_states.clear()
         earnings_cache.clear()
+        fibo_cache.clear()
         closed_trades.clear()
         daily_alerts.clear()
         pending_trades.clear()
