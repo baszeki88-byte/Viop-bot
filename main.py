@@ -37,12 +37,13 @@ else:
 CHAT_IDS = [5066109900, 8776376951]
 TIMEZONE = pytz.timezone("Europe/Istanbul")
 
+# XU100 Çıkarıldı
 SYMBOLS = [
     "TOASO", "TRALT", "ASTOR", "GUBRF", "TRMET", "TCELL", "GARAN", "YKBNK", "TAVHL", "ENKAI",
     "TTKOM", "SAHOL", "SASA", "AEFES", "ASELS", "MGROS", "TUPRS", "AKBNK", "KCHOL", "KRDMD",
     "ISCTR", "THYAO", "BIMAS", "EREGL", "EKGYO", "PGSUS", "FROTO", "SISE", "VAKBN", "ALARK",
     "AKSEN", "ARCLK", "BRSAN", "CIMSA", "DOAS", "DOHOL", "ENJSA", "OYAKC", "PETKM", "SOKM",
-    "TKFEN", "ULKER", "VESTL", "XU030", "XU100"
+    "TKFEN", "ULKER", "VESTL", "XU030"
 ]
 
 BIST_STOCKS = [s for s in SYMBOLS if not s.startswith("XU")]
@@ -261,7 +262,7 @@ def fetch_ohlc(symbol, interval, limit=300):
                 return df.iloc[:-1] 
         except Exception as e:
             print(f"⚠️ Veri çekme hatası ({symbol} {interval}): {e}")
-            time_module.sleep(1)
+            # Semaphore kullandığımız için buradaki beklemeyi kaldırdık
     return None
 
 async def fetch_ohlc_async(symbol, interval, limit=300):
@@ -756,8 +757,14 @@ async def tick(force=False):
     if not force and not is_market_open(): return
     print(f"🔄 Hızlı Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
     
-    # Tüm hisseleri AYNI ANDA (paralel) tarıyoruz
-    tasks = [fetch_all_tfs_async(sym) for sym in SYMBOLS]
+    # Aynı anda en fazla 10 istek atılmasına izin ver (API engellemesini önler)
+    sem = asyncio.Semaphore(10)
+    
+    async def limited_fetch(sym):
+        async with sem:
+            return await fetch_all_tfs_async(sym)
+            
+    tasks = [limited_fetch(sym) for sym in SYMBOLS]
     results = await asyncio.gather(*tasks)
     
     for sym, dfs in zip(SYMBOLS, results):
