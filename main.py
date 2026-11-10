@@ -95,6 +95,7 @@ instant_states = {}
 atr_states = {}
 earnings_cache = {}
 fibo_cache = {}
+is_scanning = False
 
 trade_lock = asyncio.Lock()
 
@@ -191,14 +192,15 @@ def get_nearest_fibo_levels(symbol, current_price):
         return fibo_cache[cache_key]
 
     try:
-        df = bp.Ticker(symbol).history(period="3 bar", interval="1wk")
+        # GÜNLÜK (1d) VERİ ÇEKİYORUZ
+        df = bp.Ticker(symbol).history(period="3 bar", interval="1d")
         if df is None or len(df) < 2:
             fibo_cache[cache_key] = ""
             return ""
         
         df.columns = [str(c).lower() for c in df.columns]
-        gecen_hafta = df.iloc[-2]
-        H, L, C = gecen_hafta['high'], gecen_hafta['low'], gecen_hafta['close']
+        onceki_gun = df.iloc[-2]
+        H, L, C = onceki_gun['high'], onceki_gun['low'], onceki_gun['close']
         
         pivot = (H + L + C) / 3
         fark = H - L
@@ -209,13 +211,20 @@ def get_nearest_fibo_levels(symbol, current_price):
             raw_levels.append((pivot - fark * r, str(r)))
             raw_levels.append((pivot + fark * r, str(r)))
             
-        en_yakin_seviye = min(raw_levels, key=lambda x: abs(x[0] - current_price))
+        # Fiyata çok uzak (anlamsız) seviyeleri filtrele (%5'ten uzaksa gösterme)
+        yakin_seviyeler = [l for l in raw_levels if abs(l[0] - current_price) / current_price < 0.05]
         
-        note = "\n🎯 <b>FİBO SEVİYELERİ:</b>"
+        if not yakin_seviyeler:
+            fibo_cache[cache_key] = ""
+            return ""
+            
+        en_yakin_seviye = min(yakin_seviyeler, key=lambda x: abs(x[0] - current_price))
+        
+        note = "\n🎯 <b>FİBO SEVİYELERİ (Günlük):</b>"
         
         if en_yakin_seviye[1] in ["0.5", "0.618"]:
-            lvl_05 = next(l for l in raw_levels if l[1] == "0.5" and abs(l[0] - current_price) < fark * 2) 
-            lvl_0618 = next(l for l in raw_levels if l[1] == "0.618" and abs(l[0] - current_price) < fark * 2) 
+            lvl_05 = next((l for l in yakin_seviyeler if l[1] == "0.5"), None)
+            lvl_0618 = next((l for l in yakin_seviyeler if l[1] == "0.618"), None)
             
             if lvl_05 and lvl_0618:
                 note += f"\n🎯 <b>0.5 Seviyesi:</b> {lvl_05[0]:,.2f}"
@@ -262,7 +271,6 @@ def fetch_ohlc(symbol, interval, limit=300):
                 return df.iloc[:-1] 
         except Exception as e:
             print(f"⚠️ Veri çekme hatası ({symbol} {interval}): {e}")
-            # Semaphore kullandığımız için buradaki beklemeyi kaldırdık
     return None
 
 async def fetch_ohlc_async(symbol, interval, limit=300):
@@ -742,6 +750,11 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="HTML")
 
 async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global is_scanning
+    if is_scanning:
+        await update.message.reply_text("⏳ Şu an arka planda bir tarama devam ediyor. Lütfen bitmesini bekleyin...")
+        return
+        
     await update.message.reply_text("🔄 Manuel tarama başlatıldı. Tüm hisseler kontrol ediliyor, lütfen bekleyin...")
     await tick(force=True)
     await update.message.reply_text("✅ Tarama tamamlandı. Eğer sinyal koşulu oluştuysa mesajınız gelmiştir.")
@@ -754,27 +767,39 @@ bot_app.add_handler(CommandHandler("tara", cmd_tara, filters=auth_filter))
 bot_app.add_handler(MessageHandler(filters.TEXT & auth_filter, analyze_symbol))
 
 async def tick(force=False):
+    global is_scanning
     if not force and not is_market_open(): return
+    
+    # KİLİT KONTROLÜ
+    if is_scanning:
+        print("⚠️ Tarama zaten devam ediyor, yeni tarama isteği yoksayıldı.")
+        return
+        
+    is_scanning = True
     print(f"🔄 Hızlı Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
     
-    # Aynı anda en fazla 10 istek atılmasına izin ver (API engellemesini önler)
-    sem = asyncio.Semaphore(10)
-    
-    async def limited_fetch(sym):
-        async with sem:
-            return await fetch_all_tfs_async(sym)
-            
-    tasks = [limited_fetch(sym) for sym in SYMBOLS]
-    results = await asyncio.gather(*tasks)
-    
-    for sym, dfs in zip(SYMBOLS, results):
-        try:
-            if dfs is None or not dfs: continue
-            msgs = await process_signals(sym, dfs)
-            for msg_data in msgs:
-                await send_signal_message(msg_data)
-        except Exception as e: 
-            print(f"❌ {sym} tarama hatası: {e}") 
+    try:
+        # Aynı anda en fazla 10 istek atılmasına izin ver (API engellemesini önler)
+        sem = asyncio.Semaphore(10)
+        
+        async def limited_fetch(sym):
+            async with sem:
+                return await fetch_all_tfs_async(sym)
+                
+        tasks = [limited_fetch(sym) for sym in SYMBOLS]
+        results = await asyncio.gather(*tasks)
+        
+        for sym, dfs in zip(SYMBOLS, results):
+            try:
+                if dfs is None or not dfs: continue
+                msgs = await process_signals(sym, dfs)
+                for msg_data in msgs:
+                    await send_signal_message(msg_data)
+            except Exception as e: 
+                print(f"❌ {sym} tarama hatası: {e}") 
+    finally:
+        # Tarama bittiğinde kilidi aç
+        is_scanning = False
 
 async def tracker_tick():
     if not is_market_open(): return
