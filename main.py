@@ -764,7 +764,7 @@ async def check_5m_confirmations():
         last_ema21 = 0
         last_ema200 = 0
         
-        # TÜM BARLARI TARA (range(0, ...) ile ilk bar dahil edildi)
+        # TÜM BARLARI TARA
         for i in range(1, len(df_after_alert)):
             curr_idx = df_5m.index.get_loc(df_after_alert.index[i])
             prev_idx = curr_idx - 1
@@ -967,8 +967,22 @@ async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if is_scanning:
         await update.message.reply_text("⏳ Şu an arka planda bir tarama devam ediyor. Lütfen bitmesini bekleyin...")
         return
+    
     await update.message.reply_text("🔄 Manuel tarama arka planda başlatıldı. Tüm hisseler kontrol ediliyor...")
-    task = asyncio.create_task(tick(force=True))
+    
+    # HATA ÇÖZÜMÜ: Tarama bittiğinde bilgilendirme mesajı at
+    async def run_manual_scan():
+        await tick(force=True)
+        for cid in CHAT_IDS:
+            try:
+                await bot_app.bot.send_message(
+                    chat_id=cid, 
+                    text="✅ Tarama tamamlandı. Eğer sinyal koşulu oluştuysa mesajınız gelmiştir.", 
+                    parse_mode="HTML"
+                )
+            except: pass
+
+    task = asyncio.create_task(run_manual_scan())
     background_tasks.add(task)
     task.add_done_callback(background_tasks.discard)
 
