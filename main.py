@@ -203,30 +203,25 @@ def get_nearest_fibo_levels(symbol, current_price):
         fark = H - L
         
         raw_levels = []
-        # Fibonacci Oranları
         ratios = [0.236, 0.382, 0.5, 0.618, 1.0, 1.272, 1.618, 2.618]
         for r in ratios:
             raw_levels.append((pivot - fark * r, str(r)))
             raw_levels.append((pivot + fark * r, str(r)))
             
-        # Fiyata mutlak mesafeye göre sırala
         en_yakin_seviye = min(raw_levels, key=lambda x: abs(x[0] - current_price))
         
         note = "\n🎯 <b>FİBO SEVİYELERİ:</b>"
         
-        # Eğer fiyat 0.5 veya 0.618'e çok yakınsa (aralarında veya etrafındaysa) İKİSİNİ de yaz
         if en_yakin_seviye[1] in ["0.5", "0.618"]:
-            lvl_05 = next(l for l in raw_levels if l[1] == "0.5" and abs(l[0] - current_price) < fark * 2) # Aynı yöndeki 0.5
-            lvl_0618 = next(l for l in raw_levels if l[1] == "0.618" and abs(l[0] - current_price) < fark * 2) # Aynı yöndeki 0.618
+            lvl_05 = next(l for l in raw_levels if l[1] == "0.5" and abs(l[0] - current_price) < fark * 2) 
+            lvl_0618 = next(l for l in raw_levels if l[1] == "0.618" and abs(l[0] - current_price) < fark * 2) 
             
-            # Fiyata daha yakın olanı alta, uzak olanı üste yazalım (okunabilirlik için)
             if lvl_05 and lvl_0618:
                 note += f"\n🎯 <b>0.5 Seviyesi:</b> {lvl_05[0]:,.2f}"
                 note += f"\n🎯 <b>0.618 Seviyesi:</b> {lvl_0618[0]:,.2f}"
             else:
                 note += f"\n🎯 <b>En Yakın Seviye ({en_yakin_seviye[1]}):</b> {en_yakin_seviye[0]:,.2f}"
         else:
-            # Sadece en yakın seviyeyi yaz
             note += f"\n🎯 <b>En Yakın Seviye ({en_yakin_seviye[1]}):</b> {en_yakin_seviye[0]:,.2f}"
                 
         note += "\n"
@@ -370,7 +365,7 @@ async def process_signals(symbol, dfs):
                     tp2 = close_price * (1 - ATR_TP2_PCT / 100)
                     sl_pct = ((sl - close_price) / close_price) * 100
                     timeout_msg = "10 Seans Saati" if tf in ['15m', '30m'] else "Swing (Uzun Vade)"
-                    msg = f"✨ <b>ATR DÜNYASI (Short) - {symbol} [{tf.upper()}]</b> ✨\n🔴 RSI Aşırı Alım Zirvesi: {atr_data['peak_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n⏳ <i>Zaman Aşımı: {timeout_msg}</i>"
+                    msg = f"✨ <b>ATR DÜNYASI (Short) - {symbol} [{tf.upper()}]</b> ✨\n🔴 RSI Aşırı Alım Zirvesi: {atr_data['peak_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Olası Giriş (Mum Kapanışı):</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n⏳ <i>Zaman Aşımı: {timeout_msg}</i>"
                     msg += fibo_note
                     msg += earnings_note
                     msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "SHORT", "price": close_price, "sl": sl, "tp1": tp1, "tp2": tp2})
@@ -395,7 +390,7 @@ async def process_signals(symbol, dfs):
                     tp2 = close_price * (1 + ATR_TP2_PCT / 100)
                     sl_pct = ((close_price - sl) / close_price) * 100
                     timeout_msg = "10 Seans Saati" if tf in ['15m', '30m'] else "Swing (Uzun Vade)"
-                    msg = f"✨ <b>ATR DÜNYASI (Long) - {symbol} [{tf.upper()}]</b> ✨\n🟢 RSI Aşırı Satım Dibi: {atr_data['low_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n⏳ <i>Zaman Aşımı: {timeout_msg}</i>"
+                    msg = f"✨ <b>ATR DÜNYASI (Long) - {symbol} [{tf.upper()}]</b> ✨\n🟢 RSI Aşırı Satım Dibi: {atr_data['low_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Olası Giriş (Mum Kapanışı):</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{sl_pct:.2f})\n🎯 <b>TP1 (%{ATR_TP1_PCT}):</b> {tp1:,.2f}\n🎯 <b>TP2 (%{ATR_TP2_PCT}):</b> {tp2:,.2f}\n⏳ <i>Zaman Aşımı: {timeout_msg}</i>"
                     msg += fibo_note
                     msg += earnings_note
                     msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "LONG", "price": close_price, "sl": sl, "tp1": tp1, "tp2": tp2})
@@ -759,16 +754,20 @@ bot_app.add_handler(MessageHandler(filters.TEXT & auth_filter, analyze_symbol))
 
 async def tick(force=False):
     if not force and not is_market_open(): return
-    print(f"🔄 Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
+    print(f"🔄 Hızlı Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
     
-    for sym in SYMBOLS:
+    # Tüm hisseleri AYNI ANDA (paralel) tarıyoruz
+    tasks = [fetch_all_tfs_async(sym) for sym in SYMBOLS]
+    results = await asyncio.gather(*tasks)
+    
+    for sym, dfs in zip(SYMBOLS, results):
         try:
-            dfs = await fetch_all_tfs_async(sym)
             if dfs is None or not dfs: continue
             msgs = await process_signals(sym, dfs)
             for msg_data in msgs:
                 await send_signal_message(msg_data)
-        except Exception as e: print(f"❌ {sym} tarama hatası: {e}") 
+        except Exception as e: 
+            print(f"❌ {sym} tarama hatası: {e}") 
 
 async def tracker_tick():
     if not is_market_open(): return
@@ -814,7 +813,8 @@ async def main():
     await bot_app.updater.start_polling(drop_pending_updates=True)
     sched = AsyncIOScheduler(timezone=TIMEZONE)
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
-    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="5,20,35,50", timezone=TIMEZONE))
+    # Tarama saatleri mum kapanışına (06, 21, 36, 51) çekildi
+    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="6,21,36,51", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour=17, minute=58, timezone=TIMEZONE))
     sched.add_job(daily_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=30, timezone=TIMEZONE))
