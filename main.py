@@ -94,13 +94,16 @@ instant_states = {}
 atr_states = {}
 earnings_cache = {}
 fibo_cache = {}
-pending_confirmations = {} # 5m Teyit Bekleyenler
+pending_confirmations = {} 
+triple_ema_states = {} # Üçlü EMA durum takibi
+active_triple_ema_trades = {} # Üçlü EMA açık işlemler
 is_scanning = False
 
 trade_lock = asyncio.Lock()
 
 DATA_DIR = os.getenv("DATA_DIR", "/tmp")
 TRADES_FILE = os.path.join(DATA_DIR, "active_trades.json")
+TRIPLE_EMA_FILE = os.path.join(DATA_DIR, "active_triple_ema.json")
 
 def save_trades():
     try:
@@ -112,11 +115,20 @@ def save_trades():
             serializable_trades[k] = trade_copy
         with open(TRADES_FILE, "w", encoding="utf-8") as f:
             json.dump(serializable_trades, f, ensure_ascii=False, indent=2)
+            
+        serializable_ema = {}
+        for k, v in active_triple_ema_trades.items():
+            trade_copy = v.copy()
+            if isinstance(trade_copy["entry_time"], datetime):
+                trade_copy["entry_time"] = trade_copy["entry_time"].isoformat()
+            serializable_ema[k] = trade_copy
+        with open(TRIPLE_EMA_FILE, "w", encoding="utf-8") as f:
+            json.dump(serializable_ema, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"⚠️ Trade kayıt hatası: {e}")
 
 def load_trades():
-    global active_trades
+    global active_trades, active_triple_ema_trades
     if os.path.exists(TRADES_FILE):
         try:
             with open(TRADES_FILE, "r", encoding="utf-8") as f:
@@ -125,10 +137,21 @@ def load_trades():
                     if "entry_time" in v and isinstance(v["entry_time"], str):
                         v["entry_time"] = datetime.fromisoformat(v["entry_time"])
                     active_trades[k] = v
-            print(f"✅ {len(active_trades)} aktif işlem hafızadan yüklendi.")
+            print(f"✅ {len(active_trades)} aktif ATR/RSI işlemi yüklendi.")
         except Exception as e:
             print(f"⚠️ Trade yükleme hatası: {e}")
-            active_trades = {}
+            
+    if os.path.exists(TRIPLE_EMA_FILE):
+        try:
+            with open(TRIPLE_EMA_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                for k, v in loaded.items():
+                    if "entry_time" in v and isinstance(v["entry_time"], str):
+                        v["entry_time"] = datetime.fromisoformat(v["entry_time"])
+                    active_triple_ema_trades[k] = v
+            print(f"✅ {len(active_triple_ema_trades)} aktif Üçlü EMA işlemi yüklendi.")
+        except Exception as e:
+            print(f"⚠️ Üçlü EMA yükleme hatası: {e}")
 
 def is_market_open(now=None):
     now = now or datetime.now(TIMEZONE)
@@ -410,7 +433,106 @@ async def process_signals(symbol, dfs):
     return msgs
 
 # ==========================================
-# YENİ: 5 Dakikalık Teyit Kontrol Fonksiyonu (EMA 21 & EMA 200)
+# YENİ: Üçlü EMA Taraması ve Takibi (5m)
+# ==========================================
+async def check_triple_ema():
+    global active_triple_ema_trades
+    if not is_market_open(): return
+    
+    # 1. AÇIK İŞLEMLERİN KONTROLÜ (EMA 50 Stop)
+    for sym, trade in list(active_triple_ema_trades.items()):
+        df = await fetch_ohlc_async(sym, "5m", limit=100)
+        if df is None or len(df) < 50: continue
+        
+        last_close = df['close'].iloc[-1]
+        ema50 = df['close'].ewm(span=50, adjust=False).mean().iloc[-1]
+        
+        closed = False
+        pnl_pct = 0
+        
+        if trade["type"] == "LONG" and last_close < ema50:
+            pnl_pct = ((last_close - trade["entry"]) / trade["entry"]) * 100
+            msg = f"🛑 <b>ÜÇLÜ EMA STOP - {sym} [5M]</b>\nTrend (EMA 50) aşağı kırıldı. Pozisyon kapatıldı.\n<b>Kapanış Fiyatı:</b> {last_close:,.2f}\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"
+            closed = True
+        elif trade["type"] == "SHORT" and last_close > ema50:
+            pnl_pct = ((trade["entry"] - last_close) / trade["entry"]) * 100
+            msg = f"🛑 <b>ÜÇLÜ EMA STOP - {sym} [5M]</b>\nTrend (EMA 50) yukarı kırıldı. Pozisyon kapatıldı.\n<b>Kapanış Fiyatı:</b> {last_close:,.2f}\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"
+            closed = True
+            
+        if closed:
+            for cid in CHAT_IDS:
+                try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                except: pass
+            del active_triple_ema_trades[sym]
+            save_trades()
+
+    # 2. YENİ SİNYAL TARAMASI
+    sem = asyncio.Semaphore(10)
+    
+    async def scan_single(sym):
+        async with sem:
+            df = await fetch_ohlc_async(sym, "5m", limit=300)
+            if df is None or len(df) < 200: return
+            
+            ema21 = df['close'].ewm(span=21, adjust=False).mean()
+            ema50 = df['close'].ewm(span=50, adjust=False).mean()
+            ema200 = df['close'].ewm(span=200, adjust=False).mean()
+            
+            bar_time = df.index[-1]
+            state_key = f"triple_ema_{sym}"
+            
+            if state_key not in triple_ema_states:
+                triple_ema_states[state_key] = {"last_bar": None}
+                
+            if triple_ema_states[state_key]["last_bar"] != bar_time:
+                curr_21 = ema21.iloc[-1]
+                curr_50 = ema50.iloc[-1]
+                curr_200 = ema200.iloc[-1]
+                prev_21 = ema21.iloc[-2]
+                prev_200 = ema200.iloc[-2]
+                
+                direction = None
+                if prev_21 <= prev_200 and curr_21 > curr_200: direction = "LONG"
+                elif prev_21 >= prev_200 and curr_21 < curr_200: direction = "SHORT"
+                
+                if direction:
+                    triple_ema_states[state_key]["last_bar"] = bar_time
+                    current_price = df['close'].iloc[-1]
+                    rsi_val = get_rsi(df['close'], 14).iloc[-1]
+                    
+                    # Eğer bu hissede zaten açık üçlü ema işlemi varsa tekrar sinyal atma
+                    if sym in active_triple_ema_trades: return
+                    
+                    emoji = "📈" if direction == "LONG" else "📉"
+                    msg = f"{emoji} <b>ÜÇLÜ EMA SİNYALİ - {sym} [5M]</b> {emoji}\n"
+                    msg += f"🚨 <b>Yön:</b> {direction}\n"
+                    msg += f"21 EMA, 200 EMA'yı {'yukarı' if direction == 'LONG' else 'aşağı'} kesti.\n\n"
+                    msg += f"💰 <b>Giriş Fiyatı:</b> {current_price:,.2f}\n"
+                    msg += f"🛑 <b>Stop (EMA 50):</b> {curr_50:,.2f}\n"
+                    msg += f"📊 <b>RSI (14):</b> {rsi_val:.1f} "
+                    if (direction == "LONG" and rsi_val > 70) or (direction == "SHORT" and rsi_val < 30):
+                        msg += "⚠️ (Aşırı Bölge)\n"
+                    else:
+                        msg += "\n"
+                    msg += f"\n💡 <i>Trend takip sistemidir. Fiyat (mum) EMA 50'nin tersine kapanana kadar pozisyonu koruyun.</i>"
+                    
+                    for cid in CHAT_IDS:
+                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                        except: pass
+                        
+                    active_triple_ema_trades[sym] = {
+                        "symbol": sym,
+                        "type": direction,
+                        "entry": current_price,
+                        "entry_time": datetime.now(TIMEZONE)
+                    }
+                    save_trades()
+
+    tasks = [scan_single(sym) for sym in SYMBOLS]
+    await asyncio.gather(*tasks)
+
+# ==========================================
+# 5 Dakikalık EMA Teyit Kontrol Fonksiyonu (EMA 21 & EMA 200)
 # ==========================================
 async def check_5m_confirmations():
     if not pending_confirmations: return
@@ -426,7 +548,6 @@ async def check_5m_confirmations():
             del pending_confirmations[key]
             continue
             
-        # EMA 200 hesaplaması için limiti 300 yaptık
         df_5m = await fetch_ohlc_async(sym, "5m", limit=300)
         if df_5m is None or len(df_5m) < 200: continue
         
@@ -788,7 +909,6 @@ async def send_signal_message(msg_data):
         if msg_type == "alert_instant":
             async with trade_lock:
                 daily_alerts.append({"sym": symbol, "direction": msg_data["direction"]})
-            # İlk uyarı kaydedildi, 5m teyit listesine ekle
             key = f"{symbol}_{msg_data['direction']}"
             pending_confirmations[key] = {
                 "symbol": symbol,
@@ -809,7 +929,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "• Hisse analizi için: <code>/ASELS</code> veya <code>ASELS</code>\n"
         "• Endeks analizi için: <code>/XU030</code>\n"
         "• Tüm piyasayı anında taramak için: <code>/tara</code>\n\n"
-        "Sistem, RSI Büyüsü ve ATR Dünyası sinyallerini otomatik olarak takip eder ve sonuçları size bildirir."
+        "Sistem, RSI Büyüsü ve ATR Dünyası sinyallerini otomatik olarak takip eder ve sonuçları size bildirir. Ayrıca 5m Üçlü EMA sinyalleri üretir."
     )
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -866,6 +986,7 @@ async def tracker_tick():
     if not is_market_open(): return
     await check_active_trades()
     await check_5m_confirmations()
+    await check_triple_ema() # ÜÇLÜ EMA KONTROLÜ
 
 async def market_open_scan():
     if not is_market_open(): return
@@ -890,6 +1011,7 @@ async def clear_daily_state():
         daily_alerts.clear()
         pending_confirmations.clear()
         pending_trades.clear()
+        # triple_ema_states temizlenmez, bar zamanıyla kontrol ediliyor.
 
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -909,10 +1031,10 @@ async def main():
     sched = AsyncIOScheduler(timezone=TIMEZONE)
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
     
-    # Ana tarama saatleri
+    # Ana tarama saatleri (RSI/ATR)
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="1,16,31,46", timezone=TIMEZONE))
     
-    # Teyit ve işlem takipçisi (Her 5 dakikada bir)
+    # Her 5 dakikada bir çalışan takipçi (5M teyit, ATR takip ve Üçlü EMA)
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour=17, minute=58, timezone=TIMEZONE))
     
