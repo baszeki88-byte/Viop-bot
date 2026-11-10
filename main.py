@@ -37,7 +37,6 @@ else:
 CHAT_IDS = [5066109900, 8776376951]
 TIMEZONE = pytz.timezone("Europe/Istanbul")
 
-# XU100 Çıkarıldı
 SYMBOLS = [
     "TOASO", "TRALT", "ASTOR", "GUBRF", "TRMET", "TCELL", "GARAN", "YKBNK", "TAVHL", "ENKAI",
     "TTKOM", "SAHOL", "SASA", "AEFES", "ASELS", "MGROS", "TUPRS", "AKBNK", "KCHOL", "KRDMD",
@@ -192,7 +191,6 @@ def get_nearest_fibo_levels(symbol, current_price):
         return fibo_cache[cache_key]
 
     try:
-        # GÜNLÜK (1d) VERİ ÇEKİYORUZ
         df = bp.Ticker(symbol).history(period="3 bar", interval="1d")
         if df is None or len(df) < 2:
             fibo_cache[cache_key] = ""
@@ -211,7 +209,6 @@ def get_nearest_fibo_levels(symbol, current_price):
             raw_levels.append((pivot - fark * r, str(r)))
             raw_levels.append((pivot + fark * r, str(r)))
             
-        # Fiyata çok uzak (anlamsız) seviyeleri filtrele (%5'ten uzaksa gösterme)
         yakin_seviyeler = [l for l in raw_levels if abs(l[0] - current_price) / current_price < 0.05]
         
         if not yakin_seviyeler:
@@ -770,7 +767,6 @@ async def tick(force=False):
     global is_scanning
     if not force and not is_market_open(): return
     
-    # KİLİT KONTROLÜ
     if is_scanning:
         print("⚠️ Tarama zaten devam ediyor, yeni tarama isteği yoksayıldı.")
         return
@@ -779,7 +775,6 @@ async def tick(force=False):
     print(f"🔄 Hızlı Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
     
     try:
-        # Aynı anda en fazla 10 istek atılmasına izin ver (API engellemesini önler)
         sem = asyncio.Semaphore(10)
         
         async def limited_fetch(sym):
@@ -798,7 +793,6 @@ async def tick(force=False):
             except Exception as e: 
                 print(f"❌ {sym} tarama hatası: {e}") 
     finally:
-        # Tarama bittiğinde kilidi aç
         is_scanning = False
 
 async def tracker_tick():
@@ -845,8 +839,10 @@ async def main():
     await bot_app.updater.start_polling(drop_pending_updates=True)
     sched = AsyncIOScheduler(timezone=TIMEZONE)
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
-    # Tarama saatleri mum kapanışına (06, 21, 36, 51) çekildi
-    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="6,21,36,51", timezone=TIMEZONE))
+    
+    # Tarama saatleri mum kapanışından hemen sonraya (01, 16, 31, 46) çekildi
+    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="1,16,31,46", timezone=TIMEZONE))
+    
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour=17, minute=58, timezone=TIMEZONE))
     sched.add_job(daily_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=30, timezone=TIMEZONE))
