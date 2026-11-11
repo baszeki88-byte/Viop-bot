@@ -100,6 +100,7 @@ fibo_cache = {}
 pending_confirmations = {} 
 triple_ema_states = {} 
 active_triple_ema_trades = {} 
+pending_ema_crosses = {} # YENİ: EMA kesişiminden sonra SuperTrend teyidi bekleyenler
 is_scanning = False
 background_tasks = set()
 
@@ -562,7 +563,7 @@ async def process_signals(symbol, dfs):
 # ÜÇLÜ EMA + 15M SUPERTREND GİRİŞ/STOP SİSTEMİ
 # ==========================================
 async def check_triple_ema():
-    global active_triple_ema_trades
+    global active_triple_ema_trades, pending_ema_crosses
     if not is_market_open(): return
     
     # 1. AÇIK İŞLEMLERİN KONTROLÜ (Giriş tetiklendi mi? SL/TP vuruldu mu?)
@@ -626,7 +627,90 @@ async def check_triple_ema():
             del active_triple_ema_trades[sym]
             save_trades()
 
-    # 2. YENİ SİNYAL TARAMASI (5M EMA Kesişimi)
+    # 2. EMA KESİŞİMİ OLAN VE SUPERTREND TEYİDİ BEKLEYENLERİN KONTROLÜ
+    for sym, data in list(pending_ema_crosses.items()):
+        # Zaman aşımı (Örn: 2 saat içinde ST onayı gelmezse iptal et)
+        if (datetime.now(TIMEZONE) - data["time"]).total_seconds() / 60 > 120:
+            del pending_ema_crosses[sym]
+            continue
+            
+        df_15m = await fetch_ohlc_async(sym, "15m", limit=100)
+        if df_15m is None or len(df_15m) < 20: continue
+        
+        st_series = calculate_supertrend(df_15m, period=10, multiplier=3)
+        if len(st_series) < 2: continue
+        
+        # Kesişim zamanından sonraki mumlara bak
+        cross_time = data["time"]
+        df_after_cross = df_15m[df_15m.index >= cross_time]
+        
+        if df_after_cross.empty: continue
+        
+        flipped = False
+        st_val = None
+        
+        # SuperTrend'in kesişimden sonra bizim yönümüze dönüp dönmediğini kontrol et
+        for i in range(1, len(df_after_cross)):
+            curr_idx = df_15m.index.get_loc(df_after_cross.index[i])
+            prev_idx = curr_idx - 1
+            
+            prev_st = st_series.iloc[prev_idx]
+            curr_st = st_series.iloc[curr_idx]
+            prev_close = df_15m['close'].iloc[prev_idx]
+            curr_close = df_15m['close'].iloc[curr_idx]
+            
+            if pd.isna(prev_st) or pd.isna(curr_st): continue
+                
+            prev_trend = "LONG" if prev_close > prev_st else "SHORT"
+            curr_trend = "LONG" if curr_close > curr_st else "SHORT"
+            
+            # Kırılım gerçekleşti mi?
+            if prev_trend != curr_trend and curr_trend == data["type"]:
+                flipped = True
+                st_val = curr_st
+                break
+                
+        if flipped and st_val is not None:
+            direction = data["type"]
+            entry_price = st_val
+            
+            if direction == "LONG":
+                sl = entry_price * (1 - 0.015) # %1.5 Alt Stop
+                tp = entry_price * (1 + 0.03)  # %3 Kâr Al
+            else:
+                sl = entry_price * (1 + 0.015) # %1.5 Üst Stop
+                tp = entry_price * (1 - 0.03)  # %3 Kâr Al
+                
+            emoji = "📈" if direction == "LONG" else "📉"
+            msg = f"{emoji} <b>15M SUPERTREND TEYİDİ - {sym}</b> {emoji}\n"
+            msg += f"✅ 15M Süper Trend <b>{direction}</b> yönüne kırılım yaptı.\n\n"
+            msg += f"💰 <b>Olası Giriş (Süper Trend Seviyesi):</b> {entry_price:,.2f}\n"
+            msg += f"🛑 <b>Stop (Girişin %1.5'i):</b> {sl:,.2f}\n"
+            msg += f"🎯 <b>Hedef (%3):</b> {tp:,.2f}\n"
+            msg += f"\n💡 <i>Fiyat 15M Süper Trend seviyesine ({entry_price:,.2f}) geri çekildiğinde pozisyon açılacaktır.</i>"
+            
+            for cid in CHAT_IDS:
+                reply_id = data["msg_ids"].get(str(cid))
+                try:
+                    # İlk EMA kesişim mesajını alıntılayarak gönder
+                    await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                except:
+                    try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                    except Exception as e: print(f"Mesaj hatası: {e}")
+                    
+            active_triple_ema_trades[sym] = {
+                "symbol": sym, 
+                "type": direction, 
+                "entry": entry_price, 
+                "sl": sl,
+                "tp": tp,
+                "entered": False,
+                "entry_time": datetime.now(TIMEZONE) # İşlem takibi için güncel zaman
+            }
+            save_trades()
+            del pending_ema_crosses[sym]
+
+    # 3. YENİ SİNYAL TARAMASI (5M EMA Kesişimi)
     sem = asyncio.Semaphore(10)
     async def scan_single(sym):
         async with sem:
@@ -661,51 +745,30 @@ async def check_triple_ema():
                     if existing and existing["type"] == direction:
                         return 
                     
-                    if existing and existing["type"] != direction:
-                        del active_triple_ema_trades[sym]
-                        save_trades()
+                    # Zaten bekleyen bir kesişim varsa tekrar uyarı atma
+                    if sym in pending_ema_crosses:
+                        return
                     
-                    # 15 DAKİKALIK SUPERTREND GİRİŞ & STOP HESABI
-                    df_15m = await fetch_ohlc_async(sym, "15m", limit=100)
-                    if df_15m is None or len(df_15m) < 20: return
-                    
-                    st_series = calculate_supertrend(df_15m, period=10, multiplier=3)
-                    st_val = st_series.iloc[-1]
-                    
-                    if pd.isna(st_val): return
-                    
-                    entry_price = st_val
-                    
-                    if direction == "LONG":
-                        sl = entry_price * (1 - 0.015) # %1.5 Alt Stop
-                        tp = entry_price * (1 + 0.03)  # %3 Kâr Al
-                    else:
-                        sl = entry_price * (1 + 0.015) # %1.5 Üst Stop
-                        tp = entry_price * (1 - 0.03)  # %3 Kâr Al
-                        
+                    # İlk Uyarı Mesajı
                     emoji = "📈" if direction == "LONG" else "📉"
-                    msg = f"{emoji} <b>ÜÇLÜ EMA SİNYALİ - {sym} [5M]</b> {emoji}\n"
+                    msg = f"🔔 <b>ÜÇLÜ EMA KESİŞİM UYARISI - {sym} [5M]</b> {emoji}\n"
                     msg += f"🚨 <b>Yön:</b> {direction}\n"
                     msg += f"21 EMA, 200 EMA'yı {'yukarı' if direction == 'LONG' else 'aşağı'} kesti.\n\n"
-                    msg += f"💰 <b>Olası Giriş (15M Süper Trend):</b> {entry_price:,.2f}\n"
-                    msg += f"🛑 <b>Stop (Girişin %1.5'i):</b> {sl:,.2f}\n"
-                    msg += f"🎯 <b>Hedef (%3):</b> {tp:,.2f}\n"
-                    msg += f"\n💡 <i>Fiyat 15M Süper Trend seviyesine ({entry_price:,.2f}) geri çekildiğinde pozisyon açılacaktır.</i>"
+                    msg += f"👀 <i>Şimdi 15M SuperTrend'in {direction} yönüne dönmesi bekleniyor... (Grafiği kontrol edin)</i>"
                     
+                    msg_ids = {}
                     for cid in CHAT_IDS:
-                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-                        except Exception as e: print(f"Mesaj hatası: {e}")
-                        
-                    active_triple_ema_trades[sym] = {
-                        "symbol": sym, 
-                        "type": direction, 
-                        "entry": entry_price, 
-                        "sl": sl,
-                        "tp": tp,
-                        "entered": False,
-                        "entry_time": bar_time
-                    }
-                    save_trades()
+                        try:
+                            sent = await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                            msg_ids[str(cid)] = sent.message_id
+                        except Exception as e: print(f"Uyarı Mesaj hatası: {e}")
+                            
+                    if msg_ids:
+                        pending_ema_crosses[sym] = {
+                            "type": direction,
+                            "msg_ids": msg_ids,
+                            "time": datetime.now(TIMEZONE)
+                        }
 
     tasks = [scan_single(sym) for sym in SYMBOLS]
     await asyncio.gather(*tasks)
@@ -1080,6 +1143,7 @@ async def clear_daily_state():
         pending_confirmations.clear()
         pending_trades.clear()
         CACHE_5M.clear()
+        pending_ema_crosses.clear() # YENİ EKLENDİ
 
 async def task_morning_summary(): 
     await generate_market_summary("Sabah")
