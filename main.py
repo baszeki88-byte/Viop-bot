@@ -227,8 +227,7 @@ def _get_earnings_sync(symbol):
         days_left = (earnings_date - today).days
         if 0 <= days_left <= 5:
             return f"\n\n📅 <b>Bilanço Uyarısı:</b> Bilançoya {days_left} gün kaldı! (Dikkatli olun)"
-    except Exception as e: 
-        pass
+    except Exception as e: pass
     return ""
 
 async def get_earnings_note_async(symbol):
@@ -238,11 +237,9 @@ async def get_earnings_note_async(symbol):
     
     try:
         note = await asyncio.wait_for(asyncio.to_thread(_get_earnings_sync, symbol), timeout=20.0)
-        if note:
-            earnings_cache[cache_key] = note
+        if note: earnings_cache[cache_key] = note
         return note
-    except asyncio.TimeoutError:
-        return ""
+    except asyncio.TimeoutError: return ""
 
 def _get_fibo_sync(symbol, current_price):
     try:
@@ -283,8 +280,7 @@ def _get_fibo_sync(symbol, current_price):
         else:
             note += f"\n🎯 <b>En Yakın Seviye ({en_yakin_seviye[1]}):</b> {en_yakin_seviye[0]:,.2f}"
         return note + "\n"
-    except Exception as e: 
-        return ""
+    except Exception as e: return ""
 
 async def get_nearest_fibo_levels_async(symbol, current_price):
     today = datetime.now(TIMEZONE).date()
@@ -293,14 +289,12 @@ async def get_nearest_fibo_levels_async(symbol, current_price):
     
     try:
         note = await asyncio.wait_for(asyncio.to_thread(_get_fibo_sync, symbol, current_price), timeout=20.0)
-        if note:
-            fibo_cache[cache_key] = note
+        if note: fibo_cache[cache_key] = note
         return note
-    except asyncio.TimeoutError:
-        return ""
+    except asyncio.TimeoutError: return ""
 
 # ==========================================
-# MATEMATİK (Wilder's Smoothing + SuperTrend)
+# MATEMATİK (Wilder's Smoothing + SuperTrend Pine Script Birebir)
 # ==========================================
 def get_rsi(series, period=8):
     delta = series.diff()
@@ -338,8 +332,21 @@ def calculate_supertrend(df, period=10, multiplier=3):
     for i in range(1, len(df)):
         if pd.isna(atr.iloc[i]):
             supertrend.iloc[i] = np.nan
+            trend.iloc[i] = 1
             continue
             
+        # Final Bant Hesaplamaları (Pine Script Birebir)
+        if df['close'].iloc[i-1] > final_upperband.iloc[i-1]:
+            final_upperband.iloc[i] = upperband.iloc[i]
+        else:
+            final_upperband.iloc[i] = min(upperband.iloc[i], final_upperband.iloc[i-1])
+            
+        if df['close'].iloc[i-1] < final_lowerband.iloc[i-1]:
+            final_lowerband.iloc[i] = lowerband.iloc[i]
+        else:
+            final_lowerband.iloc[i] = max(lowerband.iloc[i], final_lowerband.iloc[i-1])
+            
+        # Trend Yönü
         if df['close'].iloc[i] > final_upperband.iloc[i-1]:
             trend.iloc[i] = 1
         elif df['close'].iloc[i] < final_lowerband.iloc[i-1]:
@@ -347,13 +354,10 @@ def calculate_supertrend(df, period=10, multiplier=3):
         else:
             trend.iloc[i] = trend.iloc[i-1]
             
+        # SuperTrend Değeri
         if trend.iloc[i] == 1:
-            final_lowerband.iloc[i] = max(lowerband.iloc[i], final_lowerband.iloc[i-1]) if trend.iloc[i-1] == 1 else lowerband.iloc[i]
-            final_upperband.iloc[i] = upperband.iloc[i]
             supertrend.iloc[i] = final_lowerband.iloc[i]
         else:
-            final_upperband.iloc[i] = min(upperband.iloc[i], final_upperband.iloc[i-1]) if trend.iloc[i-1] == -1 else upperband.iloc[i]
-            final_lowerband.iloc[i] = lowerband.iloc[i]
             supertrend.iloc[i] = final_upperband.iloc[i]
             
     return supertrend
@@ -653,7 +657,6 @@ async def check_triple_ema():
                 if direction:
                     triple_ema_states[state_key]["last_bar"] = bar_time
                     
-                    # Ters sinyal kontrolü
                     existing = active_triple_ema_trades.get(sym)
                     if existing and existing["type"] == direction:
                         return 
@@ -662,7 +665,7 @@ async def check_triple_ema():
                         del active_triple_ema_trades[sym]
                         save_trades()
                     
-                    # --- YENİ: 15 DAKİKALIK SUPERTREND GİRİŞ & STOP HESABI ---
+                    # 15 DAKİKALIK SUPERTREND GİRİŞ & STOP HESABI
                     df_15m = await fetch_ohlc_async(sym, "15m", limit=100)
                     if df_15m is None or len(df_15m) < 20: return
                     
@@ -829,8 +832,7 @@ async def generate_market_summary(session_name):
                 h.columns = [str(c).lower() for c in h.columns] 
                 if len(h) >= 2:
                     return s, ((h['close'].iloc[-1] - h['close'].iloc[-2]) / h['close'].iloc[-2]) * 100
-            except Exception as e:
-                pass
+            except Exception as e: pass
             return s, None
 
         sem_summary = asyncio.Semaphore(8)
