@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, time as dt_time
 import time as time_module
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
+import logging # YENİ: Loglama için
 
 import pandas as pd
 import borsapy as bp
@@ -30,17 +31,43 @@ try:
 except ValueError:
     CHAT_IDS = [5066109900, 8776376951]
 
+# YENİ: Admin ID (Hata mesajları için ilk ID'yi kullanıyoruz)
+ADMIN_ID = CHAT_IDS[0] if CHAT_IDS else None
+
 if not BOT_TOKEN:
     raise ValueError("❌ HATA: BOT_TOKEN bulunamadı!")
+
+# YENİ: Loglama Yapılandırması
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+
+# YENİ: Telegram Hata Bildirimi (Spam korumalı)
+last_error_time = {}
+async def send_admin_alert(error_msg, error_key="general"):
+    global last_error_time
+    now = time_module.time()
+    # Aynı hatayı 15 dakikada (900 sn) bir en fazla 1 kez gönder
+    if error_key in last_error_time and (now - last_error_time[error_key]) < 900:
+        return
+    last_error_time[error_key] = now
+    if ADMIN_ID:
+        try:
+            await bot_app.bot.send_message(chat_id=ADMIN_ID, text=f"🚨 <b>SİSTEM HATASI</b>\n{error_msg}", parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Admin uyarı gönderilemedi: {e}")
 
 if TV_SESSION and TV_SESSION_SIGN:
     try:
         bp.set_tradingview_auth(session=TV_SESSION, session_sign=TV_SESSION_SIGN)
-        print("✅ Borsapy: TradingView canlı veri yetkisi alındı!")
+        logger.info("✅ Borsapy: TradingView canlı veri yetkisi alındı!")
     except Exception as e:
-        print(f"⚠️ TradingView Auth Hatası: {e}")
+        logger.error(f"⚠️ TradingView Auth Hatası: {e}")
 else:
-    print("ℹ️ TradingView çerezleri girilmedi. Gecikmeli veri.")
+    logger.info("ℹ️ TradingView çerezleri girilmedi. Gecikmeli veri.")
 
 TIMEZONE = pytz.timezone("Europe/Istanbul")
 TR_HOLIDAYS = holidays.Turkey(years=range(2024, 2031))
@@ -100,11 +127,12 @@ fibo_cache = {}
 pending_confirmations = {} 
 triple_ema_states = {} 
 active_triple_ema_trades = {} 
-pending_ema_crosses = {} # YENİ: EMA kesişiminden sonra SuperTrend teyidi bekleyenler
+pending_ema_crosses = {} 
 is_scanning = False
 background_tasks = set()
 
 CACHE_5M = {}
+CACHE_15M = {} # YENİ: 15m Veri Önbelleği
 CACHE_TTL = 60 
 
 trade_lock = asyncio.Lock()
@@ -145,7 +173,7 @@ def save_trades():
             json.dump(serializable_ema, f, ensure_ascii=False, indent=2)
         os.replace(temp_file_ema, TRIPLE_EMA_FILE)
     except Exception as e:
-        print(f"⚠️ Trade kayıt hatası: {e}")
+        logger.error(f"Trade kayıt hatası: {e}")
 
 def load_trades():
     global active_trades, active_triple_ema_trades
@@ -161,9 +189,9 @@ def load_trades():
                     if "last_checked_bar" in v and isinstance(v["last_checked_bar"], str):
                         v["last_checked_bar"] = datetime.fromisoformat(v["last_checked_bar"])
                     active_trades[k] = v
-            print(f"✅ {len(active_trades)} geçerli aktif ATR işlemi yüklendi.")
+            logger.info(f"✅ {len(active_trades)} geçerli aktif ATR işlemi yüklendi.")
         except Exception as e:
-            print(f"⚠️ Trade yükleme hatası: {e}")
+            logger.error(f"Trade yükleme hatası: {e}")
             
     if os.path.exists(TRIPLE_EMA_FILE):
         try:
@@ -173,9 +201,9 @@ def load_trades():
                     if "entry_time" in v and isinstance(v["entry_time"], str):
                         v["entry_time"] = datetime.fromisoformat(v["entry_time"])
                     active_triple_ema_trades[k] = v
-            print(f"✅ {len(active_triple_ema_trades)} aktif Üçlü EMA işlemi yüklendi.")
+            logger.info(f"✅ {len(active_triple_ema_trades)} aktif Üçlü EMA işlemi yüklendi.")
         except Exception as e:
-            print(f"⚠️ Üçlü EMA yükleme hatası: {e}")
+            logger.error(f"Üçlü EMA yükleme hatası: {e}")
 
 # ==========================================
 # YARDIMCI FONKSİYONLAR
@@ -383,15 +411,17 @@ def fetch_ohlc(symbol, interval, limit=500):
                     return df.iloc[:-1]
                 return df
         except Exception as e:
-            print(f"⚠️ Veri çekme hatası ({symbol} {interval}): {e}")
+            logger.error(f"Veri çekme hatası ({symbol} {interval}): {e}")
             time_module.sleep(1)
     return None
 
 async def fetch_ohlc_async(symbol, interval, limit=500):
-    if interval == "5m":
+    # YENİ: 5m ve 15m için önbellek kontrolü
+    if interval in ["5m", "15m"]:
+        cache = CACHE_5M if interval == "5m" else CACHE_15M
         cache_key = f"{symbol}_{interval}"
-        if cache_key in CACHE_5M:
-            cached_df, cache_time = CACHE_5M[cache_key]
+        if cache_key in cache:
+            cached_df, cache_time = cache[cache_key]
             if time_module.time() - cache_time < CACHE_TTL:
                 return cached_df.copy()
 
@@ -403,15 +433,16 @@ async def fetch_ohlc_async(symbol, interval, limit=500):
                 timeout=15.0
             )
             
-            if interval == "5m" and df is not None:
-                CACHE_5M[f"{symbol}_{interval}"] = (df, time_module.time())
+            if df is not None and interval in ["5m", "15m"]:
+                cache = CACHE_5M if interval == "5m" else CACHE_15M
+                cache[f"{symbol}_{interval}"] = (df, time_module.time())
                 
             return df
     except asyncio.TimeoutError:
-        print(f"⏳ Timeout: {symbol} {interval}")
+        logger.warning(f"Timeout: {symbol} {interval}")
         return None
     except Exception as e:
-        print(f"❌ Async Fetch Hatası ({symbol}): {e}")
+        logger.error(f"Async Fetch Hatası ({symbol}): {e}")
         return None
 
 async def fetch_all_tfs_async(symbol):
@@ -560,6 +591,80 @@ async def process_signals(symbol, dfs):
     return msgs
 
 # ==========================================
+# YENİ: ATR İŞLEM TAKİBİ (Eksik Olan Hayati Fonksiyon)
+# ==========================================
+async def check_active_trades():
+    global active_trades
+    if not active_trades: return
+    
+    # Paralel kontrol için semaphore
+    sem = asyncio.Semaphore(10)
+    
+    async def check_single_trade(trade_key, trade):
+        async with sem:
+            sym = trade["symbol"]
+            direction = trade["type"]
+            tf = trade.get("tf", "15m")
+            
+            df = await fetch_ohlc_async(sym, tf, limit=100)
+            if df is None or len(df) < 2: return
+            
+            current_high = df['high'].iloc[-1]
+            current_low = df['low'].iloc[-1]
+            entry = trade["entry"]
+            sl = trade["sl"]
+            tp = trade["tp"]
+            entry_time = trade["entry_time"]
+            
+            closed = False
+            pnl_pct = 0
+            close_reason = ""
+            
+            # 1. SL / TP Kontrolü
+            if direction == "LONG":
+                if current_low <= sl:
+                    pnl_pct = ((sl - entry) / entry) * 100
+                    close_reason = f"🛑 <b>ATR STOP - {sym} [{tf.upper()}]</b>\nFiyat Stop seviyesine ({sl:,.2f}) değdi.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"
+                    closed = True
+                elif current_high >= tp:
+                    pnl_pct = ((tp - entry) / entry) * 100
+                    close_reason = f"🎯 <b>ATR TP - {sym} [{tf.upper()}]</b>\nFiyat Hedef seviyesine ({tp:,.2f}) ulaştı.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"
+                    closed = True
+            else:
+                if current_high >= sl:
+                    pnl_pct = ((entry - sl) / entry) * 100
+                    close_reason = f"🛑 <b>ATR STOP - {sym} [{tf.upper()}]</b>\nFiyat Stop seviyesine ({sl:,.2f}) değdi.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"
+                    closed = True
+                elif current_low <= tp:
+                    pnl_pct = ((entry - tp) / entry) * 100
+                    close_reason = f"🎯 <b>ATR TP - {sym} [{tf.upper()}]</b>\nFiyat Hedef seviyesine ({tp:,.2f}) ulaştı.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"
+                    closed = True
+                    
+            # 2. Zaman Aşımı Kontrolü (10 Seans Saati)
+            if not closed:
+                now = datetime.now(TIMEZONE)
+                hours_passed = get_effective_market_hours(entry_time, now)
+                if hours_passed >= TIMEOUT_HOURS:
+                    if direction == "LONG":
+                        pnl_pct = ((df['close'].iloc[-1] - entry) / entry) * 100
+                    else:
+                        pnl_pct = ((entry - df['close'].iloc[-1]) / entry) * 100
+                    close_reason = f"⏰ <b>ATR ZAMAN AŞIMI - {sym} [{tf.upper()}]</b>\n{TIMEOUT_HOURS} seans saati doldu.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"
+                    closed = True
+                    
+            if closed:
+                for cid in CHAT_IDS:
+                    try: await bot_app.bot.send_message(chat_id=cid, text=close_reason, parse_mode="HTML")
+                    except Exception as e: logger.error(f"İşlem kapatma mesaj hatası: {e}")
+                if trade_key in active_trades:
+                    del active_trades[trade_key]
+                save_trades()
+
+    # Tüm işlemleri paralel kontrol et
+    tasks = [check_single_trade(k, v) for k, v in list(active_trades.items())]
+    await asyncio.gather(*tasks)
+
+# ==========================================
 # ÜÇLÜ EMA + 15M SUPERTREND GİRİŞ/STOP SİSTEMİ
 # ==========================================
 async def check_triple_ema():
@@ -567,153 +672,163 @@ async def check_triple_ema():
     if not is_market_open(): return
     
     # 1. AÇIK İŞLEMLERİN KONTROLÜ (Giriş tetiklendi mi? SL/TP vuruldu mu?)
-    for sym, trade in list(active_triple_ema_trades.items()):
-        df = await fetch_ohlc_async(sym, "15m", limit=100) 
-        if df is None or len(df) < 20: continue
-        
-        current_price = df['close'].iloc[-1]
-        current_high = df['high'].iloc[-1]
-        current_low = df['low'].iloc[-1]
-        
-        entry = trade["entry"]
-        sl = trade["sl"]
-        tp = trade["tp"]
-        direction = trade["type"]
-        
-        # Giriş yapılmadıysa fiyatın giriş seviyesine değip değmediğini kontrol et
-        if not trade.get("entered", False):
-            entry_hit = False
-            if direction == "LONG" and current_low <= entry:
-                entry_hit = True
-            elif direction == "SHORT" and current_high >= entry:
-                entry_hit = True
+    sem_open = asyncio.Semaphore(10)
+    async def check_open_trade(sym, trade):
+        async with sem_open:
+            df = await fetch_ohlc_async(sym, "15m", limit=100) 
+            if df is None or len(df) < 20: return
+            
+            current_price = df['close'].iloc[-1]
+            current_high = df['high'].iloc[-1]
+            current_low = df['low'].iloc[-1]
+            
+            entry = trade["entry"]
+            sl = trade["sl"]
+            tp = trade["tp"]
+            direction = trade["type"]
+            
+            # Giriş yapılmadıysa fiyatın giriş seviyesine değip değmediğini kontrol et
+            if not trade.get("entered", False):
+                # YENİ: Pullback Timeout (10 mum = 150 dk)
+                if (datetime.now(TIMEZONE) - trade["entry_time"]).total_seconds() / 60 > 150:
+                    if sym in active_triple_ema_trades:
+                        del active_triple_ema_trades[sym]
+                    save_trades()
+                    logger.info(f"{sym} EMA sinyali iptal edildi (Pullback olmadı, 150 dk geçti).")
+                    return
                 
-            if entry_hit:
-                trade["entered"] = True
-                save_trades()
-                msg = f"✅ <b>ÜÇLÜ EMA GİRİŞ TETİKLENDİ - {sym} [15M]</b>\nFiyat Süper Trend seviyesine ({entry:,.2f}) geri çekildi. Pozisyon açıldı.\n🛑 <b>Stop:</b> {sl:,.2f}\n🎯 <b>Hedef:</b> {tp:,.2f}"
+                entry_hit = False
+                if direction == "LONG" and current_low <= entry:
+                    entry_hit = True
+                elif direction == "SHORT" and current_high >= entry:
+                    entry_hit = True
+                    
+                if entry_hit:
+                    trade["entered"] = True
+                    save_trades()
+                    msg = f"✅ <b>ÜÇLÜ EMA GİRİŞ TETİKLENDİ - {sym} [15M]</b>\nFiyat Süper Trend seviyesine ({entry:,.2f}) geri çekildi. Pozisyon açıldı.\n🛑 <b>Stop:</b> {sl:,.2f}\n🎯 <b>Hedef:</b> {tp:,.2f}"
+                    for cid in CHAT_IDS:
+                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                        except: pass
+                return # Giriş yapılmadıysa SL/TP kontrolüne geçme
+                
+            closed = False
+            pnl_pct = 0
+            
+            # Giriş yapıldıysa SL/TP kontrol et
+            if direction == "LONG":
+                if current_low <= sl:
+                    pnl_pct = ((sl - entry) / entry) * 100
+                    msg = f"🛑 <b>ÜÇLÜ EMA STOP - {sym} [15M]</b>\nFiyat Stop seviyesine ({sl:,.2f}) değdi.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"
+                    closed = True
+                elif current_high >= tp:
+                    pnl_pct = ((tp - entry) / entry) * 100
+                    msg = f"🎯 <b>ÜÇLÜ EMA TP - {sym} [15M]</b>\nFiyat Hedef seviyesine ({tp:,.2f}) ulaştı.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"
+                    closed = True
+            else:
+                if current_high >= sl:
+                    pnl_pct = ((entry - sl) / entry) * 100
+                    msg = f"🛑 <b>ÜÇLÜ EMA STOP - {sym} [15M]</b>\nFiyat Stop seviyesine ({sl:,.2f}) değdi.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"
+                    closed = True
+                elif current_low <= tp:
+                    pnl_pct = ((entry - tp) / entry) * 100
+                    msg = f"🎯 <b>ÜÇLÜ EMA TP - {sym} [15M]</b>\nFiyat Hedef seviyesine ({tp:,.2f}) ulaştı.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"
+                    closed = True
+                    
+            if closed:
                 for cid in CHAT_IDS:
                     try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                     except: pass
-            continue # Giriş yapılmadıysa SL/TP kontrolüne geçme
-            
-        closed = False
-        pnl_pct = 0
-        
-        # Giriş yapıldıysa SL/TP kontrol et
-        if direction == "LONG":
-            if current_low <= sl:
-                pnl_pct = ((sl - entry) / entry) * 100
-                msg = f"🛑 <b>ÜÇLÜ EMA STOP - {sym} [15M]</b>\nFiyat Stop seviyesine ({sl:,.2f}) değdi.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"
-                closed = True
-            elif current_high >= tp:
-                pnl_pct = ((tp - entry) / entry) * 100
-                msg = f"🎯 <b>ÜÇLÜ EMA TP - {sym} [15M]</b>\nFiyat Hedef seviyesine ({tp:,.2f}) ulaştı.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"
-                closed = True
-        else:
-            if current_high >= sl:
-                pnl_pct = ((entry - sl) / entry) * 100
-                msg = f"🛑 <b>ÜÇLÜ EMA STOP - {sym} [15M]</b>\nFiyat Stop seviyesine ({sl:,.2f}) değdi.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"
-                closed = True
-            elif current_low <= tp:
-                pnl_pct = ((entry - tp) / entry) * 100
-                msg = f"🎯 <b>ÜÇLÜ EMA TP - {sym} [15M]</b>\nFiyat Hedef seviyesine ({tp:,.2f}) ulaştı.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"
-                closed = True
-                
-        if closed:
-            for cid in CHAT_IDS:
-                try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-                except: pass
-            del active_triple_ema_trades[sym]
-            save_trades()
+                if sym in active_triple_ema_trades:
+                    del active_triple_ema_trades[sym]
+                save_trades()
+
+    if active_triple_ema_trades:
+        tasks_open = [check_open_trade(sym, trade) for sym, trade in list(active_triple_ema_trades.items())]
+        await asyncio.gather(*tasks_open)
 
     # 2. EMA KESİŞİMİ OLAN VE SUPERTREND TEYİDİ BEKLEYENLERİN KONTROLÜ
-    for sym, data in list(pending_ema_crosses.items()):
-        # Zaman aşımı (Örn: 2 saat içinde ST onayı gelmezse iptal et)
-        if (datetime.now(TIMEZONE) - data["time"]).total_seconds() / 60 > 120:
-            del pending_ema_crosses[sym]
-            continue
-            
-        df_15m = await fetch_ohlc_async(sym, "15m", limit=100)
-        if df_15m is None or len(df_15m) < 20: continue
-        
-        st_series = calculate_supertrend(df_15m, period=10, multiplier=3)
-        if len(st_series) < 2: continue
-        
-        # Kesişim zamanından sonraki mumlara bak
-        cross_time = data["time"]
-        df_after_cross = df_15m[df_15m.index >= cross_time]
-        
-        if df_after_cross.empty: continue
-        
-        flipped = False
-        st_val = None
-        
-        # SuperTrend'in kesişimden sonra bizim yönümüze dönüp dönmediğini kontrol et
-        for i in range(1, len(df_after_cross)):
-            curr_idx = df_15m.index.get_loc(df_after_cross.index[i])
-            prev_idx = curr_idx - 1
-            
-            prev_st = st_series.iloc[prev_idx]
-            curr_st = st_series.iloc[curr_idx]
-            prev_close = df_15m['close'].iloc[prev_idx]
-            curr_close = df_15m['close'].iloc[curr_idx]
-            
-            if pd.isna(prev_st) or pd.isna(curr_st): continue
+    sem_pending = asyncio.Semaphore(10)
+    async def check_pending(sym, data):
+        async with sem_pending:
+            if (datetime.now(TIMEZONE) - data["time"]).total_seconds() / 60 > 120:
+                if sym in pending_ema_crosses: del pending_ema_crosses[sym]
+                return
                 
-            prev_trend = "LONG" if prev_close > prev_st else "SHORT"
-            curr_trend = "LONG" if curr_close > curr_st else "SHORT"
+            df_15m = await fetch_ohlc_async(sym, "15m", limit=100)
+            if df_15m is None or len(df_15m) < 20: return
             
-            # Kırılım gerçekleşti mi?
-            if prev_trend != curr_trend and curr_trend == data["type"]:
-                flipped = True
-                st_val = curr_st
-                break
+            st_series = calculate_supertrend(df_15m, period=10, multiplier=3)
+            if len(st_series) < 2: return
+            
+            cross_time = data["time"]
+            df_after_cross = df_15m[df_15m.index >= cross_time]
+            if df_after_cross.empty: return
+            
+            flipped = False
+            st_val = None
+            
+            for i in range(1, len(df_after_cross)):
+                curr_idx = df_15m.index.get_loc(df_after_cross.index[i])
+                prev_idx = curr_idx - 1
                 
-        if flipped and st_val is not None:
-            direction = data["type"]
-            entry_price = st_val
-            
-            if direction == "LONG":
-                sl = entry_price * (1 - 0.015) # %1.5 Alt Stop
-                tp = entry_price * (1 + 0.03)  # %3 Kâr Al
-            else:
-                sl = entry_price * (1 + 0.015) # %1.5 Üst Stop
-                tp = entry_price * (1 - 0.03)  # %3 Kâr Al
+                prev_st = st_series.iloc[prev_idx]
+                curr_st = st_series.iloc[curr_idx]
+                prev_close = df_15m['close'].iloc[prev_idx]
+                curr_close = df_15m['close'].iloc[curr_idx]
                 
-            emoji = "📈" if direction == "LONG" else "📉"
-            msg = f"{emoji} <b>15M SUPERTREND TEYİDİ - {sym}</b> {emoji}\n"
-            msg += f"✅ 15M Süper Trend <b>{direction}</b> yönüne kırılım yaptı.\n\n"
-            msg += f"💰 <b>Olası Giriş (Süper Trend Seviyesi):</b> {entry_price:,.2f}\n"
-            msg += f"🛑 <b>Stop (Girişin %1.5'i):</b> {sl:,.2f}\n"
-            msg += f"🎯 <b>Hedef (%3):</b> {tp:,.2f}\n"
-            msg += f"\n💡 <i>Fiyat 15M Süper Trend seviyesine ({entry_price:,.2f}) geri çekildiğinde pozisyon açılacaktır.</i>"
-            
-            for cid in CHAT_IDS:
-                reply_id = data["msg_ids"].get(str(cid))
-                try:
-                    # İlk EMA kesişim mesajını alıntılayarak gönder
-                    await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
-                except:
-                    try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-                    except Exception as e: print(f"Mesaj hatası: {e}")
+                if pd.isna(prev_st) or pd.isna(curr_st): continue
                     
-            active_triple_ema_trades[sym] = {
-                "symbol": sym, 
-                "type": direction, 
-                "entry": entry_price, 
-                "sl": sl,
-                "tp": tp,
-                "entered": False,
-                "entry_time": datetime.now(TIMEZONE) # İşlem takibi için güncel zaman
-            }
-            save_trades()
-            del pending_ema_crosses[sym]
+                prev_trend = "LONG" if prev_close > prev_st else "SHORT"
+                curr_trend = "LONG" if curr_close > curr_st else "SHORT"
+                
+                if prev_trend != curr_trend and curr_trend == data["type"]:
+                    flipped = True
+                    st_val = curr_st
+                    break
+                    
+            if flipped and st_val is not None:
+                direction = data["type"]
+                entry_price = st_val
+                
+                if direction == "LONG":
+                    sl = entry_price * (1 - 0.015)
+                    tp = entry_price * (1 + 0.03)
+                else:
+                    sl = entry_price * (1 + 0.015)
+                    tp = entry_price * (1 - 0.03)
+                    
+                emoji = "📈" if direction == "LONG" else "📉"
+                msg = f"{emoji} <b>15M SUPERTREND TEYİDİ - {sym}</b> {emoji}\n"
+                msg += f"✅ 15M Süper Trend <b>{direction}</b> yönüne kırılım yaptı.\n\n"
+                msg += f"💰 <b>Olası Giriş (Süper Trend Seviyesi):</b> {entry_price:,.2f}\n"
+                msg += f"🛑 <b>Stop (Girişin %1.5'i):</b> {sl:,.2f}\n"
+                msg += f"🎯 <b>Hedef (%3):</b> {tp:,.2f}\n"
+                msg += f"\n💡 <i>Fiyat 15M Süper Trend seviyesine ({entry_price:,.2f}) geri çekildiğinde pozisyon açılacaktır.</i>"
+                
+                for cid in CHAT_IDS:
+                    reply_id = data["msg_ids"].get(str(cid))
+                    try:
+                        await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                    except:
+                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                        except Exception as e: logger.error(f"Mesaj hatası: {e}")
+                        
+                active_triple_ema_trades[sym] = {
+                    "symbol": sym, "type": direction, "entry": entry_price, "sl": sl,
+                    "tp": tp, "entered": False, "entry_time": datetime.now(TIMEZONE)
+                }
+                save_trades()
+                if sym in pending_ema_crosses: del pending_ema_crosses[sym]
+
+    if pending_ema_crosses:
+        tasks_pending = [check_pending(sym, data) for sym, data in list(pending_ema_crosses.items())]
+        await asyncio.gather(*tasks_pending)
 
     # 3. YENİ SİNYAL TARAMASI (5M EMA Kesişimi)
-    sem = asyncio.Semaphore(10)
+    sem_scan = asyncio.Semaphore(10)
     async def scan_single(sym):
-        async with sem:
+        async with sem_scan:
             df_5m = await fetch_ohlc_async(sym, "5m", limit=500)
             if df_5m is None or len(df_5m) < 200: return
             
@@ -742,14 +857,9 @@ async def check_triple_ema():
                     triple_ema_states[state_key]["last_bar"] = bar_time
                     
                     existing = active_triple_ema_trades.get(sym)
-                    if existing and existing["type"] == direction:
-                        return 
+                    if existing and existing["type"] == direction: return 
+                    if sym in pending_ema_crosses: return
                     
-                    # Zaten bekleyen bir kesişim varsa tekrar uyarı atma
-                    if sym in pending_ema_crosses:
-                        return
-                    
-                    # İlk Uyarı Mesajı
                     emoji = "📈" if direction == "LONG" else "📉"
                     msg = f"🔔 <b>ÜÇLÜ EMA KESİŞİM UYARISI - {sym} [5M]</b> {emoji}\n"
                     msg += f"🚨 <b>Yön:</b> {direction}\n"
@@ -761,17 +871,15 @@ async def check_triple_ema():
                         try:
                             sent = await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                             msg_ids[str(cid)] = sent.message_id
-                        except Exception as e: print(f"Uyarı Mesaj hatası: {e}")
+                        except Exception as e: logger.error(f"Uyarı Mesaj hatası: {e}")
                             
                     if msg_ids:
                         pending_ema_crosses[sym] = {
-                            "type": direction,
-                            "msg_ids": msg_ids,
-                            "time": datetime.now(TIMEZONE)
+                            "type": direction, "msg_ids": msg_ids, "time": bar_time # YENİ: datetime.now() yerine bar_time
                         }
 
-    tasks = [scan_single(sym) for sym in SYMBOLS]
-    await asyncio.gather(*tasks)
+    tasks_scan = [scan_single(sym) for sym in SYMBOLS]
+    await asyncio.gather(*tasks_scan)
 
 # ==========================================
 # 5M TEYİT TAKİBİ
@@ -841,7 +949,7 @@ async def check_5m_confirmations():
                 try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
                 except: 
                     try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-                    except Exception as e: print(f"Teyit mesaj hatası: {e}")
+                    except Exception as e: logger.error(f"Teyit mesaj hatası: {e}")
                     
             del pending_confirmations[key]
 
@@ -851,17 +959,25 @@ async def check_5m_confirmations():
 async def generate_market_summary(session_name):
     try:
         df_30m, df_1h = await asyncio.gather(fetch_ohlc_async("XU030", "30m", limit=500), fetch_ohlc_async("XU030", "1h", limit=500))
-        if df_30m is None or df_1h is None: return
+        if df_30m is None or df_1h is None: 
+            await send_admin_alert("XU030 Özeti için veri çekilemedi!", "summary_data")
+            return
+        
         today = datetime.now(TIMEZONE).date()
         df_today = df_30m[df_30m.index.date == today]
-        if df_today.empty: return
+        if df_today.empty: 
+            await send_admin_alert("XU030 Özeti için bugünün verisi bulunamadı!", "summary_empty")
+            return
         
         if "Sabah" in session_name:
             session_df = df_today.between_time('09:55', '14:00'); time_str = "09:55 - 14:00"
         else:
             session_df = df_today.between_time('14:01', '18:05'); time_str = "14:01 - 18:05"
             
-        if session_df.empty: return
+        if session_df.empty: 
+            await send_admin_alert(f"{session_name} özeti için seans verisi boş!", "summary_session_empty")
+            return
+            
         open_price = session_df['open'].iloc[0]; close_price = session_df['close'].iloc[-1]
         high_price = session_df['high'].max(); low_price = session_df['low'].min()
         pct_change = ((close_price - open_price) / open_price) * 100
@@ -937,8 +1053,12 @@ async def generate_market_summary(session_name):
         msg = f"🏛️ <b>BIST 30 (XU030) — {session_name} Özeti</b>\n⏱ ({time_str} Arası)\n\n📈 <b>Fiyat:</b> {close_price:,.2f} (%{pct_change:+.2f})\n📍 <b>Kapanış:</b> {close_status}\n\n📊 <b>Hacim:</b> {vol_status}\n\n🌡️ <b>Piyasa Genişliği:</b> {green_count} Yeşil / {red_count} Kırmızı\n\n🧭 <b>Trend:</b> 1H RSI: {rsi_1h:.1f} | 30m EMA 50: {ema50_30m:,.2f} ({trend_status})\n\n🏭 <b>Sektör Performansı:</b>\n{sector_text}\n\n💡 <b>Yorum:</b> {yorum}"
         for cid in CHAT_IDS:
             try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-            except Exception as e: pass
-    except Exception as e: pass
+            except Exception as e: 
+                logger.error(f"Özet mesaj hatası: {e}")
+                await send_admin_alert(f"{session_name} özeti Telegram'a gönderilemedi! (Hata: {e})", "summary_send")
+    except Exception as e: 
+        logger.error(f"Özet fonksiyonu hatası: {e}")
+        await send_admin_alert(f"{session_name} özeti hesaplanırken hata oluştu! (Hata: {e})", "summary_calc")
 
 async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
@@ -981,7 +1101,7 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if df_30m is not None: msg += f"🛒 <b>Olası Satım Yeri:</b> 30m EMA 50 seviyesi olan <b>{ema50_30m:,.2f}</b>."
         await update.message.reply_text(msg, parse_mode="HTML")
     except Exception as e:
-        print(f"⚠️ Analiz hatası: {e}")
+        logger.error(f"Analiz hatası: {e}")
         await update.message.reply_text(f"❌ Analiz hatası: {e}")
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1029,7 +1149,7 @@ async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 bot_app = Application.builder().token(BOT_TOKEN).build()
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    print(f"🚨 Telegram Hatası: {context.error}")
+    logger.error(f"🚨 Telegram Hatası: {context.error}")
     if update and update.effective_chat:
         try:
             await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Beklenmeyen bir hata oluştu, lütfen tekrar deneyin.")
@@ -1054,7 +1174,7 @@ async def send_signal_message(msg_data):
             try:
                 sent = await bot_app.bot.send_message(chat_id=cid, text=text, parse_mode="HTML")
                 if "direction" in msg_data: msg_ids[str(cid)] = sent.message_id
-            except Exception as e: pass
+            except Exception as e: logger.error(f"Telegram gönderim hatası: {e}")
         if msg_type == "atr_dunyasi" and "direction" in msg_data:
             async with trade_lock:
                 if not msg_ids: return
@@ -1092,7 +1212,7 @@ async def tick(force=False):
     if is_scanning:
         return
     is_scanning = True
-    print(f"🔄 Hızlı Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
+    logger.info(f"🔄 Hızlı Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
     try:
         sem = asyncio.Semaphore(10)
         async def limited_fetch(sym):
@@ -1104,6 +1224,7 @@ async def tick(force=False):
             results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=300.0)
         except asyncio.TimeoutError:
             results = []
+            logger.warning("Tarama zaman aşımına uğradı.")
             
         for sym, dfs in zip(SYMBOLS, results):
             try:
@@ -1112,18 +1233,18 @@ async def tick(force=False):
                 for msg_data in msgs:
                     await send_signal_message(msg_data)
             except Exception as e: 
-                pass 
+                logger.error(f"Sinyal işleme hatası ({sym}): {e}")
     finally:
         is_scanning = False
 
 async def tracker_tick():
     if not is_market_open(): return
     try: await check_active_trades()
-    except Exception as e: pass
+    except Exception as e: logger.error(f"check_active_trades hatası: {e}")
     try: await check_5m_confirmations()
-    except Exception as e: pass
+    except Exception as e: logger.error(f"check_5m_confirmations hatası: {e}")
     try: await check_triple_ema()
-    except Exception as e: pass
+    except Exception as e: logger.error(f"check_triple_ema hatası: {e}")
 
 async def market_open_scan():
     if not is_market_open(): return
@@ -1143,7 +1264,8 @@ async def clear_daily_state():
         pending_confirmations.clear()
         pending_trades.clear()
         CACHE_5M.clear()
-        pending_ema_crosses.clear() # YENİ EKLENDİ
+        CACHE_15M.clear() # YENİ
+        pending_ema_crosses.clear()
 
 async def task_morning_summary(): 
     await generate_market_summary("Sabah")
@@ -1177,11 +1299,13 @@ async def main():
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour=18, minute=10, timezone=TIMEZONE), kwargs={'force': True})
     
     sched.add_job(clear_daily_state, CronTrigger(day_of_week="mon-fri", hour=18, minute=30, timezone=TIMEZONE))
+    
+    # Özet saatleri değişmedi (14:15 ve 18:15)
     sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=15, timezone=TIMEZONE))
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
     
     sched.start()
-    print("✅ Bot çalışıyor. Çakışma koruması aktif. Loglar açık.")
+    logger.info("✅ Bot çalışıyor. Çakışma koruması aktif. Loglar açık.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
