@@ -122,6 +122,8 @@ pending_confirmations = {}
 triple_ema_states = {} 
 active_triple_ema_trades = {} 
 pending_ema_crosses = {} 
+active_gap_hunter_trades = {} # YENİ
+gap_hunter_states = {} # YENİ
 is_scanning = False
 background_tasks = set()
 
@@ -139,15 +141,11 @@ GAP_HUNTER_FILE = os.path.join(DATA_DIR, "active_gap_hunter.json") # YENİ
 EXECUTOR = ThreadPoolExecutor(max_workers=20)
 FETCH_SEM = asyncio.Semaphore(16)
 
-# YENİ: Gap Avcısı Durum Sözlüğü
-active_gap_hunter_trades = {}
-
 # ==========================================
 # ATOMİK KAYIT VE YÜKLEME
 # ==========================================
 def save_trades():
     try:
-        # ATR Trades
         serializable_trades = {}
         for k, v in active_trades.items():
             trade_copy = v.copy()
@@ -158,7 +156,6 @@ def save_trades():
             json.dump(serializable_trades, f, ensure_ascii=False, indent=2)
         os.replace(TRADES_FILE + ".tmp", TRADES_FILE)
             
-        # EMA Trades
         serializable_ema = {}
         for k, v in active_triple_ema_trades.items():
             trade_copy = v.copy()
@@ -169,7 +166,6 @@ def save_trades():
             json.dump(serializable_ema, f, ensure_ascii=False, indent=2)
         os.replace(TRIPLE_EMA_FILE + ".tmp", TRIPLE_EMA_FILE)
 
-        # Gap Hunter Trades
         serializable_gap = {}
         for k, v in active_gap_hunter_trades.items():
             trade_copy = v.copy()
@@ -184,7 +180,6 @@ def save_trades():
 
 def load_trades():
     global active_trades, active_triple_ema_trades, active_gap_hunter_trades
-    # ATR Yükle
     if os.path.exists(TRADES_FILE):
         try:
             with open(TRADES_FILE, "r", encoding="utf-8") as f:
@@ -196,7 +191,6 @@ def load_trades():
             logger.info(f"✅ {len(active_trades)} geçerli aktif ATR işlemi yüklendi.")
         except Exception as e: logger.error(f"Trade yükleme hatası: {e}")
             
-    # EMA Yükle
     if os.path.exists(TRIPLE_EMA_FILE):
         try:
             with open(TRIPLE_EMA_FILE, "r", encoding="utf-8") as f:
@@ -208,7 +202,6 @@ def load_trades():
             logger.info(f"✅ {len(active_triple_ema_trades)} aktif Üçlü EMA işlemi yüklendi.")
         except Exception as e: logger.error(f"Üçlü EMA yükleme hatası: {e}")
 
-    # Gap Hunter Yükle
     if os.path.exists(GAP_HUNTER_FILE):
         try:
             with open(GAP_HUNTER_FILE, "r", encoding="utf-8") as f:
@@ -234,7 +227,6 @@ def is_market_open(now=None):
     if is_arife(now): return dt_time(9, 55) <= now.time() <= dt_time(13, 0)
     return dt_time(9, 55) <= now.time() <= dt_time(18, 10)
 
-# YENİ: Gap Avcısı Zaman Kontrolü (16:00 - 17:40)
 def is_gap_hunter_time(now=None):
     now = now or datetime.now(TIMEZONE)
     if now.weekday() > 4 or now.date() in TR_HOLIDAYS: return False
@@ -245,8 +237,7 @@ def get_effective_market_hours(entry_time, now_time):
     if now_time <= entry_time: return 0.0
     total_hours = 0.0
     current = entry_time
-    market_open = dt_time(10, 0)
-    market_close = dt_time(18, 0)
+    market_open = dt_time(10, 0); market_close = dt_time(18, 0)
     while current.date() <= now_time.date():
         if current.weekday() > 4 or current.date() in TR_HOLIDAYS:
             current = TIMEZONE.localize(datetime.combine(current.date() + timedelta(days=1), market_open))
@@ -255,10 +246,8 @@ def get_effective_market_hours(entry_time, now_time):
         day_open = TIMEZONE.localize(datetime.combine(current.date(), market_open))
         day_close_tz = TIMEZONE.localize(datetime.combine(current.date(), day_close))
         if now_time < day_open: break
-        start_of_period = max(current, day_open)
-        end_of_period = min(now_time, day_close_tz)
-        if end_of_period > start_of_period:
-            total_hours += (end_of_period - start_of_period).total_seconds() / 3600
+        start_of_period = max(current, day_open); end_of_period = min(now_time, day_close_tz)
+        if end_of_period > start_of_period: total_hours += (end_of_period - start_of_period).total_seconds() / 3600
         current = TIMEZONE.localize(datetime.combine(current.date() + timedelta(days=1), market_open))
     return total_hours
 
@@ -273,8 +262,7 @@ def _get_earnings_sync(symbol):
         tarih_str = rapor_satirlari.iloc[0]['EndDate']
         earnings_date = datetime.strptime(tarih_str, "%d.%m.%Y").date()
         days_left = (earnings_date - today).days
-        if 0 <= days_left <= 5:
-            return f"\n\n📅 <b>Bilanço Uyarısı:</b> Bilançoya {days_left} gün kaldı! (Dikkatli olun)"
+        if 0 <= days_left <= 5: return f"\n\n📅 <b>Bilanço Uyarısı:</b> Bilançoya {days_left} gün kaldı! (Dikkatli olun)"
     except Exception as e: pass
     return ""
 
@@ -298,11 +286,9 @@ def _get_fibo_sync(symbol, current_price):
         if df_gecmis.empty: return ""
         onceki_gun = df_gecmis.iloc[-1]
         H, L, C = onceki_gun['high'], onceki_gun['low'], onceki_gun['close']
-        pivot = (H + L + C) / 3
-        fark = H - L
+        pivot = (H + L + C) / 3; fark = H - L
         raw_levels = []
-        ratios = [0.236, 0.382, 0.5, 0.618, 1.0, 1.272, 1.618, 2.618]
-        for r in ratios:
+        for r in [0.236, 0.382, 0.5, 0.618, 1.0, 1.272, 1.618, 2.618]:
             raw_levels.append((pivot - fark * r, str(r)))
             raw_levels.append((pivot + fark * r, str(r)))
         yakin_seviyeler = [l for l in raw_levels if abs(l[0] - current_price) / current_price < 0.05]
@@ -312,13 +298,9 @@ def _get_fibo_sync(symbol, current_price):
         if en_yakin_seviye[1] in ["0.5", "0.618"]:
             lvl_05 = min((l for l in yakin_seviyeler if l[1] == "0.5"), key=lambda x: abs(x[0] - current_price), default=None)
             lvl_0618 = min((l for l in yakin_seviyeler if l[1] == "0.618"), key=lambda x: abs(x[0] - current_price), default=None)
-            if lvl_05 and lvl_0618:
-                note += f"\n🎯 <b>0.5 Seviyesi:</b> {lvl_05[0]:,.2f}"
-                note += f"\n🎯 <b>0.618 Seviyesi:</b> {lvl_0618[0]:,.2f}"
-            else:
-                note += f"\n🎯 <b>En Yakın Seviye ({en_yakin_seviye[1]}):</b> {en_yakin_seviye[0]:,.2f}"
-        else:
-            note += f"\n🎯 <b>En Yakın Seviye ({en_yakin_seviye[1]}):</b> {en_yakin_seviye[0]:,.2f}"
+            if lvl_05 and lvl_0618: note += f"\n🎯 <b>0.5 Seviyesi:</b> {lvl_05[0]:,.2f}\n🎯 <b>0.618 Seviyesi:</b> {lvl_0618[0]:,.2f}"
+            else: note += f"\n🎯 <b>En Yakın Seviye ({en_yakin_seviye[1]}):</b> {en_yakin_seviye[0]:,.2f}"
+        else: note += f"\n🎯 <b>En Yakın Seviye ({en_yakin_seviye[1]}):</b> {en_yakin_seviye[0]:,.2f}"
         return note + "\n"
     except Exception as e: return ""
 
@@ -336,9 +318,7 @@ async def get_nearest_fibo_levels_async(symbol, current_price):
 # MATEMATİK
 # ==========================================
 def get_rsi(series, period=8):
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
+    delta = series.diff(); gain = delta.where(delta > 0, 0); loss = -delta.where(delta < 0, 0)
     avg_gain = gain.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
     avg_loss = loss.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
     rs = avg_gain / avg_loss
@@ -346,46 +326,28 @@ def get_rsi(series, period=8):
 
 def get_atr_series(df, period=10):
     if df is None or len(df) < period + 1: return pd.Series(index=df.index, dtype=float)
-    tr1 = df['high'] - df['low']
-    tr2 = (df['high'] - df['close'].shift()).abs()
-    tr3 = (df['low'] - df['close'].shift()).abs()
+    tr1 = df['high'] - df['low']; tr2 = (df['high'] - df['close'].shift()).abs(); tr3 = (df['low'] - df['close'].shift()).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     return tr.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
 
 def calculate_supertrend(df, period=10, multiplier=3):
     if df is None or len(df) < period + 1: return pd.Series(index=df.index, dtype=float)
-    hl2 = (df['high'] + df['low']) / 2
-    atr = get_atr_series(df, period)
-    upperband = hl2 + (multiplier * atr)
-    lowerband = hl2 - (multiplier * atr)
-    final_upperband = upperband.copy()
-    final_lowerband = lowerband.copy()
-    supertrend = pd.Series(index=df.index, dtype=float)
-    trend = pd.Series(index=df.index, dtype=int)
+    hl2 = (df['high'] + df['low']) / 2; atr = get_atr_series(df, period)
+    upperband = hl2 + (multiplier * atr); lowerband = hl2 - (multiplier * atr)
+    final_upperband = upperband.copy(); final_lowerband = lowerband.copy()
+    supertrend = pd.Series(index=df.index, dtype=float); trend = pd.Series(index=df.index, dtype=int)
     trend.iloc[0] = 1
     for i in range(1, len(df)):
-        if pd.isna(atr.iloc[i]):
-            supertrend.iloc[i] = np.nan
-            trend.iloc[i] = 1
-            continue
-        if df['close'].iloc[i-1] > final_upperband.iloc[i-1]:
-            final_upperband.iloc[i] = upperband.iloc[i]
-        else:
-            final_upperband.iloc[i] = min(upperband.iloc[i], final_upperband.iloc[i-1])
-        if df['close'].iloc[i-1] < final_lowerband.iloc[i-1]:
-            final_lowerband.iloc[i] = lowerband.iloc[i]
-        else:
-            final_lowerband.iloc[i] = max(lowerband.iloc[i], final_lowerband.iloc[i-1])
-        if df['close'].iloc[i] > final_upperband.iloc[i-1]:
-            trend.iloc[i] = 1
-        elif df['close'].iloc[i] < final_lowerband.iloc[i-1]:
-            trend.iloc[i] = -1
-        else:
-            trend.iloc[i] = trend.iloc[i-1]
-        if trend.iloc[i] == 1:
-            supertrend.iloc[i] = final_lowerband.iloc[i]
-        else:
-            supertrend.iloc[i] = final_upperband.iloc[i]
+        if pd.isna(atr.iloc[i]): supertrend.iloc[i] = np.nan; trend.iloc[i] = 1; continue
+        if df['close'].iloc[i-1] > final_upperband.iloc[i-1]: final_upperband.iloc[i] = upperband.iloc[i]
+        else: final_upperband.iloc[i] = min(upperband.iloc[i], final_upperband.iloc[i-1])
+        if df['close'].iloc[i-1] < final_lowerband.iloc[i-1]: final_lowerband.iloc[i] = lowerband.iloc[i]
+        else: final_lowerband.iloc[i] = max(lowerband.iloc[i], final_lowerband.iloc[i-1])
+        if df['close'].iloc[i] > final_upperband.iloc[i-1]: trend.iloc[i] = 1
+        elif df['close'].iloc[i] < final_lowerband.iloc[i-1]: trend.iloc[i] = -1
+        else: trend.iloc[i] = trend.iloc[i-1]
+        if trend.iloc[i] == 1: supertrend.iloc[i] = final_lowerband.iloc[i]
+        else: supertrend.iloc[i] = final_upperband.iloc[i]
     return supertrend
 
 def fetch_ohlc(symbol, interval, limit=500):
@@ -394,22 +356,14 @@ def fetch_ohlc(symbol, interval, limit=500):
             df = bp.Ticker(symbol).history(period=f"{limit + 2} bar", interval=interval)
             if df is not None and not df.empty:
                 df.columns = [str(c).lower() for c in df.columns]
-                if not isinstance(df.index, pd.DatetimeIndex):
-                    df.index = pd.to_datetime(df.index)
-                if df.index.tz is None:
-                    df.index = df.index.tz_localize(TIMEZONE)
-                else:
-                    df.index = df.index.tz_convert(TIMEZONE)
-                
-                now = datetime.now(TIMEZONE)
-                last_bar_time = df.index[-1]
+                if not isinstance(df.index, pd.DatetimeIndex): df.index = pd.to_datetime(df.index)
+                if df.index.tz is None: df.index = df.index.tz_localize(TIMEZONE)
+                else: df.index = df.index.tz_convert(TIMEZONE)
+                now = datetime.now(TIMEZONE); last_bar_time = df.index[-1]
                 tf_mins = {"15m": 15, "30m": 30, "1h": 60, "4h": 240, "5m": 5, "1d": 1440}.get(interval, 0)
-                if tf_mins and now < last_bar_time + timedelta(minutes=tf_mins):
-                    return df.iloc[:-1]
+                if tf_mins and now < last_bar_time + timedelta(minutes=tf_mins): return df.iloc[:-1]
                 return df
-        except Exception as e:
-            logger.error(f"Veri çekme hatası ({symbol} {interval}): {e}")
-            time_module.sleep(1)
+        except Exception as e: logger.error(f"Veri çekme hatası ({symbol} {interval}): {e}"); time_module.sleep(1)
     return None
 
 async def fetch_ohlc_async(symbol, interval, limit=500):
@@ -418,26 +372,17 @@ async def fetch_ohlc_async(symbol, interval, limit=500):
         cache_key = f"{symbol}_{interval}"
         if cache_key in cache:
             cached_df, cache_time = cache[cache_key]
-            if time_module.time() - cache_time < CACHE_TTL:
-                return cached_df.copy()
-
+            if time_module.time() - cache_time < CACHE_TTL: return cached_df.copy()
     try:
         async with FETCH_SEM:
             loop = asyncio.get_running_loop()
-            df = await asyncio.wait_for(
-                loop.run_in_executor(EXECUTOR, fetch_ohlc, symbol, interval, limit),
-                timeout=15.0
-            )
+            df = await asyncio.wait_for(loop.run_in_executor(EXECUTOR, fetch_ohlc, symbol, interval, limit), timeout=15.0)
             if df is not None and interval in ["5m", "15m"]:
                 cache = CACHE_5M if interval == "5m" else CACHE_15M
                 cache[f"{symbol}_{interval}"] = (df, time_module.time())
             return df
-    except asyncio.TimeoutError:
-        logger.warning(f"Timeout: {symbol} {interval}")
-        return None
-    except Exception as e:
-        logger.error(f"Async Fetch Hatası ({symbol}): {e}")
-        return None
+    except asyncio.TimeoutError: logger.warning(f"Timeout: {symbol} {interval}"); return None
+    except Exception as e: logger.error(f"Async Fetch Hatası ({symbol}): {e}"); return None
 
 async def fetch_all_tfs_async(symbol):
     results = await asyncio.gather(*[fetch_ohlc_async(symbol, tf) for tf in FETCH_TFS])
@@ -448,11 +393,9 @@ async def fetch_all_tfs_async(symbol):
 # ==========================================
 def get_volume_and_trend_tag(df_current, df_4h):
     vol_ma = df_current['volume'].rolling(VOLUME_LOOKBACK).mean().shift(1)
-    current_vol = df_current['volume'].iloc[-1]
-    avg_vol = vol_ma.iloc[-1]
+    current_vol = df_current['volume'].iloc[-1]; avg_vol = vol_ma.iloc[-1]
     vol_tag = "⚠️ <b>Hacimsiz</b>"
-    if pd.notna(avg_vol) and avg_vol > 0 and current_vol >= (avg_vol * VOLUME_MULT):
-        vol_tag = "🔥 <b>Hacim Onaylı</b>"
+    if pd.notna(avg_vol) and avg_vol > 0 and current_vol >= (avg_vol * VOLUME_MULT): vol_tag = "🔥 <b>Hacim Onaylı</b>"
     trend_tag = ""
     if df_4h is not None and len(df_4h) > 200:
         ema50_4h = df_4h['close'].ewm(span=50, adjust=False).mean().iloc[-1]
@@ -469,10 +412,8 @@ async def process_signals(symbol, dfs):
         rsi = get_rsi(df["close"], period=RSI_PERIOD)
         if rsi is None or len(rsi) < 2: continue
         r_now, r_prev = float(rsi.iloc[-1]), float(rsi.iloc[-2])
-        bar_time = df.index[-1]
-        inst_key = f"inst_{symbol}_{tf}"
-        if inst_key not in instant_states:
-            instant_states[inst_key] = {"last_bar": None}
+        bar_time = df.index[-1]; inst_key = f"inst_{symbol}_{tf}"
+        if inst_key not in instant_states: instant_states[inst_key] = {"last_bar": None}
         if instant_states[inst_key]["last_bar"] != bar_time:
             delay_min = (datetime.now(TIMEZONE) - bar_time).total_seconds() / 60
             if delay_min > 180: continue
@@ -481,17 +422,13 @@ async def process_signals(symbol, dfs):
             elif r_prev >= INSTANT_LONG > r_now: direction = "LONG"
             if direction:
                 instant_states[inst_key]["last_bar"] = bar_time
-                tags = get_volume_and_trend_tag(df, df_4h)
-                earnings_note = await get_earnings_note_async(symbol)
-                current_price = float(df['close'].iloc[-1])
-                fibo_note = await get_nearest_fibo_levels_async(symbol, current_price)
+                tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol)
+                current_price = float(df['close'].iloc[-1]); fibo_note = await get_nearest_fibo_levels_async(symbol, current_price)
                 if direction == "SHORT":
                     msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI\nRSI 8: {r_prev:.1f} → {r_now:.1f} (Aşırı Alım)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 1.02:,.2f} (Tahmini +%2)"
                 else:
                     msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI\nRSI 8: {r_prev:.1f} → {r_now:.1f} (Aşırı Satım)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 0.98:,.2f} (Tahmini -%2)"
-                msg += fibo_note
-                msg += "\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>"
-                msg += earnings_note
+                msg += fibo_note + "\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>" + earnings_note
                 msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "alert_instant", "direction": direction})
 
     for tf in TIME_FRAMES_ATR:
@@ -500,11 +437,8 @@ async def process_signals(symbol, dfs):
         rsi = get_rsi(df["close"], period=RSI_PERIOD)
         if rsi is None or len(rsi) < 2: continue
         atr_series = get_atr_series(df, period=10)
-        
-        bar_time = df.index[-1]
-        atr_key = f"atr_{symbol}_{tf}"
-        if atr_key not in atr_states:
-            atr_states[atr_key] = {"state": "IDLE", "peak_rsi": 0, "peak_price": 0, "low_rsi": 100, "low_price": 0, "last_bar": None, "reject_count": 0}
+        bar_time = df.index[-1]; atr_key = f"atr_{symbol}_{tf}"
+        if atr_key not in atr_states: atr_states[atr_key] = {"state": "IDLE", "peak_rsi": 0, "peak_price": 0, "low_rsi": 100, "low_price": 0, "last_bar": None, "reject_count": 0}
         atr_data = atr_states[atr_key]
         if atr_data.get("last_bar") != bar_time:
             new_bars = df[df.index > atr_data["last_bar"]] if atr_data.get("last_bar") else df.tail(1)
@@ -512,11 +446,9 @@ async def process_signals(symbol, dfs):
                 delay_min = (datetime.now(TIMEZONE) - idx).total_seconds() / 60
                 max_delay = 60 if tf == "15m" else (90 if tf == "30m" else (180 if tf == "1h" else 300))
                 if delay_min > max_delay: continue
-
                 r_now = rsi.loc[idx] if idx in rsi.index else get_rsi(df.loc[:idx, 'close'], period=RSI_PERIOD).iloc[-1]
                 if pd.isna(r_now): continue
-                close_price = row['close']; candle_high = row['high']; candle_low = row['low']
-                state = atr_data["state"]
+                close_price = row['close']; candle_high = row['high']; candle_low = row['low']; state = atr_data["state"]
                 atr_val = atr_series.loc[idx] if idx in atr_series.index else None
                 if pd.isna(atr_val) or atr_val is None or atr_val <= 0: continue
                 
@@ -525,12 +457,9 @@ async def process_signals(symbol, dfs):
                     elif r_now < ALARM_LONG_LOWER: atr_data.update({"state": "LONG_ARMED", "low_rsi": r_now, "low_price": candle_low, "reject_count": 0})
                 elif state == "SHORT_ARMED":
                     if r_now > atr_data["peak_rsi"]: atr_data["peak_rsi"] = r_now; atr_data["peak_price"] = candle_high
-                    price_ok = (atr_data["peak_price"] - close_price) >= atr_val * ALARM_ATR_DROP
-                    candle_ok = close_price < row['open']
+                    price_ok = (atr_data["peak_price"] - close_price) >= atr_val * ALARM_ATR_DROP; candle_ok = close_price < row['open']
                     if price_ok and candle_ok:
-                        tags = get_volume_and_trend_tag(df, df_4h)
-                        earnings_note = await get_earnings_note_async(symbol)
-                        fibo_note = await get_nearest_fibo_levels_async(symbol, close_price)
+                        tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol); fibo_note = await get_nearest_fibo_levels_async(symbol, close_price)
                         entry_time = idx + timedelta(minutes=TF_MINUTES[tf])
                         sl = close_price * (1 + SL_PCT / 100); tp = close_price * (1 - TP_PCT / 100)
                         msg = f"✨ <b>ATR DÜNYASI (Short) - {symbol} [{tf.upper()}]</b> ✨\n🔴 RSI Aşırı Alım Zirvesi: {atr_data['peak_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Olası Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (+%{SL_PCT})\n🎯 <b>TP (%{TP_PCT}):</b> {tp:,.2f}\n⏳ <i>Zaman Aşımı: {TIMEOUT_HOURS} Seans Saati</i>"
@@ -541,4 +470,9 @@ async def process_signals(symbol, dfs):
                         atr_data["reject_count"] += 1
                         if atr_data["reject_count"] >= 10 or r_now < 60: atr_data.update({"state": "IDLE", "reject_count": 0})
                 elif state == "LONG_ARMED":
-                    if r_now < atr_data["low_rsi"]: atr_data["low_rsi"] = r_now;
+                    if r_now < atr_data["low_rsi"]: atr_data["low_rsi"] = r_now; atr_data["low_price"] = candle_low
+                    price_ok = (close_price - atr_data["low_price"]) >= atr_val * ALARM_ATR_DROP; candle_ok = close_price > row['open']
+                    if price_ok and candle_ok:
+                        tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol); fibo_note = await get_nearest_fibo_levels_async(symbol, close_price)
+                        entry_time = idx + timedelta(minutes=TF_MINUTES[tf])
+                        sl = close_price * (1 - SL
