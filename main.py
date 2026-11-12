@@ -441,7 +441,7 @@ async def process_signals(symbol, dfs):
             for idx, row in new_bars.iterrows():
                 delay_min = (datetime.now(TIMEZONE) - idx).total_seconds() / 60
                 
-                # DÜZELTME: Zaman filtreleri esnetildi
+                # Zaman filtreleri esnetildi
                 max_delay = 240 if tf == "15m" else (360 if tf == "30m" else (600 if tf == "1h" else 900))
                 if delay_min > max_delay: continue
                 
@@ -467,7 +467,6 @@ async def process_signals(symbol, dfs):
                         atr_data["state"] = "IDLE"
                     else:
                         atr_data["reject_count"] += 1
-                        # DÜZELTME: Reddetme sayacı 20'ye çıkarıldı
                         if atr_data["reject_count"] >= 20 or r_now < 60: atr_data.update({"state": "IDLE", "reject_count": 0})
                 elif state == "LONG_ARMED":
                     if r_now < atr_data["low_rsi"]: atr_data["low_rsi"] = r_now; atr_data["low_price"] = candle_low
@@ -482,7 +481,6 @@ async def process_signals(symbol, dfs):
                         atr_data["state"] = "IDLE"
                     else:
                         atr_data["reject_count"] += 1
-                        # DÜZELTME: Reddetme sayacı 20'ye çıkarıldı
                         if atr_data["reject_count"] >= 20 or r_now > 40: atr_data.update({"state": "IDLE", "reject_count": 0})
             
             atr_data["last_bar"] = bar_time
@@ -902,4 +900,204 @@ async def generate_market_summary(session_name):
         rsi_1h = get_rsi(df_1h['close'], RSI_PERIOD).iloc[-1]
         ema50_30m = df_30m['close'].ewm(span=50, adjust=False).mean().iloc[-1]
         trend_status = "🟢 EMA 50 Üzerinde" if close_price > ema50_30m else "🔴 EMA 50 Altında"
-        best_sector = sector_lines[0][1].split(":")[0] if sector
+        best_sector = sector_lines[0][1].split(":")[0] if sector_lines else ""
+        worst_sector = sector_lines[-1][1].split(":")[0] if sector_lines else ""
+        
+        if pct_change > 0 and vol_change > 0 and green_count > red_count: yorum = f"Alıcılar baskın. Özellikle {best_sector} sektörü öne çıkıyor. Long işlemler ön planda olabilir."
+        elif pct_change < 0 and vol_change > 0 and red_count > green_count: yorum = f"Satıcılar baskın. {best_sector} sektörü direniyor ama genel görünüm zayıf. Short işlemler düşünülebilir."
+        elif green_count > red_count and pct_change < 0: yorum = f"Endeks düşse de hisselerin çoğu yeşil. {best_sector} öne çıkıyor. Dönüş sinyali olabilir."
+        elif red_count > green_count and pct_change > 0: yorum = f"Endeks yükselse de hisselerin çoğu kırmızı. {worst_sector} zayıf. Yükseliş inandırıcı değil."
+        else: yorum = "Piyasa kararsız. Yön netleşene kadar beklemede kalmak mantıklı."
+        
+        msg = f"🏛️ <b>BIST 30 (XU030) — {session_name} Özeti</b>\n⏱ ({time_str} Arası)\n\n📈 <b>Fiyat:</b> {close_price:,.2f} (%{pct_change:+.2f})\n📍 <b>Kapanış:</b> {close_status}\n\n📊 <b>Hacim:</b> {vol_status}\n\n🌡️ <b>Piyasa Genişliği:</b> {green_count} Yeşil / {red_count} Kırmızı\n\n🧭 <b>Trend:</b> 1H RSI: {rsi_1h:.1f} | 30m EMA 50: {ema50_30m:,.2f} ({trend_status})\n\n🏭 <b>Sektör Performansı:</b>\n{sector_text}\n\n💡 <b>Yorum:</b> {yorum}"
+        for cid in CHAT_IDS:
+            try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+            except Exception as e: 
+                logger.error(f"Özet mesaj hatası: {e}"); await send_admin_alert(f"{session_name} özeti Telegram'a gönderilemedi! (Hata: {e})", "summary_send")
+    except Exception as e: 
+        logger.error(f"Özet fonksiyonu hatası: {e}"); await send_admin_alert(f"{session_name} özeti hesaplanırken hata oluştu! (Hata: {e})", "summary_calc")
+
+async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id not in CHAT_IDS: return
+    text = update.message.text.upper().replace("/", "").strip()
+    if not text.isalnum() or len(text) < 2 or len(text) > 10: return
+    if text in ["START", "HELP", "YARDIM", "TARA"]: return
+    if text not in SYMBOLS:
+        await update.message.reply_text(f"❌ '{text}' tarama listesinde bulunamadı."); return
+    await update.message.reply_text(f"🔍 {text} analiz ediliyor, lütfen bekleyin...")
+    try:
+        df_30m, df_1h, df_4h, df_1d = await asyncio.gather(fetch_ohlc_async(text, "30m", limit=500), fetch_ohlc_async(text, "1h", limit=500), fetch_ohlc_async(text, "4h", limit=500), fetch_ohlc_async(text, "1d", limit=500))
+        if df_1h is None or df_4h is None:
+            await update.message.reply_text("❌ Veri çekilemedi."); return
+        msg = f"🤖 <b>{text} — Kapsamlı Analiz</b>\n"
+        price = df_1h['close'].iloc[-1]; rsi_1h = get_rsi(df_1h['close'], RSI_PERIOD).iloc[-1]
+        trend_1h = "🟢 Yukarı" if price > df_1h['close'].ewm(span=200, adjust=False).mean().iloc[-1] else "🔴 Aşağı"
+        msg += f"\n📊 <b>1 Saatlik (1H)</b>\n• Fiyat: {price:,.2f}\n• RSI(8): {rsi_1h:.1f}\n• Trend: {trend_1h} (EMA 200)\n"
+        rsi_4h = get_rsi(df_4h['close'], RSI_PERIOD).iloc[-1]
+        trend_4h = "🟢 Yukarı" if price > df_4h['close'].ewm(span=200, adjust=False).mean().iloc[-1] else "🔴 Aşağı"
+        msg += f"\n📊 <b>4 Saatlik (4H)</b>\n• RSI(8): {rsi_4h:.1f}\n• Trend: {trend_4h} (EMA 200)\n"
+        if df_1d is not None: msg += f"\n📊 <b>Günlük (1D)</b>\n• RSI(14): {get_rsi(df_1d['close'], 14).iloc[-1]:.1f}\n"
+        if df_30m is not None:
+            ema50_30m = df_30m['close'].ewm(span=50, adjust=False).mean().iloc[-1]
+            msg += f"\n⚓ <b>30 Dakikalık (30M)</b>\n• EMA 50: {ema50_30m:,.2f}\n"
+        else: ema50_30m = 0; msg += f"\n⚓ <b>30 Dakikalık (30M)</b>\n• EMA 50: Veri Yok\n"
+        
+        fibo_note = await get_nearest_fibo_levels_async(text, price); msg += fibo_note
+        msg += f"\n💡 <b>Yorum ve Strateji:</b>\n"
+        if trend_4h == "🟢 Yukarı":
+            msg += f"Ana trend YUKARI. Alım yönlü işlemler düşünülebilir.\n"
+            if df_30m is not None: msg += f"🛒 <b>Olası Alım Yeri:</b> 30m EMA 50 seviyesi olan <b>{ema50_30m:,.2f}</b>."
+        else:
+            msg += f"Ana trend AŞAĞI. Satış yönlü işlemler düşünülebilir.\n"
+            if df_30m is not None: msg += f"🛒 <b>Olası Satım Yeri:</b> 30m EMA 50 seviyesi olan <b>{ema50_30m:,.2f}</b>."
+        await update.message.reply_text(msg, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Analiz hatası: {e}"); await update.message.reply_text(f"❌ Analiz hatası: {e}")
+
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id not in CHAT_IDS: return
+    await update.message.reply_text("✅ Sistem çalışıyor. Analiz için /ASELS gibi komut yazabilirsiniz. Manuel tarama için /tara yazın.")
+
+async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id not in CHAT_IDS: return
+    msg = "🤖 <b>Yardım Menüsü</b>\n\n• Hisse analizi için: <code>/ASELS</code> veya <code>ASELS</code>\n• Endeks analizi için: <code>/XU030</code>\n• Tüm piyasayı anında taramak için: <code>/tara</code>\n\nSistem, RSI Büyüsü, ATR Dünyası, Üçlü EMA ve Gap Avcısı (16:00-17:40) sinyallerini otomatik olarak takip eder."
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global is_scanning
+    if update.effective_chat.id not in CHAT_IDS: return
+    if is_scanning: await update.message.reply_text("⏳ Şu an arka planda bir tarama devam ediyor. Lütfen bitmesini bekleyin..."); return
+    await update.message.reply_text("🔄 Manuel tarama arka planda başlatıldı. Tüm hisseler kontrol ediliyor...")
+    async def run_manual_scan():
+        await tick(force=True)
+        for cid in CHAT_IDS:
+            try: await bot_app.bot.send_message(chat_id=cid, text="✅ Tarama tamamlandı. Eğer sinyal koşulu oluştuysa mesajınız gelmiştir.", parse_mode="HTML")
+            except: pass
+    task = asyncio.create_task(run_manual_scan()); background_tasks.add(task); task.add_done_callback(background_tasks.discard)
+
+# ==========================================
+# BOT BAŞLATMA VE HANDLER'LAR
+# ==========================================
+bot_app = Application.builder().token(BOT_TOKEN).build()
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error(f"🚨 Telegram Hatası: {context.error}")
+    if update and update.effective_chat:
+        try: await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Beklenmeyen bir hata oluştu, lütfen tekrar deneyin.")
+        except: pass
+
+bot_app.add_error_handler(error_handler)
+
+async def send_signal_message(msg_data):
+    text = msg_data["text"]; symbol = msg_data["symbol"]; tf = msg_data.get("tf"); msg_type = msg_data["type"]
+    trade_key = None
+    if msg_type == "atr_dunyasi" and "direction" in msg_data:
+        trade_key = f"{symbol}_{msg_data['direction']}_atr_{tf}"
+        async with trade_lock:
+            if trade_key in active_trades or trade_key in pending_trades: return
+            pending_trades.add(trade_key)
+    try:
+        msg_ids = {}
+        for cid in CHAT_IDS:
+            try:
+                sent = await bot_app.bot.send_message(chat_id=cid, text=text, parse_mode="HTML")
+                if "direction" in msg_data: msg_ids[str(cid)] = sent.message_id
+            except Exception as e: logger.error(f"Telegram gönderim hatası: {e}")
+        if msg_type == "atr_dunyasi" and "direction" in msg_data:
+            async with trade_lock:
+                if not msg_ids: return
+                trade_info = {"symbol": symbol, "type": msg_data["direction"], "entry": msg_data["price"], "msg_ids": msg_ids, "signal_type": msg_type, "sl": msg_data.get("sl"), "tp": msg_data.get("tp"), "tf": tf, "entry_time": msg_data["bar_time"], "last_checked_bar": msg_data["bar_time"]}
+                active_trades[trade_key] = trade_info; save_trades()
+        if msg_type == "alert_instant":
+            key = f"{symbol}_{msg_data['direction']}"
+            pending_confirmations[key] = {"symbol": symbol, "direction": msg_data['direction'], "msg_id": msg_ids, "time": datetime.now(TIMEZONE)}
+    finally:
+        if trade_key:
+            async with trade_lock: pending_trades.discard(trade_key)
+
+auth_filter = filters.User(user_id=CHAT_IDS)
+bot_app.add_handler(CommandHandler("start", cmd_start, filters=auth_filter))
+bot_app.add_handler(CommandHandler(["help", "yardim", "durum"], cmd_help, filters=auth_filter))
+bot_app.add_handler(CommandHandler("tara", cmd_tara, filters=auth_filter))
+bot_app.add_handler(MessageHandler(filters.TEXT & auth_filter, analyze_symbol))
+
+async def tick(force=False):
+    global is_scanning
+    if not force and not is_market_open(): return
+    if is_scanning: return
+    is_scanning = True
+    logger.info(f"🔄 Hızlı Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
+    try:
+        sem = asyncio.Semaphore(10)
+        async def limited_fetch(sym):
+            async with sem: return await fetch_all_tfs_async(sym)
+        tasks = [limited_fetch(sym) for sym in SYMBOLS]
+        try: results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=300.0)
+        except asyncio.TimeoutError: results = []; logger.warning("Tarama zaman aşımına uğradı.")
+            
+        for sym, dfs in zip(SYMBOLS, results):
+            try:
+                if dfs is None or not dfs: continue
+                msgs = await process_signals(sym, dfs)
+                for msg_data in msgs: await send_signal_message(msg_data)
+            except Exception as e: logger.error(f"Sinyal işleme hatası ({sym}): {e}")
+    finally: is_scanning = False
+
+async def tracker_tick():
+    if not is_market_open(): return
+    try: await check_active_trades()
+    except Exception as e: logger.error(f"check_active_trades hatası: {e}")
+    try: await check_5m_confirmations()
+    except Exception as e: logger.error(f"check_5m_confirmations hatası: {e}")
+    try: await check_triple_ema()
+    except Exception as e: logger.error(f"check_triple_ema hatası: {e}")
+    try: await check_gap_hunter() 
+    except Exception as e: logger.error(f"check_gap_hunter hatası: {e}")
+
+async def market_open_scan():
+    if not is_market_open(): return
+    for cid in CHAT_IDS:
+        try: 
+            await bot_app.bot.send_message(chat_id=cid, text="🟢 Seans açıldı, tarama ve takip başladı.", parse_mode="HTML")
+            await bot_app.bot.send_message(chat_id=cid, text="Sistem her zaman senin için çalışıyor, kazanmak istiyorsan sadece sistemle kal... MZB 😉", parse_mode="HTML")
+        except Exception as e: pass
+    await tick(force=True)
+
+async def clear_daily_state():
+    async with trade_lock:
+        instant_states.clear(); atr_states.clear(); earnings_cache.clear(); fibo_cache.clear()
+        pending_confirmations.clear(); pending_trades.clear(); CACHE_5M.clear(); CACHE_15M.clear(); pending_ema_crosses.clear()
+        gap_hunter_states.clear()
+
+async def task_morning_summary(): await generate_market_summary("Sabah")
+async def task_afternoon_summary(): await generate_market_summary("Öğleden Sonra")
+
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Alive")
+    def do_HEAD(self): self.send_response(200); self.end_headers()
+    def log_message(self, format, *args): return
+
+def run_dummy_server(): HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8080))), DummyHandler).serve_forever()
+
+async def main():
+    load_trades() 
+    threading.Thread(target=run_dummy_server, daemon=True).start()
+    await bot_app.initialize(); await bot_app.start(); await bot_app.updater.start_polling(drop_pending_updates=True)
+    
+    sched = AsyncIOScheduler(timezone=TIMEZONE, job_defaults={'coalesce': True, 'max_instances': 1, 'misfire_grace_time': 60})
+    
+    sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
+    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="1,16,31,46", timezone=TIMEZONE))
+    sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
+    sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour=17, minute=58, timezone=TIMEZONE))
+    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour=18, minute=10, timezone=TIMEZONE), kwargs={'force': True})
+    sched.add_job(clear_daily_state, CronTrigger(day_of_week="mon-fri", hour=18, minute=30, timezone=TIMEZONE))
+    sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=15, timezone=TIMEZONE))
+    sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
+    
+    sched.start()
+    logger.info("✅ Bot çalışıyor. Çakışma koruması aktif. Loglar açık.")
+    while True: await asyncio.sleep(3600)
+
+if __name__ == "__main__":
+    asyncio.run(main())
