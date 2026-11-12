@@ -407,24 +407,34 @@ async def process_signals(symbol, dfs):
         if df is None or len(df) < 30: continue
         rsi = get_rsi(df["close"], period=RSI_PERIOD)
         if rsi is None or len(rsi) < 2: continue
-        r_now, r_prev = float(rsi.iloc[-1]), float(rsi.iloc[-2])
-        bar_time = df.index[-1]; inst_key = f"inst_{symbol}_{tf}"
-        if inst_key not in instant_states: instant_states[inst_key] = {"last_bar": None}
-        if instant_states[inst_key]["last_bar"] != bar_time:
-            # GEÇİKME FİLTRESİ KALDIRILDI
-            direction = None
-            if r_prev <= INSTANT_SHORT < r_now: direction = "SHORT"
-            elif r_prev >= INSTANT_LONG > r_now: direction = "LONG"
-            if direction:
-                instant_states[inst_key]["last_bar"] = bar_time
-                tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol)
-                current_price = float(df['close'].iloc[-1]); fibo_note = await get_nearest_fibo_levels_async(symbol, current_price)
-                if direction == "SHORT":
-                    msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI\nRSI 8: {r_prev:.1f} → {r_now:.1f} (Aşırı Alım)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 1.02:,.2f} (Tahmini +%2)"
-                else:
-                    msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI\nRSI 8: {r_prev:.1f} → {r_now:.1f} (Aşırı Satım)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 0.98:,.2f} (Tahmini -%2)"
-                msg += fibo_note + "\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>" + earnings_note
-                msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "alert_instant", "direction": direction})
+        
+        # YENİ: Son 3 mumu kontrol et (Kaçan sinyalleri yakalamak için)
+        for i in range(1, 4):
+            if len(df) <= i: break
+            idx = df.index[-i]
+            r_now = float(rsi.iloc[-i])
+            r_prev = float(rsi.iloc[-i-1])
+            bar_time = idx
+            
+            inst_key = f"inst_{symbol}_{tf}"
+            if inst_key not in instant_states: instant_states[inst_key] = {"last_bar": None}
+            
+            if instant_states[inst_key]["last_bar"] != bar_time:
+                direction = None
+                if r_prev <= INSTANT_SHORT < r_now: direction = "SHORT"
+                elif r_prev >= INSTANT_LONG > r_now: direction = "LONG"
+                
+                if direction:
+                    instant_states[inst_key]["last_bar"] = bar_time
+                    tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol)
+                    current_price = float(df['close'].iloc[-i]); fibo_note = await get_nearest_fibo_levels_async(symbol, current_price)
+                    if direction == "SHORT":
+                        msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI\nRSI 8: {r_prev:.1f} → {r_now:.1f} (Aşırı Alım)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 1.02:,.2f} (Tahmini +%2)"
+                    else:
+                        msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — İLK RSI UYARISI\nRSI 8: {r_prev:.1f} → {r_now:.1f} (Aşırı Satım)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 0.98:,.2f} (Tahmini -%2)"
+                    msg += fibo_note + "\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>" + earnings_note
+                    msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "alert_instant", "direction": direction})
+                    break
 
     for tf in TIME_FRAMES_ATR:
         df = dfs.get(tf)
@@ -432,52 +442,75 @@ async def process_signals(symbol, dfs):
         rsi = get_rsi(df["close"], period=RSI_PERIOD)
         if rsi is None or len(rsi) < 2: continue
         atr_series = get_atr_series(df, period=10)
-        bar_time = df.index[-1]; atr_key = f"atr_{symbol}_{tf}"
-        if atr_key not in atr_states: atr_states[atr_key] = {"state": "IDLE", "peak_rsi": 0, "peak_price": 0, "low_rsi": 100, "low_price": 0, "last_bar": None, "reject_count": 0}
+        
+        atr_key = f"atr_{symbol}_{tf}"
+        if atr_key not in atr_states: 
+            atr_states[atr_key] = {"state": "IDLE", "peak_rsi": 0, "peak_price": 0, "low_rsi": 100, "low_price": 0, "last_bar": None, "reject_count": 0}
         atr_data = atr_states[atr_key]
-        if atr_data.get("last_bar") != bar_time:
-            new_bars = df[df.index > atr_data["last_bar"]] if atr_data.get("last_bar") else df.tail(1)
-            for idx, row in new_bars.iterrows():
-                # GEÇİKME FİLTRESİ KALDIRILDI
-                r_now = rsi.loc[idx] if idx in rsi.index else get_rsi(df.loc[:idx, 'close'], period=RSI_PERIOD).iloc[-1]
-                if pd.isna(r_now): continue
-                close_price = row['close']; candle_high = row['high']; candle_low = row['low']; state = atr_data["state"]
-                atr_val = atr_series.loc[idx] if idx in atr_series.index else None
-                if pd.isna(atr_val) or atr_val is None or atr_val <= 0: continue
-                
-                if state == "IDLE":
-                    if r_now > ALARM_SHORT_UPPER: atr_data.update({"state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": candle_high, "reject_count": 0})
-                    elif r_now < ALARM_LONG_LOWER: atr_data.update({"state": "LONG_ARMED", "low_rsi": r_now, "low_price": candle_low, "reject_count": 0})
-                elif state == "SHORT_ARMED":
-                    if r_now > atr_data["peak_rsi"]: atr_data["peak_rsi"] = r_now; atr_data["peak_price"] = candle_high
-                    price_ok = (atr_data["peak_price"] - close_price) >= atr_val * ALARM_ATR_DROP; candle_ok = close_price < row['open']
-                    if price_ok and candle_ok:
-                        tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol); fibo_note = await get_nearest_fibo_levels_async(symbol, close_price)
-                        entry_time = idx + timedelta(minutes=TF_MINUTES[tf])
-                        sl = close_price * (1 + SL_PCT / 100); tp = close_price * (1 - TP_PCT / 100)
-                        msg = f"✨ <b>ATR DÜNYASI (Short) - {symbol} [{tf.upper()}]</b> ✨\n🔴 RSI Aşırı Alım Zirvesi: {atr_data['peak_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Olası Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (+%{SL_PCT})\n🎯 <b>TP (%{TP_PCT}):</b> {tp:,.2f}\n⏳ <i>Zaman Aşımı: {TIMEOUT_HOURS} Seans Saati</i>"
-                        msg += fibo_note; msg += earnings_note
-                        msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "SHORT", "price": close_price, "sl": sl, "tp": tp, "bar_time": entry_time})
-                        atr_data["state"] = "IDLE"
-                    else:
-                        atr_data["reject_count"] += 1
-                        if atr_data["reject_count"] >= 20 or r_now < 60: atr_data.update({"state": "IDLE", "reject_count": 0})
-                elif state == "LONG_ARMED":
-                    if r_now < atr_data["low_rsi"]: atr_data["low_rsi"] = r_now; atr_data["low_price"] = candle_low
-                    price_ok = (close_price - atr_data["low_price"]) >= atr_val * ALARM_ATR_DROP; candle_ok = close_price > row['open']
-                    if price_ok and candle_ok:
-                        tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol); fibo_note = await get_nearest_fibo_levels_async(symbol, close_price)
-                        entry_time = idx + timedelta(minutes=TF_MINUTES[tf])
-                        sl = close_price * (1 - SL_PCT / 100); tp = close_price * (1 + TP_PCT / 100)
-                        msg = f"✨ <b>ATR DÜNYASI (Long) - {symbol} [{tf.upper()}]</b> ✨\n🟢 RSI Aşırı Satım Dibi: {atr_data['low_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Olası Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{SL_PCT})\n🎯 <b>TP (%{TP_PCT}):</b> {tp:,.2f}\n⏳ <i>Zaman Aşımı: {TIMEOUT_HOURS} Seans Saati</i>"
-                        msg += fibo_note; msg += earnings_note
-                        msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "LONG", "price": close_price, "sl": sl, "tp": tp, "bar_time": entry_time})
-                        atr_data["state"] = "IDLE"
-                    else:
-                        atr_data["reject_count"] += 1
-                        if atr_data["reject_count"] >= 20 or r_now > 40: atr_data.update({"state": "IDLE", "reject_count": 0})
+        
+        # YENİ: Eğer bot geride kaldıysa son 3 mumu sırayla işle
+        # Böylece ATR durum makinesi (IDLE -> ARMED -> SIGNAL) düzgün ilerler
+        last_bar_idx = len(df) - 1
+        if atr_data.get("last_bar") is None:
+            # İlk çalıştırma veya hafıza sıfırlandıysa son mumdan başla
+            start_idx = last_bar_idx
+        else:
+            # Hafızadaki son barın indexini bul
+            try:
+                last_processed_idx = df.index.get_loc(atr_data["last_bar"])
+                start_idx = max(0, last_processed_idx + 1) # Bir sonraki mumdan başla
+                # Eğer çok geride kaldıysa (bot yeni uyandıysa), en fazla son 3 mumu işle
+                if last_bar_idx - start_idx > 3:
+                    start_idx = last_bar_idx - 3
+            except KeyError:
+                start_idx = last_bar_idx
+
+        for i in range(start_idx, len(df)):
+            idx = df.index[i]
+            row = df.iloc[i]
             
-            atr_data["last_bar"] = bar_time
+            r_now = rsi.loc[idx] if idx in rsi.index else get_rsi(df.loc[:idx, 'close'], period=RSI_PERIOD).iloc[-1]
+            if pd.isna(r_now): continue
+            
+            close_price = row['close']; candle_high = row['high']; candle_low = row['low']; state = atr_data["state"]
+            atr_val = atr_series.loc[idx] if idx in atr_series.index else None
+            if pd.isna(atr_val) or atr_val is None or atr_val <= 0: continue
+            
+            if state == "IDLE":
+                if r_now > ALARM_SHORT_UPPER: atr_data.update({"state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": candle_high, "reject_count": 0})
+                elif r_now < ALARM_LONG_LOWER: atr_data.update({"state": "LONG_ARMED", "low_rsi": r_now, "low_price": candle_low, "reject_count": 0})
+            elif state == "SHORT_ARMED":
+                if r_now > atr_data["peak_rsi"]: atr_data["peak_rsi"] = r_now; atr_data["peak_price"] = candle_high
+                price_ok = (atr_data["peak_price"] - close_price) >= atr_val * ALARM_ATR_DROP; candle_ok = close_price < row['open']
+                if price_ok and candle_ok:
+                    tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol); fibo_note = await get_nearest_fibo_levels_async(symbol, close_price)
+                    entry_time = idx + timedelta(minutes=TF_MINUTES[tf])
+                    sl = close_price * (1 + SL_PCT / 100); tp = close_price * (1 - TP_PCT / 100)
+                    msg = f"✨ <b>ATR DÜNYASI (Short) - {symbol} [{tf.upper()}]</b> ✨\n🔴 RSI Aşırı Alım Zirvesi: {atr_data['peak_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Olası Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (+%{SL_PCT})\n🎯 <b>TP (%{TP_PCT}):</b> {tp:,.2f}\n⏳ <i>Zaman Aşımı: {TIMEOUT_HOURS} Seans Saati</i>"
+                    msg += fibo_note; msg += earnings_note
+                    msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "SHORT", "price": close_price, "sl": sl, "tp": tp, "bar_time": entry_time})
+                    atr_data["state"] = "IDLE"
+                else:
+                    atr_data["reject_count"] += 1
+                    if atr_data["reject_count"] >= 20 or r_now < 60: atr_data.update({"state": "IDLE", "reject_count": 0})
+            elif state == "LONG_ARMED":
+                if r_now < atr_data["low_rsi"]: atr_data["low_rsi"] = r_now; atr_data["low_price"] = candle_low
+                price_ok = (close_price - atr_data["low_price"]) >= atr_val * ALARM_ATR_DROP; candle_ok = close_price > row['open']
+                if price_ok and candle_ok:
+                    tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol); fibo_note = await get_nearest_fibo_levels_async(symbol, close_price)
+                    entry_time = idx + timedelta(minutes=TF_MINUTES[tf])
+                    sl = close_price * (1 - SL_PCT / 100); tp = close_price * (1 + TP_PCT / 100)
+                    msg = f"✨ <b>ATR DÜNYASI (Long) - {symbol} [{tf.upper()}]</b> ✨\n🟢 RSI Aşırı Satım Dibi: {atr_data['low_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Olası Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{SL_PCT})\n🎯 <b>TP (%{TP_PCT}):</b> {tp:,.2f}\n⏳ <i>Zaman Aşımı: {TIMEOUT_HOURS} Seans Saati</i>"
+                    msg += fibo_note; msg += earnings_note
+                    msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "LONG", "price": close_price, "sl": sl, "tp": tp, "bar_time": entry_time})
+                    atr_data["state"] = "IDLE"
+                else:
+                    atr_data["reject_count"] += 1
+                    if atr_data["reject_count"] >= 20 or r_now > 40: atr_data.update({"state": "IDLE", "reject_count": 0})
+        
+        # Döngü bittiğinde son işlenen barı kaydet
+        atr_data["last_bar"] = df.index[-1]
+
     return msgs
 
 # ==========================================
