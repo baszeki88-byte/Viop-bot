@@ -94,12 +94,19 @@ SECTORS = {
     "🏘️ GYO": ["EKGYO"],
 }
 
+# ==========================================
+# SİNYAL PARAMETRELERİ (GÜNCEL)
+# ==========================================
 RSI_PERIOD = 8
-# RSI DEĞERLERİ ESKİ HALİNE DÖNDÜRÜLDÜ
-INSTANT_SHORT = 87.5     
-INSTANT_LONG = 13        
-ALARM_SHORT_UPPER = 75   
-ALARM_LONG_LOWER = 15    
+
+# 1. RSI BÜYÜSÜ AYARLARI
+INSTANT_SHORT = 86       # RSI 86'yı geçerse SHORT
+INSTANT_LONG = 15        # RSI 15'in altına inerse LONG
+
+# 2. ATR DÜNYASI AYARLARI
+ALARM_SHORT_UPPER = 82   # RSI 82'yi geçerse SHORT Silahlan
+ALARM_LONG_LOWER = 22    # RSI 22'nin altına inerse LONG Silahlan
+ALARM_ATR_DROP = 1.0     # ATR 1.0 katı dönüş
 
 TIME_FRAMES_RSI = ["1h"]            
 TIME_FRAMES_ATR = ["15m", "30m", "1h", "4h"] 
@@ -385,27 +392,12 @@ async def fetch_all_tfs_async(symbol):
     return dict(zip(FETCH_TFS, results))
 
 # ==========================================
-# SİNYAL MOTORLARI (RSI VE ATR)
+# SİNYAL MOTORU 1: RSI BÜYÜSÜ (ATR'den Tamamen Bağımsız)
 # ==========================================
-def get_volume_and_trend_tag(df_current, df_4h):
-    vol_ma = df_current['volume'].rolling(VOLUME_LOOKBACK).mean().shift(1)
-    current_vol = df_current['volume'].iloc[-1]; avg_vol = vol_ma.iloc[-1]
-    vol_tag = "⚠️ <b>Hacimsiz</b>"
-    if pd.notna(avg_vol) and avg_vol > 0 and current_vol >= (avg_vol * VOLUME_MULT): vol_tag = "🔥 <b>Hacim Onaylı</b>"
-    trend_tag = ""
-    if df_4h is not None and len(df_4h) > 200:
-        ema50_4h = df_4h['close'].ewm(span=50, adjust=False).mean().iloc[-1]
-        ema200_4h = df_4h['close'].ewm(span=200, adjust=False).mean().iloc[-1]
-        trend_tag = "📈 <b>4H Trend: Yukarı</b>" if ema50_4h > ema200_4h else "📉 <b>4H Trend: Aşağı</b>"
-    return f"{vol_tag} | {trend_tag}"
-
-async def process_signals(symbol, dfs):
+async def process_rsi_signals(symbol, dfs):
     msgs = []
     df_4h = dfs.get("4h")
     
-    # ==========================================
-    # 1. RSI BÜYÜSÜ (Sadece RSI'a Bak, ATR'ye Karışma)
-    # ==========================================
     for tf in TIME_FRAMES_RSI:
         df = dfs.get(tf)
         if df is None or len(df) < 30: continue
@@ -417,6 +409,7 @@ async def process_signals(symbol, dfs):
         inst_key = f"inst_{symbol}_{tf}"
         if inst_key not in instant_states: instant_states[inst_key] = {"last_bar": None}
         
+        # Spam koruması: Aynı mumda sadece 1 kez uyarı at
         if instant_states[inst_key]["last_bar"] != bar_time:
             direction = None
             if r_now >= INSTANT_SHORT: direction = "SHORT"
@@ -427,15 +420,20 @@ async def process_signals(symbol, dfs):
                 tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol)
                 current_price = float(df['close'].iloc[-1]); fibo_note = await get_nearest_fibo_levels_async(symbol, current_price)
                 if direction == "SHORT":
-                    msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — AŞIRI ALIM BÖLGESİ\nRSI 8: {r_now:.1f} (87.5 Üzeri)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 1.02:,.2f} (Tahmini +%2)"
+                    msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — AŞIRI ALIM BÖLGESİ\nRSI 8: {r_now:.1f} (86 Üzeri)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 1.02:,.2f} (Tahmini +%2)"
                 else:
-                    msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — AŞIRI SATIM BÖLGESİ\nRSI 8: {r_now:.1f} (13 Altı)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 0.98:,.2f} (Tahmini -%2)"
+                    msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — AŞIRI SATIM BÖLGESİ\nRSI 8: {r_now:.1f} (15 Altı)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 0.98:,.2f} (Tahmini -%2)"
                 msg += fibo_note + "\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>" + earnings_note
                 msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "alert_instant", "direction": direction})
+    return msgs
 
-    # ==========================================
-    # 2. ATR DÜNYASI (Sadece ATR İşini Yapsın)
-    # ==========================================
+# ==========================================
+# SİNYAL MOTORU 2: ATR DÜNYASI (RSI Büyüsü'nden Bağımsız)
+# ==========================================
+async def process_atr_signals(symbol, dfs):
+    msgs = []
+    df_4h = dfs.get("4h")
+    
     for tf in TIME_FRAMES_ATR:
         df = dfs.get(tf)
         if df is None or len(df) < 30: continue
@@ -1065,8 +1063,12 @@ async def tick(force=False):
         for sym, dfs in zip(SYMBOLS, results):
             try:
                 if dfs is None or not dfs: continue
-                msgs = await process_signals(sym, dfs)
-                for msg_data in msgs: await send_signal_message(msg_data)
+                # 1. RSI Sinyalleri
+                rsi_msgs = await process_rsi_signals(sym, dfs)
+                for msg_data in rsi_msgs: await send_signal_message(msg_data)
+                # 2. ATR Sinyalleri
+                atr_msgs = await process_atr_signals(sym, dfs)
+                for msg_data in atr_msgs: await send_signal_message(msg_data)
             except Exception as e: logger.error(f"Sinyal işleme hatası ({sym}): {e}")
     finally: is_scanning = False
 
