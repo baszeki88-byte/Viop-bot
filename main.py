@@ -95,13 +95,13 @@ SECTORS = {
 }
 
 # ==========================================
-# SİNYAL PARAMETRELERİ
+# SİNYAL PARAMETRELERİ (SENİN SON AYARLARIN)
 # ==========================================
 RSI_PERIOD = 8
 
 # 1. RSI BÜYÜSÜ AYARLARI
-INSTANT_SHORT = 86.5       # RSI 86.5'i geçerse SHORT
-INSTANT_LONG = 13.5        # RSI 13.5'nin altına inerse LONG
+INSTANT_SHORT = 75       # RSI 75'i geçerse SHORT
+INSTANT_LONG = 20        # RSI 20'nin altına inerse LONG
 
 # 2. ATR DÜNYASI AYARLARI
 ALARM_SHORT_UPPER = 82   # RSI 82'yi geçerse SHORT Silahlan
@@ -416,6 +416,8 @@ async def process_rsi_signals(symbol, dfs):
         if rsi is None or len(rsi) < 2: continue
         
         r_now = float(rsi.iloc[-1])
+        bar_time = df.index[-1]
+        gecikme_saniye = (datetime.now(TIMEZONE) - bar_time).total_seconds()
         
         direction = None
         if r_now >= INSTANT_SHORT: direction = "SHORT"
@@ -429,6 +431,7 @@ async def process_rsi_signals(symbol, dfs):
             else:
                 msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — AŞIRI SATIM BÖLGESİ\nRSI 8: {r_now:.1f} (20 Altı)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 0.98:,.2f} (Tahmini -%2)"
             msg += fibo_note + "\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>" + earnings_note
+            msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {int(gecikme_saniye)} saniye" 
             msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "alert_instant", "direction": direction})
     return msgs
 
@@ -471,11 +474,13 @@ async def process_atr_signals(symbol, dfs):
                 if r_now > atr_data["peak_rsi"]: atr_data["peak_rsi"] = r_now; atr_data["peak_price"] = candle_high
                 price_ok = (atr_data["peak_price"] - close_price) >= atr_val * ALARM_ATR_DROP; candle_ok = close_price < row['open']
                 if price_ok and candle_ok:
+                    gecikme_saniye = (datetime.now(TIMEZONE) - idx).total_seconds()
                     tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol); fibo_note = await get_nearest_fibo_levels_async(symbol, close_price)
                     entry_time = idx + timedelta(minutes=TF_MINUTES[tf])
                     sl = close_price * (1 + SL_PCT / 100); tp = close_price * (1 - TP_PCT / 100)
                     msg = f"✨ <b>ATR DÜNYASI (Short) - {symbol} [{tf.upper()}]</b> ✨\n🔴 RSI Aşırı Alım Zirvesi: {atr_data['peak_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Olası Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (+%{SL_PCT})\n🎯 <b>TP (%{TP_PCT}):</b> {tp:,.2f}\n⏳ <i>Zaman Aşımı: {TIMEOUT_HOURS} Seans Saati</i>"
                     msg += fibo_note; msg += earnings_note
+                    msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {int(gecikme_saniye)} saniye" 
                     msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "SHORT", "price": close_price, "sl": sl, "tp": tp, "bar_time": entry_time})
                     atr_data["state"] = "IDLE"
                     break 
@@ -486,11 +491,13 @@ async def process_atr_signals(symbol, dfs):
                 if r_now < atr_data["low_rsi"]: atr_data["low_rsi"] = r_now; atr_data["low_price"] = candle_low
                 price_ok = (close_price - atr_data["low_price"]) >= atr_val * ALARM_ATR_DROP; candle_ok = close_price > row['open']
                 if price_ok and candle_ok:
+                    gecikme_saniye = (datetime.now(TIMEZONE) - idx).total_seconds()
                     tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol); fibo_note = await get_nearest_fibo_levels_async(symbol, close_price)
                     entry_time = idx + timedelta(minutes=TF_MINUTES[tf])
                     sl = close_price * (1 - SL_PCT / 100); tp = close_price * (1 + TP_PCT / 100)
                     msg = f"✨ <b>ATR DÜNYASI (Long) - {symbol} [{tf.upper()}]</b> ✨\n🟢 RSI Aşırı Satım Dibi: {atr_data['low_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Olası Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{SL_PCT})\n🎯 <b>TP (%{TP_PCT}):</b> {tp:,.2f}\n⏳ <i>Zaman Aşımı: {TIMEOUT_HOURS} Seans Saati</i>"
                     msg += fibo_note; msg += earnings_note
+                    msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {int(gecikme_saniye)} saniye" 
                     msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "LONG", "price": close_price, "sl": sl, "tp": tp, "bar_time": entry_time})
                     atr_data["state"] = "IDLE"
                     break
@@ -1115,7 +1122,8 @@ async def main():
     sched = AsyncIOScheduler(timezone=TIMEZONE, job_defaults={'coalesce': True, 'max_instances': 1, 'misfire_grace_time': 60})
     
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
-    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="1,16,31,46", timezone=TIMEZONE))
+    # DÜZELTME: Tarama sıklığı her 5 dakikaya çekildi.
+    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour=17, minute=58, timezone=TIMEZONE))
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour=18, minute=10, timezone=TIMEZONE), kwargs={'force': True})
