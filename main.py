@@ -100,8 +100,8 @@ SECTORS = {
 RSI_PERIOD = 8
 
 # 1. RSI BÜYÜSÜ AYARLARI
-INSTANT_SHORT = 75       # RSI 75'i geçerse SHORT
-INSTANT_LONG = 20        # RSI 20'nin altına inerse LONG
+INSTANT_SHORT = 86.5       # RSI 86.5'i geçerse SHORT
+INSTANT_LONG = 13.5        # RSI 13.5'nin altına inerse LONG
 
 # 2. ATR DÜNYASI AYARLARI
 ALARM_SHORT_UPPER = 82   # RSI 82'yi geçerse SHORT Silahlan
