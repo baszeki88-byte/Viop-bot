@@ -95,13 +95,13 @@ SECTORS = {
 }
 
 # ==========================================
-# SİNYAL PARAMETRELERİ (GÜNCEL)
+# SİNYAL PARAMETRELERİ
 # ==========================================
 RSI_PERIOD = 8
 
 # 1. RSI BÜYÜSÜ AYARLARI
-INSTANT_SHORT = 75      # RSI 75'yı geçerse SHORT
-INSTANT_LONG = 20        # RSI 20'in altına inerse LONG
+INSTANT_SHORT = 75       # RSI 75'i geçerse SHORT
+INSTANT_LONG = 20        # RSI 20'nin altına inerse LONG
 
 # 2. ATR DÜNYASI AYARLARI
 ALARM_SHORT_UPPER = 82   # RSI 82'yi geçerse SHORT Silahlan
@@ -392,12 +392,23 @@ async def fetch_all_tfs_async(symbol):
     return dict(zip(FETCH_TFS, results))
 
 # ==========================================
-# SİNYAL MOTORU 1: RSI BÜYÜSÜ (ATR'den Tamamen Bağımsız)
+# SİNYAL MOTORLARI (SPAM KORUMASIZ)
 # ==========================================
+def get_volume_and_trend_tag(df_current, df_4h):
+    vol_ma = df_current['volume'].rolling(VOLUME_LOOKBACK).mean().shift(1)
+    current_vol = df_current['volume'].iloc[-1]; avg_vol = vol_ma.iloc[-1]
+    vol_tag = "⚠️ <b>Hacimsiz</b>"
+    if pd.notna(avg_vol) and avg_vol > 0 and current_vol >= (avg_vol * VOLUME_MULT): vol_tag = "🔥 <b>Hacim Onaylı</b>"
+    trend_tag = ""
+    if df_4h is not None and len(df_4h) > 200:
+        ema50_4h = df_4h['close'].ewm(span=50, adjust=False).mean().iloc[-1]
+        ema200_4h = df_4h['close'].ewm(span=200, adjust=False).mean().iloc[-1]
+        trend_tag = "📈 <b>4H Trend: Yukarı</b>" if ema50_4h > ema200_4h else "📉 <b>4H Trend: Aşağı</b>"
+    return f"{vol_tag} | {trend_tag}"
+
 async def process_rsi_signals(symbol, dfs):
     msgs = []
     df_4h = dfs.get("4h")
-    
     for tf in TIME_FRAMES_RSI:
         df = dfs.get(tf)
         if df is None or len(df) < 30: continue
@@ -405,35 +416,25 @@ async def process_rsi_signals(symbol, dfs):
         if rsi is None or len(rsi) < 2: continue
         
         r_now = float(rsi.iloc[-1])
-        bar_time = df.index[-1]
-        inst_key = f"inst_{symbol}_{tf}"
-        if inst_key not in instant_states: instant_states[inst_key] = {"last_bar": None}
         
-        # Spam koruması: Aynı mumda sadece 1 kez uyarı at
-        if instant_states[inst_key]["last_bar"] != bar_time:
-            direction = None
-            if r_now >= INSTANT_SHORT: direction = "SHORT"
-            elif r_now <= INSTANT_LONG: direction = "LONG"
-            
-            if direction:
-                instant_states[inst_key]["last_bar"] = bar_time
-                tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol)
-                current_price = float(df['close'].iloc[-1]); fibo_note = await get_nearest_fibo_levels_async(symbol, current_price)
-                if direction == "SHORT":
-                    msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — AŞIRI ALIM BÖLGESİ\nRSI 8: {r_now:.1f} (86 Üzeri)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 1.02:,.2f} (Tahmini +%2)"
-                else:
-                    msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — AŞIRI SATIM BÖLGESİ\nRSI 8: {r_now:.1f} (15 Altı)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 0.98:,.2f} (Tahmini -%2)"
-                msg += fibo_note + "\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>" + earnings_note
-                msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "alert_instant", "direction": direction})
+        direction = None
+        if r_now >= INSTANT_SHORT: direction = "SHORT"
+        elif r_now <= INSTANT_LONG: direction = "LONG"
+        
+        if direction:
+            tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol)
+            current_price = float(df['close'].iloc[-1]); fibo_note = await get_nearest_fibo_levels_async(symbol, current_price)
+            if direction == "SHORT":
+                msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — AŞIRI ALIM BÖLGESİ\nRSI 8: {r_now:.1f} (75 Üzeri)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 1.02:,.2f} (Tahmini +%2)"
+            else:
+                msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — AŞIRI SATIM BÖLGESİ\nRSI 8: {r_now:.1f} (20 Altı)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 0.98:,.2f} (Tahmini -%2)"
+            msg += fibo_note + "\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>" + earnings_note
+            msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "alert_instant", "direction": direction})
     return msgs
 
-# ==========================================
-# SİNYAL MOTORU 2: ATR DÜNYASI (RSI Büyüsü'nden Bağımsız)
-# ==========================================
 async def process_atr_signals(symbol, dfs):
     msgs = []
     df_4h = dfs.get("4h")
-    
     for tf in TIME_FRAMES_ATR:
         df = dfs.get(tf)
         if df is None or len(df) < 30: continue
@@ -446,13 +447,11 @@ async def process_atr_signals(symbol, dfs):
             atr_states[atr_key] = {"state": "IDLE", "peak_rsi": 0, "peak_price": 0, "low_rsi": 100, "low_price": 0, "last_bar": None, "reject_count": 0}
         atr_data = atr_states[atr_key]
         
-        # Aktif işlem varsa bu hissede yeni sinyal arama
         trade_key_short = f"{symbol}_SHORT_atr_{tf}"
         trade_key_long = f"{symbol}_LONG_atr_{tf}"
         if trade_key_short in active_trades or trade_key_long in active_trades:
             continue
             
-        # Her taramada son 5 mumu geriye dönük kontrol et (Kaçanları yakala)
         start_idx = max(0, len(df) - 5)
         for i in range(start_idx, len(df)):
             idx = df.index[i]
@@ -555,7 +554,7 @@ async def check_active_trades():
     await asyncio.gather(*tasks)
 
 # ==========================================
-# ÜÇLÜ EMA + 15M SUPERTREND SİSTEMİ
+# ÜÇLÜ EMA + 15M SUPERTREND SİSTEMİ (SPAM KORUMASIZ)
 # ==========================================
 async def check_triple_ema():
     global active_triple_ema_trades, pending_ema_crosses
@@ -697,7 +696,7 @@ async def check_triple_ema():
     await asyncio.gather(*tasks_scan)
 
 # ==========================================
-# GAP AVCISI (16:00 - 17:40)
+# GAP AVCISI (16:00 - 17:40) (SPAM KORUMASIZ)
 # ==========================================
 async def check_gap_hunter():
     if not is_gap_hunter_time(): return
@@ -846,7 +845,7 @@ async def check_5m_confirmations():
             del pending_confirmations[key]
 
 # ==========================================
-# BIST 30 ÖZETİ (Hata Toleransı Artırıldı)
+# BIST 30 ÖZETİ
 # ==========================================
 async def generate_market_summary(session_name):
     try:
@@ -1063,7 +1062,7 @@ async def tick(force=False):
         for sym, dfs in zip(SYMBOLS, results):
             try:
                 if dfs is None or not dfs: continue
-                # 1. RSI Sinyalleri
+                # 1. RSI Sinyalleri (Spam Korumasız)
                 rsi_msgs = await process_rsi_signals(sym, dfs)
                 for msg_data in rsi_msgs: await send_signal_message(msg_data)
                 # 2. ATR Sinyalleri
