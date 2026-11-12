@@ -95,7 +95,7 @@ SECTORS = {
 }
 
 # ==========================================
-# SİNYAL PARAMETRELERİ (SENİN SON AYARLARIN)
+# SİNYAL PARAMETRELERİ
 # ==========================================
 RSI_PERIOD = 8
 
@@ -120,11 +120,11 @@ TP_PCT = 3.0
 SL_PCT = 3.5
 TIMEOUT_HOURS = 10
 
-# YENİ: MÜKEMMEL FİBO AYARLARI
+# 3. MÜKEMMEL FİBO AYARLARI
 FIBO_LEVEL = 0.618
 FIBO_SL = 2.0
-MUK_FIBO_TRADES = {} # Sinyal spamını önlemek için
-MUK_FIBO_SETUPS = {} # Ön uyarı spamını önlemek için
+MUK_FIBO_TRADES = {} 
+MUK_FIBO_SETUPS = {} 
 
 active_trades = {}
 pending_trades = set()
@@ -328,7 +328,6 @@ async def get_nearest_fibo_levels_async(symbol, current_price):
         return note
     except asyncio.TimeoutError: return ""
 
-# MÜKEMMEL FİBO İÇİN GÜNLÜK PİVOT ÇEKİCİ
 def _get_daily_pivots_sync(symbol):
     try:
         df = bp.Ticker(symbol).history(period="5d", interval="1d")
@@ -343,7 +342,6 @@ def _get_daily_pivots_sync(symbol):
         PP = (H + L + C) / 3
         Range = H - L
         
-        # 0.618 Seviyeleri
         R_0618 = PP + (Range * 0.618)
         S_0618 = PP - (Range * 0.618)
         return {"PP": PP, "R_0618": R_0618, "S_0618": S_0618}
@@ -555,7 +553,7 @@ async def process_atr_signals(symbol, dfs):
     return msgs
 
 # ==========================================
-# YENİ: MÜKEMMEL FİBO MOTORU
+# MÜKEMMEL FİBO MOTORU
 # ==========================================
 async def check_mukemmel_fibo():
     if not is_market_open(): return
@@ -565,14 +563,12 @@ async def check_mukemmel_fibo():
     async def scan_single_fibo(sym):
         async with sem:
             try:
-                # Günlük Pivot Seviyelerini çek
                 pivots = await asyncio.to_thread(_get_daily_pivots_sync, sym)
                 if not pivots: return
                 
                 R_0618 = pivots['R_0618']
                 S_0618 = pivots['S_0618']
                 
-                # 1H ve 4H verilerini çek
                 df_1h = await fetch_ohlc_async(sym, "1h", limit=100)
                 df_4h = await fetch_ohlc_async(sym, "4h", limit=100)
                 
@@ -582,15 +578,15 @@ async def check_mukemmel_fibo():
                 rsi_4h = get_rsi(df_4h['close'], 14).iloc[-1]
                 current_price_4h = float(df_4h['close'].iloc[-1])
                 
-                # 4H RSI aşırı bölgede mi?
+                current_high_4h = float(df_4h['high'].iloc[-1])
+                current_low_4h = float(df_4h['low'].iloc[-1])
+                
                 is_4h_short_ready = rsi_4h >= 75
                 is_4h_long_ready = rsi_4h <= 25
                 
-                # 4H Sinyal Kontrolleri
                 setup_key_4h_short = f"setup_4h_{sym}_SHORT"
                 setup_key_4h_long = f"setup_4h_{sym}_LONG"
                 
-                # HAZIRLIK: RSI aşırı bölgede ama fiyat seviyeye değmediyse
                 if is_4h_short_ready and current_price_4h < R_0618 and setup_key_4h_short not in MUK_FIBO_SETUPS:
                     msg = (f"⚠️ <b>MÜKEMMEL FİBO HAZIRLIK [4H KRAL]</b> ⚠️\n"
                            f"📉 <b>{sym}</b> — RSI(14) aşırı alımda: <b>{rsi_4h:.1f}</b>\n"
@@ -609,9 +605,8 @@ async def check_mukemmel_fibo():
                     for cid in CHAT_IDS: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                     MUK_FIBO_SETUPS[setup_key_4h_long] = True
 
-                # TETİKLEME: Fiyat seviyeye değdi mi?
                 sig_key_4h_short = f"sig_4h_{sym}_SHORT"
-                if is_4h_short_ready and current_price_4h >= R_0618:
+                if is_4h_short_ready and (current_high_4h >= R_0618 or current_price_4h >= R_0618):
                     if sig_key_4h_short not in MUK_FIBO_TRADES or (now - MUK_FIBO_TRADES[sig_key_4h_short]).total_seconds() > 7200:
                         sl = current_price_4h * (1 + FIBO_SL / 100)
                         tp = current_price_4h * (1 - 3.0 / 100)
@@ -628,7 +623,7 @@ async def check_mukemmel_fibo():
                         if setup_key_4h_short in MUK_FIBO_SETUPS: del MUK_FIBO_SETUPS[setup_key_4h_short]
 
                 sig_key_4h_long = f"sig_4h_{sym}_LONG"
-                if is_4h_long_ready and current_price_4h <= S_0618:
+                if is_4h_long_ready and (current_low_4h <= S_0618 or current_price_4h <= S_0618):
                     if sig_key_4h_long not in MUK_FIBO_TRADES or (now - MUK_FIBO_TRADES[sig_key_4h_long]).total_seconds() > 7200:
                         sl = current_price_4h * (1 - FIBO_SL / 100)
                         tp = current_price_4h * (1 + 3.0 / 100)
@@ -648,14 +643,15 @@ async def check_mukemmel_fibo():
                 rsi_1h = get_rsi(df_1h['close'], 8).iloc[-1]
                 current_price_1h = float(df_1h['close'].iloc[-1])
                 
+                current_high_1h = float(df_1h['high'].iloc[-1])
+                current_low_1h = float(df_1h['low'].iloc[-1])
+                
                 is_1h_short_ready = rsi_1h >= 70
                 is_1h_long_ready = rsi_1h <= 30
                 
-                # 1H Sinyal Kontrolleri
                 setup_key_1h_short = f"setup_1h_{sym}_SHORT"
                 setup_key_1h_long = f"setup_1h_{sym}_LONG"
                 
-                # HAZIRLIK
                 if is_1h_short_ready and current_price_1h < R_0618 and setup_key_1h_short not in MUK_FIBO_SETUPS:
                     msg = (f"⚠️ <b>MÜKEMMEL FİBO HAZIRLIK [1H FIRSATÇI]</b> ⚠️\n"
                            f"📉 <b>{sym}</b> — RSI(8) aşırı alımda: <b>{rsi_1h:.1f}</b>\n"
@@ -674,9 +670,8 @@ async def check_mukemmel_fibo():
                     for cid in CHAT_IDS: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                     MUK_FIBO_SETUPS[setup_key_1h_long] = True
 
-                # TETİKLEME
                 sig_key_1h_short = f"sig_1h_{sym}_SHORT"
-                if is_1h_short_ready and current_price_1h >= R_0618:
+                if is_1h_short_ready and (current_high_1h >= R_0618 or current_price_1h >= R_0618):
                     if sig_key_1h_short not in MUK_FIBO_TRADES or (now - MUK_FIBO_TRADES[sig_key_1h_short]).total_seconds() > 7200:
                         sl = current_price_1h * (1 + FIBO_SL / 100)
                         tp = current_price_1h * (1 - 5.0 / 100)
@@ -693,7 +688,7 @@ async def check_mukemmel_fibo():
                         if setup_key_1h_short in MUK_FIBO_SETUPS: del MUK_FIBO_SETUPS[setup_key_1h_short]
 
                 sig_key_1h_long = f"sig_1h_{sym}_LONG"
-                if is_1h_long_ready and current_price_1h <= S_0618:
+                if is_1h_long_ready and (current_low_1h <= S_0618 or current_price_1h <= S_0618):
                     if sig_key_1h_long not in MUK_FIBO_TRADES or (now - MUK_FIBO_TRADES[sig_key_1h_long]).total_seconds() > 7200:
                         sl = current_price_1h * (1 - FIBO_SL / 100)
                         tp = current_price_1h * (1 + 5.0 / 100)
@@ -1354,7 +1349,6 @@ async def tracker_tick():
     except Exception as e: logger.error(f"check_triple_ema hatası: {e}")
     try: await check_gap_hunter() 
     except Exception as e: logger.error(f"check_gap_hunter hatası: {e}")
-    # YENİ: MÜKEMMEL FİBO TAKİBİ
     try: await check_mukemmel_fibo()
     except Exception as e: logger.error(f"check_mukemmel_fibo hatası: {e}")
 
