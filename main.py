@@ -98,13 +98,10 @@ SECTORS = {
 # SİNYAL PARAMETRELERİ
 # ==========================================
 RSI_PERIOD = 8
-
-# 1. RSI BÜYÜSÜ AYARLARI
 INSTANT_SHORT = 75
 INSTANT_LONG = 20
 RSI_COOLDOWN_HOURS = 3   
 
-# 2. ATR DÜNYASI AYARLARI
 ALARM_SHORT_UPPER = 82
 ALARM_LONG_LOWER = 22
 ALARM_ATR_DROP = 1.0
@@ -120,7 +117,6 @@ TP_PCT = 3.0
 SL_PCT = 3.5
 TIMEOUT_HOURS = 10
 
-# 3. MÜKEMMEL FİBO AYARLARI
 FIBO_LEVEL = 0.618
 FIBO_SL = 2.0
 MUK_FIBO_TRADES = {} 
@@ -471,7 +467,8 @@ async def process_rsi_signals(symbol, dfs):
             else:
                 msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — AŞIRI SATIM BÖLGESİ\nRSI 8: {r_now:.1f} (20 Altı)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 0.98:,.2f} (Tahmini -%2)"
             msg += fibo_note + "\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>" + earnings_note
-            msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {int(gecikme_saniye)} saniye" 
+            # Gecikme bilgisi her zaman eklenecek
+            msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {int(gecikme_saniye)} saniye ({int(gecikme_saniye/60)} dk)" 
             msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "alert_instant", "direction": direction})
     return msgs
 
@@ -481,6 +478,10 @@ async def process_atr_signals(symbol, dfs):
     for tf in TIME_FRAMES_ATR:
         df = dfs.get(tf)
         if df is None or len(df) < 30: continue
+        
+        bar_time = df.index[-1]
+        gecikme_saniye = (datetime.now(TIMEZONE) - bar_time).total_seconds()
+        
         rsi = get_rsi(df["close"], period=RSI_PERIOD)
         if rsi is None or len(rsi) < 2: continue
         atr_series = get_atr_series(df, period=10)
@@ -517,13 +518,12 @@ async def process_atr_signals(symbol, dfs):
                 if r_now > atr_data["peak_rsi"]: atr_data["peak_rsi"] = r_now; atr_data["peak_price"] = candle_high
                 price_ok = (atr_data["peak_price"] - close_price) >= atr_val * ALARM_ATR_DROP; candle_ok = close_price < row['open']
                 if price_ok and candle_ok:
-                    gecikme_saniye = (datetime.now(TIMEZONE) - idx).total_seconds()
                     tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol); fibo_note = await get_nearest_fibo_levels_async(symbol, close_price)
                     entry_time = idx + timedelta(minutes=TF_MINUTES[tf])
                     sl = close_price * (1 + SL_PCT / 100); tp = close_price * (1 - TP_PCT / 100)
                     msg = f"✨ <b>ATR DÜNYASI (Short) - {symbol} [{tf.upper()}]</b> ✨\n🔴 RSI Aşırı Alım Zirvesi: {atr_data['peak_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Olası Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (+%{SL_PCT})\n🎯 <b>TP (%{TP_PCT}):</b> {tp:,.2f}\n⏳ <i>Zaman Aşımı: {TIMEOUT_HOURS} Seans Saati</i>"
                     msg += fibo_note; msg += earnings_note
-                    msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {int(gecikme_saniye)} saniye" 
+                    msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {int(gecikme_saniye)} saniye ({int(gecikme_saniye/60)} dk)" 
                     msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "SHORT", "price": close_price, "sl": sl, "tp": tp, "bar_time": entry_time})
                     atr_data["state"] = "IDLE"
                     break 
@@ -534,13 +534,12 @@ async def process_atr_signals(symbol, dfs):
                 if r_now < atr_data["low_rsi"]: atr_data["low_rsi"] = r_now; atr_data["low_price"] = candle_low
                 price_ok = (close_price - atr_data["low_price"]) >= atr_val * ALARM_ATR_DROP; candle_ok = close_price > row['open']
                 if price_ok and candle_ok:
-                    gecikme_saniye = (datetime.now(TIMEZONE) - idx).total_seconds()
                     tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol); fibo_note = await get_nearest_fibo_levels_async(symbol, close_price)
                     entry_time = idx + timedelta(minutes=TF_MINUTES[tf])
                     sl = close_price * (1 - SL_PCT / 100); tp = close_price * (1 + TP_PCT / 100)
                     msg = f"✨ <b>ATR DÜNYASI (Long) - {symbol} [{tf.upper()}]</b> ✨\n🟢 RSI Aşırı Satım Dibi: {atr_data['low_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Olası Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{SL_PCT})\n🎯 <b>TP (%{TP_PCT}):</b> {tp:,.2f}\n⏳ <i>Zaman Aşımı: {TIMEOUT_HOURS} Seans Saati</i>"
                     msg += fibo_note; msg += earnings_note
-                    msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {int(gecikme_saniye)} saniye" 
+                    msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {int(gecikme_saniye)} saniye ({int(gecikme_saniye/60)} dk)" 
                     msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "LONG", "price": close_price, "sl": sl, "tp": tp, "bar_time": entry_time})
                     atr_data["state"] = "IDLE"
                     break
@@ -574,10 +573,13 @@ async def check_mukemmel_fibo():
                 
                 if df_1h is None or df_4h is None: return
                 
+                # GECİKME HESABI (Sadece bilgi amaçlı)
+                lag_1h_dk = int((now - df_1h.index[-1]).total_seconds() / 60)
+                lag_4h_dk = int((now - df_4h.index[-1]).total_seconds() / 60)
+                
                 # --- 4H KRAL ---
                 rsi_4h = get_rsi(df_4h['close'], 14).iloc[-1]
                 current_price_4h = float(df_4h['close'].iloc[-1])
-                
                 current_high_4h = float(df_4h['high'].iloc[-1])
                 current_low_4h = float(df_4h['low'].iloc[-1])
                 
@@ -610,6 +612,7 @@ async def check_mukemmel_fibo():
                     if sig_key_4h_short not in MUK_FIBO_TRADES or (now - MUK_FIBO_TRADES[sig_key_4h_short]).total_seconds() > 7200:
                         sl = current_price_4h * (1 + FIBO_SL / 100)
                         tp = current_price_4h * (1 - 3.0 / 100)
+                        uyari = "⚠️ (DİKKAT: Yüksek Gecikme!)" if lag_4h_dk > 60 else ""
                         msg = (f"🔴 <b>MÜKEMMEL FİBO SİNYALİ [4H KRAL]</b> 🔴\n"
                                f"📉 <b>{sym}</b> — SHORT (Tepe Avı)\n"
                                f"Fiyat 0.618 Direncine Değdi: <b>{R_0618:,.2f}</b>\n"
@@ -617,7 +620,8 @@ async def check_mukemmel_fibo():
                                f"💰 <b>Giriş:</b> {current_price_4h:,.2f}\n"
                                f"🛑 <b>Stop (SL %2):</b> {sl:,.2f}\n"
                                f"🎯 <b>Hedef (TP %3):</b> {tp:,.2f}\n"
-                               f"💡 <i>4H Kral Stratejisi - Fiyat dirençten iğne attı.</i>")
+                               f"💡 <i>4H Kral Stratejisi - Fiyat dirençten iğne attı.</i>\n"
+                               f"⏱ <b>Veri Gecikmesi:</b> {lag_4h_dk} dakika {uyari}")
                         for cid in CHAT_IDS: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                         MUK_FIBO_TRADES[sig_key_4h_short] = now
                         if setup_key_4h_short in MUK_FIBO_SETUPS: del MUK_FIBO_SETUPS[setup_key_4h_short]
@@ -627,6 +631,7 @@ async def check_mukemmel_fibo():
                     if sig_key_4h_long not in MUK_FIBO_TRADES or (now - MUK_FIBO_TRADES[sig_key_4h_long]).total_seconds() > 7200:
                         sl = current_price_4h * (1 - FIBO_SL / 100)
                         tp = current_price_4h * (1 + 3.0 / 100)
+                        uyari = "⚠️ (DİKKAT: Yüksek Gecikme!)" if lag_4h_dk > 60 else ""
                         msg = (f"🟢 <b>MÜKEMMEL FİBO SİNYALİ [4H KRAL]</b> 🟢\n"
                                f"📈 <b>{sym}</b> — LONG (Dip Avı)\n"
                                f"Fiyat 0.618 Desteğe Değdi: <b>{S_0618:,.2f}</b>\n"
@@ -634,7 +639,8 @@ async def check_mukemmel_fibo():
                                f"💰 <b>Giriş:</b> {current_price_4h:,.2f}\n"
                                f"🛑 <b>Stop (SL %2):</b> {sl:,.2f}\n"
                                f"🎯 <b>Hedef (TP %3):</b> {tp:,.2f}\n"
-                               f"💡 <i>4H Kral Stratejisi - Fiyat destekten iğne attı.</i>")
+                               f"💡 <i>4H Kral Stratejisi - Fiyat destekten iğne attı.</i>\n"
+                               f"⏱ <b>Veri Gecikmesi:</b> {lag_4h_dk} dakika {uyari}")
                         for cid in CHAT_IDS: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                         MUK_FIBO_TRADES[sig_key_4h_long] = now
                         if setup_key_4h_long in MUK_FIBO_SETUPS: del MUK_FIBO_SETUPS[setup_key_4h_long]
@@ -642,7 +648,6 @@ async def check_mukemmel_fibo():
                 # --- 1H FIRSATÇI ---
                 rsi_1h = get_rsi(df_1h['close'], 8).iloc[-1]
                 current_price_1h = float(df_1h['close'].iloc[-1])
-                
                 current_high_1h = float(df_1h['high'].iloc[-1])
                 current_low_1h = float(df_1h['low'].iloc[-1])
                 
@@ -675,6 +680,7 @@ async def check_mukemmel_fibo():
                     if sig_key_1h_short not in MUK_FIBO_TRADES or (now - MUK_FIBO_TRADES[sig_key_1h_short]).total_seconds() > 7200:
                         sl = current_price_1h * (1 + FIBO_SL / 100)
                         tp = current_price_1h * (1 - 5.0 / 100)
+                        uyari = "⚠️ (DİKKAT: Yüksek Gecikme!)" if lag_1h_dk > 30 else ""
                         msg = (f"🔴 <b>MÜKEMMEL FİBO SİNYALİ [1H FIRSATÇI]</b> 🔴\n"
                                f"📉 <b>{sym}</b> — SHORT (Tepe Avı)\n"
                                f"Fiyat 0.618 Direncine Değdi: <b>{R_0618:,.2f}</b>\n"
@@ -682,7 +688,8 @@ async def check_mukemmel_fibo():
                                f"💰 <b>Giriş:</b> {current_price_1h:,.2f}\n"
                                f"🛑 <b>Stop (SL %2):</b> {sl:,.2f}\n"
                                f"🎯 <b>Hedef (TP %5):</b> {tp:,.2f}\n"
-                               f"💡 <i>1H Fırsatçı Stratejisi - Fiyat dirençten iğne attı.</i>")
+                               f"💡 <i>1H Fırsatçı Stratejisi - Fiyat dirençten iğne attı.</i>\n"
+                               f"⏱ <b>Veri Gecikmesi:</b> {lag_1h_dk} dakika {uyari}")
                         for cid in CHAT_IDS: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                         MUK_FIBO_TRADES[sig_key_1h_short] = now
                         if setup_key_1h_short in MUK_FIBO_SETUPS: del MUK_FIBO_SETUPS[setup_key_1h_short]
@@ -692,6 +699,7 @@ async def check_mukemmel_fibo():
                     if sig_key_1h_long not in MUK_FIBO_TRADES or (now - MUK_FIBO_TRADES[sig_key_1h_long]).total_seconds() > 7200:
                         sl = current_price_1h * (1 - FIBO_SL / 100)
                         tp = current_price_1h * (1 + 5.0 / 100)
+                        uyari = "⚠️ (DİKKAT: Yüksek Gecikme!)" if lag_1h_dk > 30 else ""
                         msg = (f"🟢 <b>MÜKEMMEL FİBO SİNYALİ [1H FIRSATÇI]</b> 🟢\n"
                                f"📈 <b>{sym}</b> — LONG (Dip Avı)\n"
                                f"Fiyat 0.618 Desteğe Değdi: <b>{S_0618:,.2f}</b>\n"
@@ -699,7 +707,8 @@ async def check_mukemmel_fibo():
                                f"💰 <b>Giriş:</b> {current_price_1h:,.2f}\n"
                                f"🛑 <b>Stop (SL %2):</b> {sl:,.2f}\n"
                                f"🎯 <b>Hedef (TP %5):</b> {tp:,.2f}\n"
-                               f"💡 <i>1H Fırsatçı Stratejisi - Fiyat destekten iğne attı.</i>")
+                               f"💡 <i>1H Fırsatçı Stratejisi - Fiyat destekten iğne attı.</i>\n"
+                               f"⏱ <b>Veri Gecikmesi:</b> {lag_1h_dk} dakika {uyari}")
                         for cid in CHAT_IDS: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                         MUK_FIBO_TRADES[sig_key_1h_long] = now
                         if setup_key_1h_long in MUK_FIBO_SETUPS: del MUK_FIBO_SETUPS[setup_key_1h_long]
@@ -709,7 +718,6 @@ async def check_mukemmel_fibo():
 
     tasks = [scan_single_fibo(sym) for sym in SYMBOLS]
     await asyncio.gather(*tasks)
-
 
 # ==========================================
 # ATR İŞLEM TAKİBİ
@@ -1394,7 +1402,7 @@ async def main():
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
     
     sched.start()
-    logger.info("✅ Bot çalışıyor. Mükemmel Fibo Modülü Eklendi. Loglar açık.")
+    logger.info("✅ Bot çalışıyor. Gecikme bilgisi mesajlara eklendi, sistem bloklaması kaldırıldı. Loglar açık.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
