@@ -100,35 +100,36 @@ SECTORS = {
 RSI_PERIOD = 8
 
 # 1. RSI BÜYÜSÜ AYARLARI
-INSTANT_SHORT = 75       # RSI 75'i geçerse SHORT
-INSTANT_LONG = 20        # RSI 20'nin altına inerse LONG
+INSTANT_SHORT = 75
+INSTANT_LONG = 20
+RSI_COOLDOWN_HOURS = 3   # YENİ: Aynı yönde tekrar uyarı için beklenecek süre
 
 # 2. ATR DÜNYASI AYARLARI
-ALARM_SHORT_UPPER = 82   # RSI 82'yi geçerse SHORT Silahlan
-ALARM_LONG_LOWER = 22    # RSI 22'nin altına inerse LONG Silahlan
-ALARM_ATR_DROP = 1.0     # ATR 1.0 katı dönüş
+ALARM_SHORT_UPPER = 82
+ALARM_LONG_LOWER = 22
+ALARM_ATR_DROP = 1.0
 
-TIME_FRAMES_RSI = ["1h"]            
-TIME_FRAMES_ATR = ["15m", "30m", "1h", "4h"] 
+TIME_FRAMES_RSI = ["1h"]
+TIME_FRAMES_ATR = ["15m", "30m", "1h", "4h"]
 FETCH_TFS = ["15m", "30m", "1h", "4h"]
 TF_MINUTES = {"15m": 15, "30m": 30, "1h": 60, "4h": 240}
 
 VOLUME_LOOKBACK = 20
 VOLUME_MULT = 1.5
 TP_PCT = 3.0
-SL_PCT = 3.5 
-TIMEOUT_HOURS = 10 
+SL_PCT = 3.5
+TIMEOUT_HOURS = 10
 
 active_trades = {}
-pending_trades = set() 
-instant_states = {}       
+pending_trades = set()
+instant_states = {}
 atr_states = {}
 earnings_cache = {}
 fibo_cache = {}
-pending_confirmations = {} 
-triple_ema_states = {} 
-active_triple_ema_trades = {} 
-pending_ema_crosses = {} 
+pending_confirmations = {}
+triple_ema_states = {}
+active_triple_ema_trades = {}
+pending_ema_crosses = {}
 active_gap_hunter_trades = {}
 gap_hunter_states = {}
 is_scanning = False
@@ -136,7 +137,7 @@ background_tasks = set()
 
 CACHE_5M = {}
 CACHE_15M = {}
-CACHE_TTL = 60 
+CACHE_TTL = 60
 
 trade_lock = asyncio.Lock()
 
@@ -156,16 +157,18 @@ def save_trades():
         serializable_trades = {}
         for k, v in active_trades.items():
             trade_copy = v.copy()
-            if isinstance(trade_copy["entry_time"], datetime): trade_copy["entry_time"] = trade_copy["entry_time"].isoformat()
+            if isinstance(trade_copy.get("entry_time"), datetime): trade_copy["entry_time"] = trade_copy["entry_time"].isoformat()
+            if isinstance(trade_copy.get("entered_time"), datetime): trade_copy["entered_time"] = trade_copy["entered_time"].isoformat()
             serializable_trades[k] = trade_copy
         with open(TRADES_FILE + ".tmp", "w", encoding="utf-8") as f:
             json.dump(serializable_trades, f, ensure_ascii=False, indent=2)
         os.replace(TRADES_FILE + ".tmp", TRADES_FILE)
-            
+
         serializable_ema = {}
         for k, v in active_triple_ema_trades.items():
             trade_copy = v.copy()
-            if isinstance(trade_copy["entry_time"], datetime): trade_copy["entry_time"] = trade_copy["entry_time"].isoformat()
+            if isinstance(trade_copy.get("entry_time"), datetime): trade_copy["entry_time"] = trade_copy["entry_time"].isoformat()
+            if isinstance(trade_copy.get("entered_time"), datetime): trade_copy["entered_time"] = trade_copy["entered_time"].isoformat()
             serializable_ema[k] = trade_copy
         with open(TRIPLE_EMA_FILE + ".tmp", "w", encoding="utf-8") as f:
             json.dump(serializable_ema, f, ensure_ascii=False, indent=2)
@@ -174,7 +177,8 @@ def save_trades():
         serializable_gap = {}
         for k, v in active_gap_hunter_trades.items():
             trade_copy = v.copy()
-            if isinstance(trade_copy["entry_time"], datetime): trade_copy["entry_time"] = trade_copy["entry_time"].isoformat()
+            if isinstance(trade_copy.get("entry_time"), datetime): trade_copy["entry_time"] = trade_copy["entry_time"].isoformat()
+            if isinstance(trade_copy.get("entered_time"), datetime): trade_copy["entered_time"] = trade_copy["entered_time"].isoformat()
             serializable_gap[k] = trade_copy
         with open(GAP_HUNTER_FILE + ".tmp", "w", encoding="utf-8") as f:
             json.dump(serializable_gap, f, ensure_ascii=False, indent=2)
@@ -190,16 +194,18 @@ def load_trades():
                 loaded = json.load(f)
                 for k, v in loaded.items():
                     if "entry_time" in v and isinstance(v["entry_time"], str): v["entry_time"] = datetime.fromisoformat(v["entry_time"])
+                    if "entered_time" in v and isinstance(v["entered_time"], str): v["entered_time"] = datetime.fromisoformat(v["entered_time"])
                     active_trades[k] = v
             logger.info(f"✅ {len(active_trades)} geçerli aktif ATR işlemi yüklendi.")
         except Exception as e: logger.error(f"Trade yükleme hatası: {e}")
-            
+
     if os.path.exists(TRIPLE_EMA_FILE):
         try:
             with open(TRIPLE_EMA_FILE, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
                 for k, v in loaded.items():
                     if "entry_time" in v and isinstance(v["entry_time"], str): v["entry_time"] = datetime.fromisoformat(v["entry_time"])
+                    if "entered_time" in v and isinstance(v["entered_time"], str): v["entered_time"] = datetime.fromisoformat(v["entered_time"])
                     active_triple_ema_trades[k] = v
             logger.info(f"✅ {len(active_triple_ema_trades)} aktif Üçlü EMA işlemi yüklendi.")
         except Exception as e: logger.error(f"Üçlü EMA yükleme hatası: {e}")
@@ -210,6 +216,7 @@ def load_trades():
                 loaded = json.load(f)
                 for k, v in loaded.items():
                     if "entry_time" in v and isinstance(v["entry_time"], str): v["entry_time"] = datetime.fromisoformat(v["entry_time"])
+                    if "entered_time" in v and isinstance(v["entered_time"], str): v["entered_time"] = datetime.fromisoformat(v["entered_time"])
                     active_gap_hunter_trades[k] = v
             logger.info(f"✅ {len(active_gap_hunter_trades)} aktif Gap Avcısı işlemi yüklendi.")
         except Exception as e: logger.error(f"Gap Avcısı yükleme hatası: {e}")
@@ -364,7 +371,7 @@ def fetch_ohlc(symbol, interval, limit=500):
                 tf_mins = {"15m": 15, "30m": 30, "1h": 60, "4h": 240, "5m": 5, "1d": 1440}.get(interval, 0)
                 if tf_mins and now < last_bar_time + timedelta(minutes=tf_mins): return df.iloc[:-1]
                 return df
-        except Exception as e: 
+        except Exception as e:
             logger.error(f"Veri çekme hatası ({symbol} {interval}): {e}")
             time_module.sleep(1)
     return None
@@ -392,7 +399,7 @@ async def fetch_all_tfs_async(symbol):
     return dict(zip(FETCH_TFS, results))
 
 # ==========================================
-# SİNYAL MOTORLARI (SPAM KORUMASIZ)
+# SİNYAL MOTORLARI
 # ==========================================
 def get_volume_and_trend_tag(df_current, df_4h):
     vol_ma = df_current['volume'].rolling(VOLUME_LOOKBACK).mean().shift(1)
@@ -414,16 +421,23 @@ async def process_rsi_signals(symbol, dfs):
         if df is None or len(df) < 30: continue
         rsi = get_rsi(df["close"], period=RSI_PERIOD)
         if rsi is None or len(rsi) < 2: continue
-        
+
         r_now = float(rsi.iloc[-1])
         bar_time = df.index[-1]
         gecikme_saniye = (datetime.now(TIMEZONE) - bar_time).total_seconds()
-        
+
         direction = None
         if r_now >= INSTANT_SHORT: direction = "SHORT"
         elif r_now <= INSTANT_LONG: direction = "LONG"
-        
+
         if direction:
+            # YENİ: 3 saat cooldown kontrolü (TF bazlı)
+            inst_key = f"inst_{symbol}_{direction}_{tf}"
+            last_signal_bar = instant_states.get(inst_key)
+            if last_signal_bar is not None and (bar_time - last_signal_bar) < timedelta(hours=RSI_COOLDOWN_HOURS):
+                continue
+            instant_states[inst_key] = bar_time
+
             tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol)
             current_price = float(df['close'].iloc[-1]); fibo_note = await get_nearest_fibo_levels_async(symbol, current_price)
             if direction == "SHORT":
@@ -431,7 +445,7 @@ async def process_rsi_signals(symbol, dfs):
             else:
                 msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — AŞIRI SATIM BÖLGESİ\nRSI 8: {r_now:.1f} (20 Altı)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 0.98:,.2f} (Tahmini -%2)"
             msg += fibo_note + "\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>" + earnings_note
-            msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {int(gecikme_saniye)} saniye" 
+            msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {int(gecikme_saniye)} saniye"
             msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "alert_instant", "direction": direction})
     return msgs
 
@@ -444,29 +458,34 @@ async def process_atr_signals(symbol, dfs):
         rsi = get_rsi(df["close"], period=RSI_PERIOD)
         if rsi is None or len(rsi) < 2: continue
         atr_series = get_atr_series(df, period=10)
-        
+
         atr_key = f"atr_{symbol}_{tf}"
-        if atr_key not in atr_states: 
+        if atr_key not in atr_states:
             atr_states[atr_key] = {"state": "IDLE", "peak_rsi": 0, "peak_price": 0, "low_rsi": 100, "low_price": 0, "last_bar": None, "reject_count": 0}
         atr_data = atr_states[atr_key]
-        
+
+        # YENİ: Bu bar zaten işlendiyse atla
+        if atr_data["last_bar"] == df.index[-1]:
+            continue
+
         trade_key_short = f"{symbol}_SHORT_atr_{tf}"
         trade_key_long = f"{symbol}_LONG_atr_{tf}"
         if trade_key_short in active_trades or trade_key_long in active_trades:
             continue
-            
-        start_idx = max(0, len(df) - 5)
+
+        # YENİ: Sadece son bar (son 5 bar değil)
+        start_idx = len(df) - 1
         for i in range(start_idx, len(df)):
             idx = df.index[i]
             row = df.iloc[i]
-            
+
             r_now = rsi.loc[idx] if idx in rsi.index else get_rsi(df.loc[:idx, 'close'], period=RSI_PERIOD).iloc[-1]
             if pd.isna(r_now): continue
-            
+
             close_price = row['close']; candle_high = row['high']; candle_low = row['low']; state = atr_data["state"]
             atr_val = atr_series.loc[idx] if idx in atr_series.index else None
             if pd.isna(atr_val) or atr_val is None or atr_val <= 0: continue
-            
+
             if state == "IDLE":
                 if r_now > ALARM_SHORT_UPPER: atr_data.update({"state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": candle_high, "reject_count": 0})
                 elif r_now < ALARM_LONG_LOWER: atr_data.update({"state": "LONG_ARMED", "low_rsi": r_now, "low_price": candle_low, "reject_count": 0})
@@ -480,10 +499,10 @@ async def process_atr_signals(symbol, dfs):
                     sl = close_price * (1 + SL_PCT / 100); tp = close_price * (1 - TP_PCT / 100)
                     msg = f"✨ <b>ATR DÜNYASI (Short) - {symbol} [{tf.upper()}]</b> ✨\n🔴 RSI Aşırı Alım Zirvesi: {atr_data['peak_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Olası Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (+%{SL_PCT})\n🎯 <b>TP (%{TP_PCT}):</b> {tp:,.2f}\n⏳ <i>Zaman Aşımı: {TIMEOUT_HOURS} Seans Saati</i>"
                     msg += fibo_note; msg += earnings_note
-                    msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {int(gecikme_saniye)} saniye" 
+                    msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {int(gecikme_saniye)} saniye"
                     msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "SHORT", "price": close_price, "sl": sl, "tp": tp, "bar_time": entry_time})
                     atr_data["state"] = "IDLE"
-                    break 
+                    break
                 else:
                     atr_data["reject_count"] += 1
                     if atr_data["reject_count"] >= 20 or r_now < 60: atr_data.update({"state": "IDLE", "reject_count": 0})
@@ -497,14 +516,14 @@ async def process_atr_signals(symbol, dfs):
                     sl = close_price * (1 - SL_PCT / 100); tp = close_price * (1 + TP_PCT / 100)
                     msg = f"✨ <b>ATR DÜNYASI (Long) - {symbol} [{tf.upper()}]</b> ✨\n🟢 RSI Aşırı Satım Dibi: {atr_data['low_rsi']:.1f}\n📊 {tags}\n\n💰 <b>Olası Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{SL_PCT})\n🎯 <b>TP (%{TP_PCT}):</b> {tp:,.2f}\n⏳ <i>Zaman Aşımı: {TIMEOUT_HOURS} Seans Saati</i>"
                     msg += fibo_note; msg += earnings_note
-                    msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {int(gecikme_saniye)} saniye" 
+                    msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {int(gecikme_saniye)} saniye"
                     msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "LONG", "price": close_price, "sl": sl, "tp": tp, "bar_time": entry_time})
                     atr_data["state"] = "IDLE"
                     break
                 else:
                     atr_data["reject_count"] += 1
                     if atr_data["reject_count"] >= 20 or r_now > 40: atr_data.update({"state": "IDLE", "reject_count": 0})
-        
+
         atr_data["last_bar"] = df.index[-1]
 
     return msgs
@@ -516,97 +535,130 @@ async def check_active_trades():
     global active_trades
     if not active_trades: return
     sem = asyncio.Semaphore(10)
-    
+
     async def check_single_trade(trade_key, trade):
         async with sem:
-            sym = trade["symbol"]; direction = trade["type"]; tf = trade.get("tf", "15m")
-            df = await fetch_ohlc_async(sym, tf, limit=100)
-            if df is None or len(df) < 2: return
-            
-            current_high = df['high'].iloc[-1]; current_low = df['low'].iloc[-1]
-            entry = trade["entry"]; sl = trade["sl"]; tp = trade["tp"]; entry_time = trade["entry_time"]
-            closed = False; pnl_pct = 0; close_reason = ""
-            
-            if direction == "LONG":
-                if current_low <= sl:
-                    pnl_pct = ((sl - entry) / entry) * 100; close_reason = f"🛑 <b>ATR STOP - {sym} [{tf.upper()}]</b>\nFiyat Stop seviyesine ({sl:,.2f}) değdi.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
-                elif current_high >= tp:
-                    pnl_pct = ((tp - entry) / entry) * 100; close_reason = f"🎯 <b>ATR TP - {sym} [{tf.upper()}]</b>\nFiyat Hedef seviyesine ({tp:,.2f}) ulaştı.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
-            else:
-                if current_high >= sl:
-                    pnl_pct = ((entry - sl) / entry) * 100; close_reason = f"🛑 <b>ATR STOP - {sym} [{tf.upper()}]</b>\nFiyat Stop seviyesine ({sl:,.2f}) değdi.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
-                elif current_low <= tp:
-                    pnl_pct = ((entry - tp) / entry) * 100; close_reason = f"🎯 <b>ATR TP - {sym} [{tf.upper()}]</b>\nFiyat Hedef seviyesine ({tp:,.2f}) ulaştı.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
-                    
-            if not closed:
-                now = datetime.now(TIMEZONE); hours_passed = get_effective_market_hours(entry_time, now)
-                if hours_passed >= TIMEOUT_HOURS:
-                    if direction == "LONG": pnl_pct = ((df['close'].iloc[-1] - entry) / entry) * 100
-                    else: pnl_pct = ((entry - df['close'].iloc[-1]) / entry) * 100
-                    close_reason = f"⏰ <b>ATR ZAMAN AŞIMI - {sym} [{tf.upper()}]</b>\n{TIMEOUT_HOURS} seans saati doldu.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
-                    
-            if closed:
-                for cid in CHAT_IDS:
-                    try: await bot_app.bot.send_message(chat_id=cid, text=close_reason, parse_mode="HTML")
-                    except Exception as e: logger.error(f"İşlem kapatma mesaj hatası: {e}")
-                if trade_key in active_trades: del active_trades[trade_key]
-                save_trades()
-                
-                atr_key = f"atr_{sym}_{tf}"
-                if atr_key in atr_states:
-                    atr_states[atr_key]["last_bar"] = None 
-                    atr_states[atr_key]["state"] = "IDLE" 
+            try:
+                sym = trade["symbol"]; direction = trade["type"]; tf = trade.get("tf", "15m")
+                df = await fetch_ohlc_async(sym, tf, limit=100)
+                if df is None or len(df) < 2: return
+
+                entry_time = trade["entry_time"]
+                if isinstance(entry_time, str): entry_time = datetime.fromisoformat(entry_time)
+                if entry_time.tzinfo is None: entry_time = TIMEZONE.localize(entry_time)
+
+                # YENİ: Sadece entry_time sonrası barlar (sinyal barının kendi high/low'u kontrol edilmesin)
+                df_valid = df[df.index >= entry_time]
+                if df_valid.empty: return
+
+                max_high = float(df_valid['high'].max())
+                min_low = float(df_valid['low'].min())
+                last_close = float(df_valid['close'].iloc[-1])
+
+                entry = trade["entry"]; sl = trade["sl"]; tp = trade["tp"]
+                closed = False; pnl_pct = 0; close_reason = ""
+
+                if direction == "LONG":
+                    if min_low <= sl:
+                        pnl_pct = ((sl - entry) / entry) * 100; close_reason = f"🛑 <b>ATR STOP - {sym} [{tf.upper()}]</b>\nFiyat Stop seviyesine ({sl:,.2f}) değdi.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
+                    elif max_high >= tp:
+                        pnl_pct = ((tp - entry) / entry) * 100; close_reason = f"🎯 <b>ATR TP - {sym} [{tf.upper()}]</b>\nFiyat Hedef seviyesine ({tp:,.2f}) ulaştı.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
+                else:
+                    if max_high >= sl:
+                        pnl_pct = ((entry - sl) / entry) * 100; close_reason = f"🛑 <b>ATR STOP - {sym} [{tf.upper()}]</b>\nFiyat Stop seviyesine ({sl:,.2f}) değdi.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
+                    elif min_low <= tp:
+                        pnl_pct = ((entry - tp) / entry) * 100; close_reason = f"🎯 <b>ATR TP - {sym} [{tf.upper()}]</b>\nFiyat Hedef seviyesine ({tp:,.2f}) ulaştı.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
+
+                if not closed:
+                    now = datetime.now(TIMEZONE); hours_passed = get_effective_market_hours(entry_time, now)
+                    if hours_passed >= TIMEOUT_HOURS:
+                        if direction == "LONG": pnl_pct = ((last_close - entry) / entry) * 100
+                        else: pnl_pct = ((entry - last_close) / entry) * 100
+                        close_reason = f"⏰ <b>ATR ZAMAN AŞIMI - {sym} [{tf.upper()}]</b>\n{TIMEOUT_HOURS} seans saati doldu.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
+
+                if closed:
+                    for cid in CHAT_IDS:
+                        try: await bot_app.bot.send_message(chat_id=cid, text=close_reason, parse_mode="HTML")
+                        except Exception as e: logger.error(f"İşlem kapatma mesaj hatası: {e}")
+                    if trade_key in active_trades: del active_trades[trade_key]
+                    save_trades()
+
+                    atr_key = f"atr_{sym}_{tf}"
+                    if atr_key in atr_states:
+                        atr_states[atr_key]["last_bar"] = None
+                        atr_states[atr_key]["state"] = "IDLE"
+            except Exception as e:
+                logger.error(f"ATR trade kontrol hatası ({trade_key}): {e}")
 
     tasks = [check_single_trade(k, v) for k, v in list(active_trades.items())]
     await asyncio.gather(*tasks)
 
 # ==========================================
-# ÜÇLÜ EMA + 15M SUPERTREND SİSTEMİ (SPAM KORUMASIZ)
+# ÜÇLÜ EMA + 15M SUPERTREND SİSTEMİ
 # ==========================================
 async def check_triple_ema():
     global active_triple_ema_trades, pending_ema_crosses
     if not is_market_open(): return
-    
+
     sem_open = asyncio.Semaphore(10)
     async def check_open_trade(sym, trade):
         async with sem_open:
-            df = await fetch_ohlc_async(sym, "15m", limit=100) 
-            if df is None or len(df) < 20: return
-            
-            current_price = df['close'].iloc[-1]; current_high = df['high'].iloc[-1]; current_low = df['low'].iloc[-1]
-            entry = trade["entry"]; sl = trade["sl"]; tp = trade["tp"]; direction = trade["type"]
-            
-            if not trade.get("entered", False):
-                if (datetime.now(TIMEZONE) - trade["entry_time"]).total_seconds() / 60 > 150:
-                    if sym in active_triple_ema_trades: del active_triple_ema_trades[sym]
-                    save_trades(); return
-                
-                entry_hit = False
-                if direction == "LONG" and current_low <= entry: entry_hit = True
-                elif direction == "SHORT" and current_high >= entry: entry_hit = True
-                    
-                if entry_hit:
-                    trade["entered"] = True; save_trades()
-                    msg = f"✅ <b>ÜÇLÜ EMA GİRİŞ TETİKLENDİ - {sym} [15M]</b>\nFiyat Süper Trend seviyesine ({entry:,.2f}) geri çekildi. Pozisyon açıldı.\n🛑 <b>Stop:</b> {sl:,.2f}\n🎯 <b>Hedef:</b> {tp:,.2f}"
+            try:
+                df = await fetch_ohlc_async(sym, "15m", limit=100)
+                if df is None or len(df) < 20: return
+
+                current_high = float(df['high'].iloc[-1]); current_low = float(df['low'].iloc[-1])
+
+                if not trade.get("entered", False):
+                    if (datetime.now(TIMEZONE) - trade["entry_time"]).total_seconds() / 60 > 150:
+                        if sym in active_triple_ema_trades: del active_triple_ema_trades[sym]
+                        save_trades(); return
+
+                    entry = trade["entry"]; direction = trade["type"]
+                    entry_hit = False
+                    if direction == "LONG" and current_low <= entry: entry_hit = True
+                    elif direction == "SHORT" and current_high >= entry: entry_hit = True
+
+                    if entry_hit:
+                        trade["entered"] = True
+                        trade["entered_time"] = datetime.now(TIMEZONE)
+                        save_trades()
+                        msg = f"✅ <b>ÜÇLÜ EMA GİRİŞ TETİKLENDİ - {sym} [15M]</b>\nFiyat Süper Trend seviyesine ({entry:,.2f}) geri çekildi. Pozisyon açıldı.\n🛑 <b>Stop:</b> {trade['sl']:,.2f}\n🎯 <b>Hedef:</b> {trade['tp']:,.2f}"
+                        for cid in CHAT_IDS:
+                            try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                            except: pass
+                    return
+
+                # YENİ: Sadece entered_time sonrası barlar
+                entered_time = trade.get("entered_time")
+                if entered_time is None: return
+                if isinstance(entered_time, str): entered_time = datetime.fromisoformat(entered_time)
+                if entered_time.tzinfo is None: entered_time = TIMEZONE.localize(entered_time)
+
+                df_valid = df[df.index >= entered_time]
+                if df_valid.empty: return
+
+                max_high = float(df_valid['high'].max())
+                min_low = float(df_valid['low'].min())
+
+                entry = trade["entry"]; sl = trade["sl"]; tp = trade["tp"]; direction = trade["type"]
+                closed = False; pnl_pct = 0; msg = ""
+
+                if direction == "LONG":
+                    if min_low <= sl: pnl_pct = ((sl - entry) / entry) * 100; msg = f"🛑 <b>ÜÇLÜ EMA STOP - {sym} [15M]</b>\nFiyat Stop seviyesine ({sl:,.2f}) değdi.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
+                    elif max_high >= tp: pnl_pct = ((tp - entry) / entry) * 100; msg = f"🎯 <b>ÜÇLÜ EMA TP - {sym} [15M]</b>\nFiyat Hedef seviyesine ({tp:,.2f}) ulaştı.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
+                else:
+                    if max_high >= sl: pnl_pct = ((entry - sl) / entry) * 100; msg = f"🛑 <b>ÜÇLÜ EMA STOP - {sym} [15M]</b>\nFiyat Stop seviyesine ({sl:,.2f}) değdi.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
+                    elif min_low <= tp: pnl_pct = ((entry - tp) / entry) * 100; msg = f"🎯 <b>ÜÇLÜ EMA TP - {sym} [15M]</b>\nFiyat Hedef seviyesine ({tp:,.2f}) ulaştı.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
+
+                if closed:
                     for cid in CHAT_IDS:
                         try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                         except: pass
-                return
-                
-            closed = False; pnl_pct = 0
-            if direction == "LONG":
-                if current_low <= sl: pnl_pct = ((sl - entry) / entry) * 100; msg = f"🛑 <b>ÜÇLÜ EMA STOP - {sym} [15M]</b>\nFiyat Stop seviyesine ({sl:,.2f}) değdi.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
-                elif current_high >= tp: pnl_pct = ((tp - entry) / entry) * 100; msg = f"🎯 <b>ÜÇLÜ EMA TP - {sym} [15M]</b>\nFiyat Hedef seviyesine ({tp:,.2f}) ulaştı.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
-            else:
-                if current_high >= sl: pnl_pct = ((entry - sl) / entry) * 100; msg = f"🛑 <b>ÜÇLÜ EMA STOP - {sym} [15M]</b>\nFiyat Stop seviyesine ({sl:,.2f}) değdi.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
-                elif current_low <= tp: pnl_pct = ((entry - tp) / entry) * 100; msg = f"🎯 <b>ÜÇLÜ EMA TP - {sym} [15M]</b>\nFiyat Hedef seviyesine ({tp:,.2f}) ulaştı.\n<b>Net K/Z:</b> %{pnl_pct:+.2f}"; closed = True
-                    
-            if closed:
-                for cid in CHAT_IDS:
-                    try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-                    except: pass
-                if sym in active_triple_ema_trades: del active_triple_ema_trades[sym]
-                save_trades()
+                    if sym in active_triple_ema_trades: del active_triple_ema_trades[sym]
+                    save_trades()
+            except Exception as e:
+                logger.error(f"Triple EMA trade kontrol hatası ({sym}): {e}")
 
     if active_triple_ema_trades:
         tasks_open = [check_open_trade(sym, trade) for sym, trade in list(active_triple_ema_trades.items())]
@@ -615,47 +667,50 @@ async def check_triple_ema():
     sem_pending = asyncio.Semaphore(10)
     async def check_pending(sym, data):
         async with sem_pending:
-            if (datetime.now(TIMEZONE) - data["time"]).total_seconds() / 60 > 120:
-                if sym in pending_ema_crosses: del pending_ema_crosses[sym]
-                return
-                
-            df_15m = await fetch_ohlc_async(sym, "15m", limit=100)
-            if df_15m is None or len(df_15m) < 20: return
-            
-            st_series = calculate_supertrend(df_15m, period=10, multiplier=3)
-            if len(st_series) < 2: return
-            
-            cross_time = data["time"]; df_after_cross = df_15m[df_15m.index >= cross_time]
-            if df_after_cross.empty: return
-            
-            flipped = False; st_val = None
-            for i in range(1, len(df_after_cross)):
-                curr_idx = df_15m.index.get_loc(df_after_cross.index[i]); prev_idx = curr_idx - 1
-                prev_st = st_series.iloc[prev_idx]; curr_st = st_series.iloc[curr_idx]
-                prev_close = df_15m['close'].iloc[prev_idx]; curr_close = df_15m['close'].iloc[curr_idx]
-                if pd.isna(prev_st) or pd.isna(curr_st): continue
-                prev_trend = "LONG" if prev_close > prev_st else "SHORT"; curr_trend = "LONG" if curr_close > curr_st else "SHORT"
-                if prev_trend != curr_trend and curr_trend == data["type"]:
-                    flipped = True; st_val = curr_st; break
-                    
-            if flipped and st_val is not None:
-                direction = data["type"]; entry_price = st_val
-                if direction == "LONG": sl = entry_price * (1 - 0.015); tp = entry_price * (1 + 0.03)
-                else: sl = entry_price * (1 + 0.015); tp = entry_price * (1 - 0.03)
-                    
-                emoji = "📈" if direction == "LONG" else "📉"
-                msg = f"{emoji} <b>15M SUPERTREND TEYİDİ - {sym}</b> {emoji}\n✅ 15M Süper Trend <b>{direction}</b> yönüne kırılım yaptı.\n\n💰 <b>Olası Giriş (Süper Trend Seviyesi):</b> {entry_price:,.2f}\n🛑 <b>Stop (Girişin %1.5'i):</b> {sl:,.2f}\n🎯 <b>Hedef (%3):</b> {tp:,.2f}\n\n💡 <i>Fiyat 15M Süper Trend seviyesine ({entry_price:,.2f}) geri çekildiğinde pozisyon açılacaktır.</i>"
-                
-                for cid in CHAT_IDS:
-                    reply_id = data["msg_ids"].get(str(cid))
-                    try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
-                    except:
-                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-                        except Exception as e: logger.error(f"Mesaj hatası: {e}")
-                        
-                active_triple_ema_trades[sym] = {"symbol": sym, "type": direction, "entry": entry_price, "sl": sl, "tp": tp, "entered": False, "entry_time": datetime.now(TIMEZONE)}
-                save_trades()
-                if sym in pending_ema_crosses: del pending_ema_crosses[sym]
+            try:
+                if (datetime.now(TIMEZONE) - data["time"]).total_seconds() / 60 > 120:
+                    if sym in pending_ema_crosses: del pending_ema_crosses[sym]
+                    return
+
+                df_15m = await fetch_ohlc_async(sym, "15m", limit=100)
+                if df_15m is None or len(df_15m) < 20: return
+
+                st_series = calculate_supertrend(df_15m, period=10, multiplier=3)
+                if len(st_series) < 2: return
+
+                cross_time = data["time"]; df_after_cross = df_15m[df_15m.index >= cross_time]
+                if df_after_cross.empty: return
+
+                flipped = False; st_val = None
+                for i in range(1, len(df_after_cross)):
+                    curr_idx = df_15m.index.get_loc(df_after_cross.index[i]); prev_idx = curr_idx - 1
+                    prev_st = st_series.iloc[prev_idx]; curr_st = st_series.iloc[curr_idx]
+                    prev_close = df_15m['close'].iloc[prev_idx]; curr_close = df_15m['close'].iloc[curr_idx]
+                    if pd.isna(prev_st) or pd.isna(curr_st): continue
+                    prev_trend = "LONG" if prev_close > prev_st else "SHORT"; curr_trend = "LONG" if curr_close > curr_st else "SHORT"
+                    if prev_trend != curr_trend and curr_trend == data["type"]:
+                        flipped = True; st_val = curr_st; break
+
+                if flipped and st_val is not None:
+                    direction = data["type"]; entry_price = st_val
+                    if direction == "LONG": sl = entry_price * (1 - 0.015); tp = entry_price * (1 + 0.03)
+                    else: sl = entry_price * (1 + 0.015); tp = entry_price * (1 - 0.03)
+
+                    emoji = "📈" if direction == "LONG" else "📉"
+                    msg = f"{emoji} <b>15M SUPERTREND TEYİDİ - {sym}</b> {emoji}\n✅ 15M Süper Trend <b>{direction}</b> yönüne kırılım yaptı.\n\n💰 <b>Olası Giriş (Süper Trend Seviyesi):</b> {entry_price:,.2f}\n🛑 <b>Stop (Girişin %1.5'i):</b> {sl:,.2f}\n🎯 <b>Hedef (%3):</b> {tp:,.2f}\n\n💡 <i>Fiyat 15M Süper Trend seviyesine ({entry_price:,.2f}) geri çekildiğinde pozisyon açılacaktır.</i>"
+
+                    for cid in CHAT_IDS:
+                        reply_id = data["msg_ids"].get(str(cid))
+                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
+                        except:
+                            try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                            except Exception as e: logger.error(f"Mesaj hatası: {e}")
+
+                    active_triple_ema_trades[sym] = {"symbol": sym, "type": direction, "entry": entry_price, "sl": sl, "tp": tp, "entered": False, "entry_time": datetime.now(TIMEZONE)}
+                    save_trades()
+                    if sym in pending_ema_crosses: del pending_ema_crosses[sym]
+            except Exception as e:
+                logger.error(f"Triple EMA pending hatası ({sym}): {e}")
 
     if pending_ema_crosses:
         tasks_pending = [check_pending(sym, data) for sym, data in list(pending_ema_crosses.items())]
@@ -664,139 +719,145 @@ async def check_triple_ema():
     sem_scan = asyncio.Semaphore(10)
     async def scan_single(sym):
         async with sem_scan:
-            df_5m = await fetch_ohlc_async(sym, "5m", limit=500)
-            if df_5m is None or len(df_5m) < 200: return
-            
-            ema21 = df_5m['close'].ewm(span=21, adjust=False).mean(); ema200 = df_5m['close'].ewm(span=200, adjust=False).mean()
-            bar_time = df_5m.index[-1]; delay_min = (datetime.now(TIMEZONE) - bar_time).total_seconds() / 60
-            if delay_min > 25: return 
-            
-            state_key = f"triple_ema_{sym}"
-            if state_key not in triple_ema_states: triple_ema_states[state_key] = {"last_bar": None}
-                
-            if triple_ema_states[state_key]["last_bar"] != bar_time:
-                curr_21 = ema21.iloc[-1]; curr_200 = ema200.iloc[-1]; prev_21 = ema21.iloc[-2]; prev_200 = ema200.iloc[-2]
-                direction = None
-                if prev_21 <= prev_200 and curr_21 > curr_200: direction = "LONG"
-                elif prev_21 >= prev_200 and curr_21 < curr_200: direction = "SHORT"
-                
-                if direction:
-                    triple_ema_states[state_key]["last_bar"] = bar_time
-                    existing = active_triple_ema_trades.get(sym)
-                    if existing and existing["type"] == direction: return 
-                    if sym in pending_ema_crosses: return
-                    
-                    emoji = "📈" if direction == "LONG" else "📉"
-                    msg = f"🔔 <b>ÜÇLÜ EMA KESİŞİM UYARISI - {sym} [5M]</b> {emoji}\n🚨 <b>Yön:</b> {direction}\n21 EMA, 200 EMA'yı {'yukarı' if direction == 'LONG' else 'aşağı'} kesti.\n\n👀 <i>Şimdi 15M SuperTrend'in {direction} yönüne dönmesi bekleniyor... (Grafiği kontrol edin)</i>"
-                    
-                    msg_ids = {}
-                    for cid in CHAT_IDS:
-                        try:
-                            sent = await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-                            msg_ids[str(cid)] = sent.message_id
-                        except Exception as e: logger.error(f"Uyarı Mesaj hatası: {e}")
-                            
-                    if msg_ids:
-                        pending_ema_crosses[sym] = {"type": direction, "msg_ids": msg_ids, "time": bar_time}
+            try:
+                df_5m = await fetch_ohlc_async(sym, "5m", limit=500)
+                if df_5m is None or len(df_5m) < 200: return
+
+                ema21 = df_5m['close'].ewm(span=21, adjust=False).mean(); ema200 = df_5m['close'].ewm(span=200, adjust=False).mean()
+                bar_time = df_5m.index[-1]; delay_min = (datetime.now(TIMEZONE) - bar_time).total_seconds() / 60
+                if delay_min > 40: return  # YENİ: 25 → 40 dk
+
+                state_key = f"triple_ema_{sym}"
+                if state_key not in triple_ema_states: triple_ema_states[state_key] = {"last_bar": None}
+
+                if triple_ema_states[state_key]["last_bar"] != bar_time:
+                    curr_21 = ema21.iloc[-1]; curr_200 = ema200.iloc[-1]; prev_21 = ema21.iloc[-2]; prev_200 = ema200.iloc[-2]
+                    direction = None
+                    if prev_21 <= prev_200 and curr_21 > curr_200: direction = "LONG"
+                    elif prev_21 >= prev_200 and curr_21 < curr_200: direction = "SHORT"
+
+                    if direction:
+                        triple_ema_states[state_key]["last_bar"] = bar_time
+                        existing = active_triple_ema_trades.get(sym)
+                        if existing and existing["type"] == direction: return
+                        if sym in pending_ema_crosses: return
+
+                        emoji = "📈" if direction == "LONG" else "📉"
+                        msg = f"🔔 <b>ÜÇLÜ EMA KESİŞİM UYARISI - {sym} [5M]</b> {emoji}\n🚨 <b>Yön:</b> {direction}\n21 EMA, 200 EMA'yı {'yukarı' if direction == 'LONG' else 'aşağı'} kesti.\n\n👀 <i>Şimdi 15M SuperTrend'in {direction} yönüne dönmesi bekleniyor... (Grafiği kontrol edin)</i>"
+
+                        msg_ids = {}
+                        for cid in CHAT_IDS:
+                            try:
+                                sent = await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                                msg_ids[str(cid)] = sent.message_id
+                            except Exception as e: logger.error(f"Uyarı Mesaj hatası: {e}")
+
+                        if msg_ids:
+                            pending_ema_crosses[sym] = {"type": direction, "msg_ids": msg_ids, "time": bar_time}
+            except Exception as e:
+                logger.error(f"Triple EMA scan hatası ({sym}): {e}")
 
     tasks_scan = [scan_single(sym) for sym in SYMBOLS]
     await asyncio.gather(*tasks_scan)
 
 # ==========================================
-# GAP AVCISI (16:00 - 17:40) (SPAM KORUMASIZ)
+# GAP AVCISI (16:00 - 17:40)
 # ==========================================
 async def check_gap_hunter():
     if not is_gap_hunter_time(): return
-    
+
     sem = asyncio.Semaphore(10)
     async def scan_single_gap(sym):
         async with sem:
-            df_15m = await fetch_ohlc_async(sym, "15m", limit=100)
-            if df_15m is None or len(df_15m) < 50: return
-            
-            df_4h = await fetch_ohlc_async(sym, "4h", limit=100)
-            if df_4h is None: return
+            try:
+                df_15m = await fetch_ohlc_async(sym, "15m", limit=100)
+                if df_15m is None or len(df_15m) < 50: return
 
-            df_15m['ema21'] = df_15m['close'].ewm(span=21, adjust=False).mean()
-            df_15m['ema50'] = df_15m['close'].ewm(span=50, adjust=False).mean()
-            df_15m['rsi'] = get_rsi(df_15m['close'], 14)
-            
-            df_15m['typical_price'] = (df_15m['high'] + df_15m['low'] + df_15m['close']) / 3
-            df_15m['vwap'] = (df_15m['typical_price'] * df_15m['volume']).groupby(df_15m.index.date).cumsum() / df_15m['volume'].groupby(df_15m.index.date).cumsum()
-            
-            exp1 = df_15m['close'].ewm(span=12, adjust=False).mean(); exp2 = df_15m['close'].ewm(span=26, adjust=False).mean()
-            df_15m['macd'] = exp1 - exp2
-            df_15m['macd_signal'] = df_15m['macd'].ewm(span=9, adjust=False).mean()
-            df_15m['vol_ma'] = df_15m['volume'].rolling(20).mean()
-            
-            df_4h['ema200_4h'] = df_4h['close'].ewm(span=200, adjust=False).mean()
-            df_4h['trend_4h'] = np.where(df_4h['close'] > df_4h['ema200_4h'], 1, -1)
-            
-            df_merged = pd.merge_asof(df_15m.sort_index(), df_4h[['trend_4h']].sort_index(), left_index=True, right_index=True, direction='backward')
-            df_merged['trend_4h'] = df_merged['trend_4h'].fillna(0)
+                df_4h = await fetch_ohlc_async(sym, "4h", limit=100)
+                if df_4h is None: return
 
-            if len(df_merged) < 2: return
-            last_row = df_merged.iloc[-1]; prev_row = df_merged.iloc[-2]
-            bar_time = df_merged.index[-1]
-            
-            state_key = f"gap_{sym}"
-            if state_key not in gap_hunter_states: gap_hunter_states[state_key] = {"last_bar": None}
-            
-            if gap_hunter_states[state_key]["last_bar"] == bar_time: return
+                df_15m['ema21'] = df_15m['close'].ewm(span=21, adjust=False).mean()
+                df_15m['ema50'] = df_15m['close'].ewm(span=50, adjust=False).mean()
+                df_15m['rsi'] = get_rsi(df_15m['close'], 14)
 
-            long_cond_now = (last_row['trend_4h'] == 1) and (last_row['close'] > last_row['vwap']) and \
-                            (last_row['ema21'] > last_row['ema50']) and (55 < last_row['rsi'] < 85) and \
-                            (last_row['macd'] > last_row['macd_signal']) and (last_row['volume'] > last_row['vol_ma'] * 1.5)
-            long_cond_prev = (prev_row['trend_4h'] == 1) and (prev_row['close'] > prev_row['vwap']) and \
-                             (prev_row['ema21'] > prev_row['ema50']) and (55 < prev_row['rsi'] < 85) and \
-                             (prev_row['macd'] > prev_row['macd_signal']) and (prev_row['volume'] > prev_row['vol_ma'] * 1.5)
+                df_15m['typical_price'] = (df_15m['high'] + df_15m['low'] + df_15m['close']) / 3
+                df_15m['vwap'] = (df_15m['typical_price'] * df_15m['volume']).groupby(df_15m.index.date).cumsum() / df_15m['volume'].groupby(df_15m.index.date).cumsum()
 
-            short_cond_now = (last_row['trend_4h'] == -1) and (last_row['close'] < last_row['vwap']) and \
-                             (last_row['ema21'] < last_row['ema50']) and (15 < last_row['rsi'] < 45) and \
-                             (last_row['macd'] < last_row['macd_signal']) and (last_row['volume'] > last_row['vol_ma'] * 1.5)
-            short_cond_prev = (prev_row['trend_4h'] == -1) and (prev_row['close'] < prev_row['vwap']) and \
-                              (prev_row['ema21'] < prev_row['ema50']) and (15 < prev_row['rsi'] < 45) and \
-                              (prev_row['macd'] < prev_row['macd_signal']) and (prev_row['volume'] > prev_row['vol_ma'] * 1.5)
+                exp1 = df_15m['close'].ewm(span=12, adjust=False).mean(); exp2 = df_15m['close'].ewm(span=26, adjust=False).mean()
+                df_15m['macd'] = exp1 - exp2
+                df_15m['macd_signal'] = df_15m['macd'].ewm(span=9, adjust=False).mean()
+                df_15m['vol_ma'] = df_15m['volume'].rolling(20).mean()
 
-            if long_cond_now and not long_cond_prev:
-                gap_hunter_states[state_key]["last_bar"] = bar_time
-                entry_price = last_row['close']; sl = entry_price * 0.99; tp = entry_price * 1.03
-                
-                msg = f"🌙 <b>GAP AVCISI (LONG) - {sym}</b> 🌙\n"
-                msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                msg += f"📈 <i>16:00 Sonrası Güçlü Kapanış Tespit Edildi!</i>\n\n"
-                msg += f"💰 <b>Giriş (Mum Kapanışı):</b> {entry_price:,.2f}\n"
-                msg += f"🛑 <b>Stop (SL: %1):</b> {sl:,.2f}\n"
-                msg += f"🎯 <b>Hedef (TP: %3):</b> {tp:,.2f}\n\n"
-                msg += f"📊 <b>Hacim:</b> 🔥 Hacim Onaylı (1.5x+)\n"
-                msg += f"📉 <b>4H Trend:</b> Yukarı\n\n"
-                msg += f"💡 <b>Strateji:</b> Ertesi gün gaplı açılış bekleniyor.\n"
-                msg += f"⏳ <i>Gün içi TP vurulmazsa, ertesi gün açılış fiyatından (Gap) çıkılacaktır.</i>\n"
-                msg += f"━━━━━━━━━━━━━━━━━━━━"
-                
-                for cid in CHAT_IDS:
-                    try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-                    except: pass
-                    
-            elif short_cond_now and not short_cond_prev:
-                gap_hunter_states[state_key]["last_bar"] = bar_time
-                entry_price = last_row['close']; sl = entry_price * 1.01; tp = entry_price * 0.97
-                
-                msg = f"🌙 <b>GAP AVCISI (SHORT) - {sym}</b> 🌙\n"
-                msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                msg += f"📉 <i>16:00 Sonrası Güçlü Kapanış Tespit Edildi!</i>\n\n"
-                msg += f"💰 <b>Giriş (Mum Kapanışı):</b> {entry_price:,.2f}\n"
-                msg += f"🛑 <b>Stop (SL: %1):</b> {sl:,.2f}\n"
-                msg += f"🎯 <b>Hedef (TP: %3):</b> {tp:,.2f}\n\n"
-                msg += f"📊 <b>Hacim:</b> 🔥 Hacim Onaylı (1.5x+)\n"
-                msg += f"📉 <b>4H Trend:</b> Aşağı\n\n"
-                msg += f"💡 <b>Strateji:</b> Ertesi gün gaplı açılış bekleniyor.\n"
-                msg += f"⏳ <i>Gün içi TP vurulmazsa, ertesi gün açılış fiyatından (Gap) çıkılacaktır.</i>\n"
-                msg += f"━━━━━━━━━━━━━━━━━━━━"
-                
-                for cid in CHAT_IDS:
-                    try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-                    except: pass
+                df_4h['ema200_4h'] = df_4h['close'].ewm(span=200, adjust=False).mean()
+                df_4h['trend_4h'] = np.where(df_4h['close'] > df_4h['ema200_4h'], 1, -1)
+
+                df_merged = pd.merge_asof(df_15m.sort_index(), df_4h[['trend_4h']].sort_index(), left_index=True, right_index=True, direction='backward')
+                df_merged['trend_4h'] = df_merged['trend_4h'].fillna(0)
+
+                if len(df_merged) < 2: return
+                last_row = df_merged.iloc[-1]; prev_row = df_merged.iloc[-2]
+                bar_time = df_merged.index[-1]
+
+                state_key = f"gap_{sym}"
+                if state_key not in gap_hunter_states: gap_hunter_states[state_key] = {"last_bar": None}
+
+                if gap_hunter_states[state_key]["last_bar"] == bar_time: return
+
+                long_cond_now = (last_row['trend_4h'] == 1) and (last_row['close'] > last_row['vwap']) and \
+                                (last_row['ema21'] > last_row['ema50']) and (55 < last_row['rsi'] < 85) and \
+                                (last_row['macd'] > last_row['macd_signal']) and (last_row['volume'] > last_row['vol_ma'] * 1.5)
+                long_cond_prev = (prev_row['trend_4h'] == 1) and (prev_row['close'] > prev_row['vwap']) and \
+                                 (prev_row['ema21'] > prev_row['ema50']) and (55 < prev_row['rsi'] < 85) and \
+                                 (prev_row['macd'] > prev_row['macd_signal']) and (prev_row['volume'] > prev_row['vol_ma'] * 1.5)
+
+                short_cond_now = (last_row['trend_4h'] == -1) and (last_row['close'] < last_row['vwap']) and \
+                                 (last_row['ema21'] < last_row['ema50']) and (15 < last_row['rsi'] < 45) and \
+                                 (last_row['macd'] < last_row['macd_signal']) and (last_row['volume'] > last_row['vol_ma'] * 1.5)
+                short_cond_prev = (prev_row['trend_4h'] == -1) and (prev_row['close'] < prev_row['vwap']) and \
+                                  (prev_row['ema21'] < prev_row['ema50']) and (15 < prev_row['rsi'] < 45) and \
+                                  (prev_row['macd'] < prev_row['macd_signal']) and (prev_row['volume'] > prev_row['vol_ma'] * 1.5)
+
+                if long_cond_now and not long_cond_prev:
+                    gap_hunter_states[state_key]["last_bar"] = bar_time
+                    entry_price = last_row['close']; sl = entry_price * 0.99; tp = entry_price * 1.03
+
+                    msg = f"🌙 <b>GAP AVCISI (LONG) - {sym}</b> 🌙\n"
+                    msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    msg += f"📈 <i>16:00 Sonrası Güçlü Kapanış Tespit Edildi!</i>\n\n"
+                    msg += f"💰 <b>Giriş (Mum Kapanışı):</b> {entry_price:,.2f}\n"
+                    msg += f"🛑 <b>Stop (SL: %1):</b> {sl:,.2f}\n"
+                    msg += f"🎯 <b>Hedef (TP: %3):</b> {tp:,.2f}\n\n"
+                    msg += f"📊 <b>Hacim:</b> 🔥 Hacim Onaylı (1.5x+)\n"
+                    msg += f"📉 <b>4H Trend:</b> Yukarı\n\n"
+                    msg += f"💡 <b>Strateji:</b> Ertesi gün gaplı açılış bekleniyor.\n"
+                    msg += f"⏳ <i>Gün içi TP vurulmazsa, ertesi gün açılış fiyatından (Gap) çıkılacaktır.</i>\n"
+                    msg += f"━━━━━━━━━━━━━━━━━━━━"
+
+                    for cid in CHAT_IDS:
+                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                        except: pass
+
+                elif short_cond_now and not short_cond_prev:
+                    gap_hunter_states[state_key]["last_bar"] = bar_time
+                    entry_price = last_row['close']; sl = entry_price * 1.01; tp = entry_price * 0.97
+
+                    msg = f"🌙 <b>GAP AVCISI (SHORT) - {sym}</b> 🌙\n"
+                    msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    msg += f"📉 <i>16:00 Sonrası Güçlü Kapanış Tespit Edildi!</i>\n\n"
+                    msg += f"💰 <b>Giriş (Mum Kapanışı):</b> {entry_price:,.2f}\n"
+                    msg += f"🛑 <b>Stop (SL: %1):</b> {sl:,.2f}\n"
+                    msg += f"🎯 <b>Hedef (TP: %3):</b> {tp:,.2f}\n\n"
+                    msg += f"📊 <b>Hacim:</b> 🔥 Hacim Onaylı (1.5x+)\n"
+                    msg += f"📉 <b>4H Trend:</b> Aşağı\n\n"
+                    msg += f"💡 <b>Strateji:</b> Ertesi gün gaplı açılış bekleniyor.\n"
+                    msg += f"⏳ <i>Gün içi TP vurulmazsa, ertesi gün açılış fiyatından (Gap) çıkılacaktır.</i>\n"
+                    msg += f"━━━━━━━━━━━━━━━━━━━━"
+
+                    for cid in CHAT_IDS:
+                        try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                        except: pass
+            except Exception as e:
+                logger.error(f"Gap Hunter hatası ({sym}): {e}")
 
     tasks = [scan_single_gap(sym) for sym in SYMBOLS]
     await asyncio.gather(*tasks)
@@ -807,26 +868,26 @@ async def check_gap_hunter():
 async def check_5m_confirmations():
     if not pending_confirmations: return
     now = datetime.now(TIMEZONE)
-    
+
     for key, data in list(pending_confirmations.items()):
         sym = data["symbol"]; direction = data["direction"]; msg_id = data["msg_id"]; alert_time = data["time"]
         if (now - alert_time).total_seconds() / 60 > 120:
             del pending_confirmations[key]; continue
-            
+
         df_5m = await fetch_ohlc_async(sym, "5m", limit=500)
         if df_5m is None or len(df_5m) < 200: continue
-        
+
         ema21 = df_5m['close'].ewm(span=21, adjust=False).mean(); ema200 = df_5m['close'].ewm(span=200, adjust=False).mean()
         df_after_alert = df_5m[df_5m.index >= alert_time]
         if df_after_alert.empty: continue
-        
+
         confirmed_21 = False; confirmed_200 = False; last_ema21 = 0; last_ema200 = 0
         for i in range(1, len(df_after_alert)):
             curr_idx = df_5m.index.get_loc(df_after_alert.index[i]); prev_idx = curr_idx - 1
             last_close = df_5m['close'].iloc[curr_idx]; prev_close = df_5m['close'].iloc[prev_idx]
             last_ema21 = ema21.iloc[curr_idx]; prev_ema21 = ema21.iloc[prev_idx]
             last_ema200 = ema200.iloc[curr_idx]; prev_ema200 = ema200.iloc[prev_idx]
-            
+
             if direction == "SHORT":
                 if prev_close >= prev_ema21 and last_close < last_ema21: confirmed_21 = True
                 if prev_close >= prev_ema200 and last_close < last_ema200: confirmed_200 = True
@@ -834,19 +895,19 @@ async def check_5m_confirmations():
                 if prev_close <= prev_ema21 and last_close > last_ema21: confirmed_21 = True
                 if prev_close <= prev_ema200 and last_close > last_ema200: confirmed_200 = True
             if confirmed_21 or confirmed_200: break
-                
+
         if confirmed_21 or confirmed_200:
             ema_txt = ""
             if confirmed_21 and confirmed_200: ema_txt = "EMA 21 ve EMA 200"
             elif confirmed_21: ema_txt = "EMA 21"
             elif confirmed_200: ema_txt = "EMA 200"
-            
+
             msg = f"✅ <b>Teyit Sinyali (5M) - {sym}</b>\n5 Dk mumu <b>{ema_txt}</b> seviyesini {'aşağı' if direction == 'SHORT' else 'yukarı'} kırdı.\n📊 <b>EMA 21:</b> {last_ema21:,.2f} | <b>EMA 200:</b> {last_ema200:,.2f}\n👀 İlk RSI uyarınız teyit edildi, işlem değerlendirebilirsiniz."
-            
+
             for cid in CHAT_IDS:
                 reply_id = msg_id.get(str(cid))
                 try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML", reply_to_message_id=reply_id)
-                except: 
+                except:
                     try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
                     except Exception as e: logger.error(f"Teyit mesaj hatası: {e}")
             del pending_confirmations[key]
@@ -857,22 +918,22 @@ async def check_5m_confirmations():
 async def generate_market_summary(session_name):
     try:
         df_30m, df_1h = await asyncio.gather(fetch_ohlc_async("XU030", "30m", limit=500), fetch_ohlc_async("XU030", "1h", limit=500))
-        if df_30m is None or df_1h is None: 
+        if df_30m is None or df_1h is None:
             logger.warning("XU030 özeti için veri çekilemedi. (API Hatası)")
             return
-        
+
         today = datetime.now(TIMEZONE).date(); df_today = df_30m[df_30m.index.date == today]
-        if df_today.empty: 
+        if df_today.empty:
             logger.warning("XU030 özeti için bugünün verisi bulunamadı.")
             return
-        
+
         if "Sabah" in session_name: session_df = df_today.between_time('09:55', '14:00'); time_str = "09:55 - 14:00"
         else: session_df = df_today.between_time('14:01', '18:05'); time_str = "14:01 - 18:05"
-            
-        if session_df.empty: 
+
+        if session_df.empty:
             logger.warning(f"{session_name} özeti için seans verisi boş!")
             return
-            
+
         open_price = session_df['open'].iloc[0]; close_price = session_df['close'].iloc[-1]
         high_price = session_df['high'].max(); low_price = session_df['low'].min()
         pct_change = ((close_price - open_price) / open_price) * 100
@@ -880,7 +941,7 @@ async def generate_market_summary(session_name):
         if dist_to_high < 0.2: close_status = "🟢 Zirvede Kapattı (Güçlü)"
         elif dist_to_low < 0.2: close_status = "🔴 Dipte Kapattı (Zayıf)"
         else: close_status = "⚪ Orta Bölgede Kapattı"
-        
+
         session_vol = session_df['volume'].sum(); past_vols = []
         for i in range(1, 4):
             past_date = today - timedelta(days=i); past_df = df_30m[df_30m.index.date == past_date]
@@ -888,20 +949,20 @@ async def generate_market_summary(session_name):
                 if "Sabah" in session_name: p_vol = past_df.between_time('09:55', '14:00')['volume'].sum()
                 else: p_vol = past_df.between_time('14:01', '17:54')['volume'].sum()
                 past_vols.append(p_vol)
-                
+
         avg_3d_vol = sum(past_vols) / len(past_vols) if past_vols else session_vol
         vol_change = ((session_vol - avg_3d_vol) / avg_3d_vol) * 100 if avg_3d_vol > 0 else 0
-        
+
         if vol_change > 10: vol_status = f"🟢 Son 3 günün %{vol_change:.1f} ÜZERİNDE (Hacimli)"
         elif vol_change < -10: vol_status = f"🔴 Son 3 günün %{abs(vol_change):.1f} ALTINDA (Sessiz)"
         else: vol_status = "⚪ Normal Seviyede"
-        
+
         stock_changes = {}; green_count = 0; red_count = 0
         def _inner_change(s):
             try:
                 h = bp.Ticker(s).history(period="5d", interval="1d")
                 if h is None or h.empty: return s, None
-                h.columns = [str(c).lower() for c in h.columns] 
+                h.columns = [str(c).lower() for c in h.columns]
                 if len(h) >= 2: return s, ((h['close'].iloc[-1] - h['close'].iloc[-2]) / h['close'].iloc[-2]) * 100
             except Exception as e: pass
             return s, None
@@ -909,14 +970,14 @@ async def generate_market_summary(session_name):
         sem_summary = asyncio.Semaphore(8)
         async def limited_change(s):
             async with sem_summary: return await asyncio.to_thread(_inner_change, s)
-                
+
         results = await asyncio.gather(*[limited_change(s) for s in BIST_STOCKS])
         for sym, change in results:
             if change is None: continue
             stock_changes[sym] = change
             if change > 0: green_count += 1
             else: red_count += 1
-            
+
         sector_lines = []
         for sector_name, stocks in SECTORS.items():
             sector_stocks = [s for s in stocks if s in stock_changes]
@@ -927,25 +988,25 @@ async def generate_market_summary(session_name):
             sector_lines.append((avg_chg, f"{emoji} {sector_name}: {greens}Y/{reds}K (Ort: %{avg_chg:+.2f})"))
         sector_lines.sort(key=lambda x: x[0], reverse=True)
         sector_text = "\n".join([line for _, line in sector_lines])
-        
+
         rsi_1h = get_rsi(df_1h['close'], RSI_PERIOD).iloc[-1]
         ema50_30m = df_30m['close'].ewm(span=50, adjust=False).mean().iloc[-1]
         trend_status = "🟢 EMA 50 Üzerinde" if close_price > ema50_30m else "🔴 EMA 50 Altında"
         best_sector = sector_lines[0][1].split(":")[0] if sector_lines else ""
         worst_sector = sector_lines[-1][1].split(":")[0] if sector_lines else ""
-        
+
         if pct_change > 0 and vol_change > 0 and green_count > red_count: yorum = f"Alıcılar baskın. Özellikle {best_sector} sektörü öne çıkıyor. Long işlemler ön planda olabilir."
         elif pct_change < 0 and vol_change > 0 and red_count > green_count: yorum = f"Satıcılar baskın. {best_sector} sektörü direniyor ama genel görünüm zayıf. Short işlemler düşünülebilir."
         elif green_count > red_count and pct_change < 0: yorum = f"Endeks düşse de hisselerin çoğu yeşil. {best_sector} öne çıkıyor. Dönüş sinyali olabilir."
         elif red_count > green_count and pct_change > 0: yorum = f"Endeks yükselse de hisselerin çoğu kırmızı. {worst_sector} zayıf. Yükseliş inandırıcı değil."
         else: yorum = "Piyasa kararsız. Yön netleşene kadar beklemede kalmak mantıklı."
-        
+
         msg = f"🏛️ <b>BIST 30 (XU030) — {session_name} Özeti</b>\n⏱ ({time_str} Arası)\n\n📈 <b>Fiyat:</b> {close_price:,.2f} (%{pct_change:+.2f})\n📍 <b>Kapanış:</b> {close_status}\n\n📊 <b>Hacim:</b> {vol_status}\n\n🌡️ <b>Piyasa Genişliği:</b> {green_count} Yeşil / {red_count} Kırmızı\n\n🧭 <b>Trend:</b> 1H RSI: {rsi_1h:.1f} | 30m EMA 50: {ema50_30m:,.2f} ({trend_status})\n\n🏭 <b>Sektör Performansı:</b>\n{sector_text}\n\n💡 <b>Yorum:</b> {yorum}"
         for cid in CHAT_IDS:
             try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-            except Exception as e: 
+            except Exception as e:
                 logger.error(f"Özet mesaj hatası: {e}")
-    except Exception as e: 
+    except Exception as e:
         logger.error(f"Özet fonksiyonu hatası: {e}")
 
 async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -972,7 +1033,7 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ema50_30m = df_30m['close'].ewm(span=50, adjust=False).mean().iloc[-1]
             msg += f"\n⚓ <b>30 Dakikalık (30M)</b>\n• EMA 50: {ema50_30m:,.2f}\n"
         else: ema50_30m = 0; msg += f"\n⚓ <b>30 Dakikalık (30M)</b>\n• EMA 50: Veri Yok\n"
-        
+
         fibo_note = await get_nearest_fibo_levels_async(text, price); msg += fibo_note
         msg += f"\n💡 <b>Yorum ve Strateji:</b>\n"
         if trend_4h == "🟢 Yukarı":
@@ -1058,25 +1119,46 @@ async def tick(force=False):
     if is_scanning: return
     is_scanning = True
     logger.info(f"🔄 Hızlı Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
+    failed_count = 0
     try:
         sem = asyncio.Semaphore(10)
         async def limited_fetch(sym):
-            async with sem: return await fetch_all_tfs_async(sym)
+            async with sem:
+                try:
+                    dfs = await fetch_all_tfs_async(sym)
+                    return sym, dfs
+                except Exception as e:
+                    logger.error(f"Fetch hatası ({sym}): {e}")
+                    return sym, None
+
         tasks = [limited_fetch(sym) for sym in SYMBOLS]
-        try: results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=300.0)
-        except asyncio.TimeoutError: results = []; logger.warning("Tarama zaman aşımına uğradı.")
-            
-        for sym, dfs in zip(SYMBOLS, results):
+
+        # YENİ: Toplu 300s timeout yok — hisse hisse işleniyor (as_completed)
+        for coro in asyncio.as_completed(tasks):
             try:
-                if dfs is None or not dfs: continue
-                # 1. RSI Sinyalleri (Spam Korumasız)
-                rsi_msgs = await process_rsi_signals(sym, dfs)
-                for msg_data in rsi_msgs: await send_signal_message(msg_data)
-                # 2. ATR Sinyalleri
-                atr_msgs = await process_atr_signals(sym, dfs)
-                for msg_data in atr_msgs: await send_signal_message(msg_data)
-            except Exception as e: logger.error(f"Sinyal işleme hatası ({sym}): {e}")
-    finally: is_scanning = False
+                sym, dfs = await coro
+                if dfs is None or not dfs:
+                    failed_count += 1
+                    continue
+                try:
+                    rsi_msgs = await process_rsi_signals(sym, dfs)
+                    for msg_data in rsi_msgs: await send_signal_message(msg_data)
+                    atr_msgs = await process_atr_signals(sym, dfs)
+                    for msg_data in atr_msgs: await send_signal_message(msg_data)
+                except Exception as e:
+                    logger.error(f"Sinyal işleme hatası ({sym}): {e}")
+            except Exception as e:
+                failed_count += 1
+                logger.error(f"Beklenmeyen tarama hatası: {e}")
+
+        # YENİ: Kısmi başarısızlıkta admin uyarısı
+        if failed_count >= 15:
+            await send_admin_alert(
+                f"⚠️ <b>Tarama Sorunu</b>\n{failed_count}/{len(SYMBOLS)} hisse için veri alınamadı. Veri sağlayıcı yavaş olabilir. Tarama kısmi çalıştı.",
+                "scan_partial_fail"
+            )
+    finally:
+        is_scanning = False
 
 async def tracker_tick():
     if not is_market_open(): return
@@ -1086,13 +1168,13 @@ async def tracker_tick():
     except Exception as e: logger.error(f"check_5m_confirmations hatası: {e}")
     try: await check_triple_ema()
     except Exception as e: logger.error(f"check_triple_ema hatası: {e}")
-    try: await check_gap_hunter() 
+    try: await check_gap_hunter()
     except Exception as e: logger.error(f"check_gap_hunter hatası: {e}")
 
 async def market_open_scan():
     if not is_market_open(): return
     for cid in CHAT_IDS:
-        try: 
+        try:
             await bot_app.bot.send_message(chat_id=cid, text="🟢 Seans açıldı, tarama ve takip başladı.", parse_mode="HTML")
             await bot_app.bot.send_message(chat_id=cid, text="Sistem her zaman senin için çalışıyor, kazanmak istiyorsan sadece sistemle kal... MZB 😉", parse_mode="HTML")
         except Exception as e: pass
@@ -1115,14 +1197,13 @@ class DummyHandler(BaseHTTPRequestHandler):
 def run_dummy_server(): HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8080))), DummyHandler).serve_forever()
 
 async def main():
-    load_trades() 
+    load_trades()
     threading.Thread(target=run_dummy_server, daemon=True).start()
     await bot_app.initialize(); await bot_app.start(); await bot_app.updater.start_polling(drop_pending_updates=True)
-    
+
     sched = AsyncIOScheduler(timezone=TIMEZONE, job_defaults={'coalesce': True, 'max_instances': 1, 'misfire_grace_time': 60})
-    
+
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
-    # DÜZELTME: Tarama sıklığı her 5 dakikaya çekildi.
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
     sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour=17, minute=58, timezone=TIMEZONE))
@@ -1130,7 +1211,7 @@ async def main():
     sched.add_job(clear_daily_state, CronTrigger(day_of_week="mon-fri", hour=18, minute=30, timezone=TIMEZONE))
     sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=15, timezone=TIMEZONE))
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
-    
+
     sched.start()
     logger.info("✅ Bot çalışıyor. Çakışma koruması aktif. Loglar açık.")
     while True: await asyncio.sleep(3600)
