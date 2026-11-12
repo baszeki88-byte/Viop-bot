@@ -411,8 +411,7 @@ async def process_signals(symbol, dfs):
         bar_time = df.index[-1]; inst_key = f"inst_{symbol}_{tf}"
         if inst_key not in instant_states: instant_states[inst_key] = {"last_bar": None}
         if instant_states[inst_key]["last_bar"] != bar_time:
-            delay_min = (datetime.now(TIMEZONE) - bar_time).total_seconds() / 60
-            if delay_min > 180: continue
+            # GEÇİKME FİLTRESİ KALDIRILDI
             direction = None
             if r_prev <= INSTANT_SHORT < r_now: direction = "SHORT"
             elif r_prev >= INSTANT_LONG > r_now: direction = "LONG"
@@ -439,12 +438,7 @@ async def process_signals(symbol, dfs):
         if atr_data.get("last_bar") != bar_time:
             new_bars = df[df.index > atr_data["last_bar"]] if atr_data.get("last_bar") else df.tail(1)
             for idx, row in new_bars.iterrows():
-                delay_min = (datetime.now(TIMEZONE) - idx).total_seconds() / 60
-                
-                # Zaman filtreleri esnetildi
-                max_delay = 240 if tf == "15m" else (360 if tf == "30m" else (600 if tf == "1h" else 900))
-                if delay_min > max_delay: continue
-                
+                # GEÇİKME FİLTRESİ KALDIRILDI
                 r_now = rsi.loc[idx] if idx in rsi.index else get_rsi(df.loc[:idx, 'close'], period=RSI_PERIOD).iloc[-1]
                 if pd.isna(r_now): continue
                 close_price = row['close']; candle_high = row['high']; candle_low = row['low']; state = atr_data["state"]
