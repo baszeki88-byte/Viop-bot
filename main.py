@@ -69,11 +69,22 @@ TIMEZONE = pytz.timezone("Europe/Istanbul")
 TR_HOLIDAYS = holidays.Turkey(years=range(2024, 2031))
 
 SYMBOLS = [
-    "TOASO", "TRALT", "ASTOR", "GUBRF", "TRMET", "TCELL", "GARAN", "YKBNK", "TAVHL", "ENKAI",
-    "TTKOM", "SAHOL", "SASA", "AEFES", "ASELS", "MGROS", "TUPRS", "AKBNK", "KCHOL", "KRDMD",
-    "ISCTR", "THYAO", "BIMAS", "EREGL", "EKGYO", "PGSUS", "FROTO", "SISE", "VAKBN", "ALARK"
+    # --- BIST 30 ve Vadeli İşlem Gören Likit Hisseler ---
+    "AKBNK", "ALARK", "ASELS", "ASTOR", "BIMAS", "DOHOL", "EKGYO", "ENKAI", "EREGL", "FROTO",
+    "GARAN", "GUBRF", "HALKB", "ISCTR", "KCHOL", "KRDMD", "MGROS", "ODAS", "PETKM", "PGSUS",
+    "SAHOL", "SASA", "SISE", "TAVHL", "TCELL", "THYAO", "TKFEN", "TOASO", "TRALT", "TRMET",
+    "TTKOM", "TUPRS", "VAKBN", "VESTL", "YKBNK", "AEFES", "ARCLK", "CIMSA", "DOAS", "OYAKC",
+    "SOKM", "ULKER", "BRSAN", "AKSEN", "ENJSA",
+    
+    # --- Endeksler ---
+    "XU030",      # BIST 30 Endeksi
+    "XU100",      # BIST 100 Endeksi
+    
+    # --- Emtialar (TradingView / Borsapy Uyumlu) ---
+    "XAUUSD",     # Altın (Ons)
+    "XAGUSD",     # Gümüş (Ons)
+    "UKOIL"       # Brent Petrol
 ]
-
 BIST_STOCKS = [s for s in SYMBOLS if not s.startswith("XU")]
 
 SECTORS = {
