@@ -134,7 +134,11 @@ active_triple_ema_trades = {}
 pending_ema_crosses = {}
 active_gap_hunter_trades = {}
 gap_hunter_states = {}
-is_scanning = False
+
+# YENİ: İki Farklı Tarama İçin İki Farklı Kilit
+is_scanning_fast = False  # 5 Dk'lık döngü (ATR, EMA)
+is_scanning_slow = False  # 15 Dk'lık döngü (RSI, Fibo, Gap)
+
 background_tasks = set()
 
 CACHE_5M = {}
@@ -149,7 +153,8 @@ TRIPLE_EMA_FILE = os.path.join(DATA_DIR, "active_triple_ema.json")
 GAP_HUNTER_FILE = os.path.join(DATA_DIR, "active_gap_hunter.json")
 
 EXECUTOR = ThreadPoolExecutor(max_workers=20)
-FETCH_SEM = asyncio.Semaphore(16)
+# YENİ: Aynı anda API'ye giden istek sayısı 16'dan 8'e düşürüldü
+FETCH_SEM = asyncio.Semaphore(8)
 
 # ==========================================
 # YARDIMCI: GERÇEK GECİKME HESAPLAMA & MUM TAMAMLANMA
@@ -383,8 +388,6 @@ def get_atr_series(df, period=10):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     return tr.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
 
-# ARTIK SUPERTREND HESAPLAMASINA GEREK YOK (KALDIRILDI)
-
 def fetch_ohlc(symbol, interval, limit=500):
     for attempt in range(3):
         try:
@@ -394,12 +397,10 @@ def fetch_ohlc(symbol, interval, limit=500):
                 if not isinstance(df.index, pd.DatetimeIndex): df.index = pd.to_datetime(df.index)
                 if df.index.tz is None: df.index = df.index.tz_localize(TIMEZONE)
                 else: df.index = df.index.tz_convert(TIMEZONE)
-                
-                # ANLIK TETİKLEME İÇİN SON MUMU KESMİYORUZ
                 return df
         except Exception as e: 
             logger.error(f"Veri çekme hatası ({symbol} {interval}): {e}")
-            time_module.sleep(1)
+            time_module.sleep(2) # YENİ: Bekleme süresi 1'den 2 saniyeye çıkarıldı
     return None
 
 async def fetch_ohlc_async(symbol, interval, limit=500):
@@ -419,10 +420,6 @@ async def fetch_ohlc_async(symbol, interval, limit=500):
             return df
     except asyncio.TimeoutError: logger.warning(f"Timeout: {symbol} {interval}"); return None
     except Exception as e: logger.error(f"Async Fetch Hatası ({symbol}): {e}"); return None
-
-async def fetch_all_tfs_async(symbol):
-    results = await asyncio.gather(*[fetch_ohlc_async(symbol, tf) for tf in FETCH_TFS])
-    return dict(zip(FETCH_TFS, results))
 
 # ==========================================
 # SİNYAL MOTORLARI
@@ -503,7 +500,6 @@ async def process_atr_signals(symbol, dfs):
         if trade_key_short in active_trades or trade_key_long in active_trades:
             continue
             
-        # ANLIK TETİKLEME İÇİN SON BAR (Henüz kapanmamış olabilir)
         start_idx = len(df) - 1
         for i in range(start_idx, len(df)):
             idx = df.index[i]
@@ -552,7 +548,6 @@ async def process_atr_signals(symbol, dfs):
                     atr_data["reject_count"] += 1
                     if atr_data["reject_count"] >= 20 or r_now > 40: atr_data.update({"state": "IDLE", "reject_count": 0})
         
-        # Son işlenen barı kaydet (Anlık sinyal üretilse bile bir sonraki 5 dk'da tekrar etmemesi için)
         atr_data["last_bar"] = bar_time
     return msgs
 
@@ -790,10 +785,10 @@ async def check_active_trades():
     await asyncio.gather(*tasks)
 
 # ==========================================
-# ÜÇLÜ EMA (ARTIK SUPERTREND YOK, SADECE KESİŞİM)
+# EMA (SADECE 5M KESİŞİM)
 # ==========================================
 async def check_triple_ema():
-    global active_triple_ema_trades, pending_ema_crosses
+    global active_triple_ema_trades
     if not is_market_open(): return
     
     sem_open = asyncio.Semaphore(10)
@@ -885,7 +880,6 @@ async def check_triple_ema():
                         triple_ema_states[state_key]["last_bar"] = bar_time
                         existing = active_triple_ema_trades.get(sym)
                         if existing and existing["type"] == direction: return 
-                        if sym in pending_ema_crosses: return
                         
                         emoji = "📈" if direction == "LONG" else "📉"
                         entry_price = float(df_5m['close'].iloc[-1])
@@ -1217,12 +1211,15 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="HTML")
 
 async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    global is_scanning
+    global is_scanning_fast, is_scanning_slow
     if update.effective_chat.id not in CHAT_IDS: return
-    if is_scanning: await update.message.reply_text("⏳ Şu an arka planda bir tarama devam ediyor. Lütfen bitmesini bekleyin..."); return
+    if is_scanning_fast or is_scanning_slow: 
+        await update.message.reply_text("⏳ Şu an arka planda bir tarama devam ediyor. Lütfen bitmesini bekleyin...")
+        return
     await update.message.reply_text("🔄 Manuel tarama arka planda başlatıldı. Tüm hisseler kontrol ediliyor...")
     async def run_manual_scan():
-        await tick(force=True)
+        # Manuel taramada hem hızlı hem yavaş döngüyü çalıştırıyoruz
+        await asyncio.gather(tick_fast(force=True), tick_slow(force=True))
         for cid in CHAT_IDS:
             try: await bot_app.bot.send_message(chat_id=cid, text="✅ Tarama tamamlandı. Eğer sinyal koşulu oluştuysa mesajınız gelmiştir.", parse_mode="HTML")
             except: pass
@@ -1274,20 +1271,63 @@ bot_app.add_handler(CommandHandler(["help", "yardim", "durum"], cmd_help, filter
 bot_app.add_handler(CommandHandler("tara", cmd_tara, filters=auth_filter))
 bot_app.add_handler(MessageHandler(filters.TEXT & auth_filter, analyze_symbol))
 
-async def tick(force=False):
-    global is_scanning
+# YENİ: 5 Dk'lık Döngü (ATR ve EMA)
+async def tick_fast(force=False):
+    global is_scanning_fast
     if not force and not is_market_open(): return
-    if is_scanning: return
-    is_scanning = True
-    logger.info(f"🔄 Hızlı Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
+    if is_scanning_fast: return
+    is_scanning_fast = True
+    logger.info(f"🔄 Hızlı Tarama (ATR & EMA) başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
     failed_count = 0
     try:
         sem = asyncio.Semaphore(10)
         async def limited_fetch(sym):
             async with sem:
                 try:
-                    dfs = await fetch_all_tfs_async(sym)
-                    return sym, dfs
+                    dfs = await asyncio.gather(*[fetch_ohlc_async(sym, tf) for tf in FETCH_TFS])
+                    return sym, dict(zip(FETCH_TFS, dfs))
+                except Exception as e:
+                    logger.error(f"Fetch hatası ({sym}): {e}")
+                    return sym, None
+
+        tasks = [limited_fetch(sym) for sym in SYMBOLS]
+
+        for coro in asyncio.as_completed(tasks):
+            try:
+                sym, dfs = await coro
+                if dfs is None or not dfs:
+                    failed_count += 1
+                    continue
+                try:
+                    atr_msgs = await process_atr_signals(sym, dfs)
+                    for msg_data in atr_msgs: await send_signal_message(msg_data)
+                except Exception as e:
+                    logger.error(f"Sinyal işleme hatası ({sym}): {e}")
+            except Exception as e:
+                failed_count += 1
+                logger.error(f"Beklenmeyen tarama hatası: {e}")
+
+        if failed_count >= 15:
+            await send_admin_alert(f"⚠️ <b>Hızlı Tarama Sorunu</b>\n{failed_count}/{len(SYMBOLS)} hisse için veri alınamadı.", "scan_fast_fail")
+    finally:
+        is_scanning_fast = False
+
+# YENİ: 15 Dk'lık Döngü (RSI, Fibo, Gap)
+async def tick_slow(force=False):
+    global is_scanning_slow
+    if not force and not is_market_open(): return
+    if is_scanning_slow: return
+    is_scanning_slow = True
+    logger.info(f"🔄 Yavaş Tarama (RSI, Fibo, Gap) başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
+    failed_count = 0
+    try:
+        sem = asyncio.Semaphore(10)
+        async def limited_fetch(sym):
+            async with sem:
+                try:
+                    # RSI için 1h, 4h yeterli. Ama RSI içinde 4h trend kontrolü var.
+                    dfs = await asyncio.gather(fetch_ohlc_async(sym, "1h"), fetch_ohlc_async(sym, "4h"))
+                    return sym, {"1h": dfs[0], "4h": dfs[1]}
                 except Exception as e:
                     logger.error(f"Fetch hatası ({sym}): {e}")
                     return sym, None
@@ -1303,8 +1343,6 @@ async def tick(force=False):
                 try:
                     rsi_msgs = await process_rsi_signals(sym, dfs)
                     for msg_data in rsi_msgs: await send_signal_message(msg_data)
-                    atr_msgs = await process_atr_signals(sym, dfs)
-                    for msg_data in atr_msgs: await send_signal_message(msg_data)
                 except Exception as e:
                     logger.error(f"Sinyal işleme hatası ({sym}): {e}")
             except Exception as e:
@@ -1312,14 +1350,12 @@ async def tick(force=False):
                 logger.error(f"Beklenmeyen tarama hatası: {e}")
 
         if failed_count >= 15:
-            await send_admin_alert(
-                f"⚠️ <b>Tarama Sorunu</b>\n{failed_count}/{len(SYMBOLS)} hisse için veri alınamadı. Veri sağlayıcı yavaş olabilir. Tarama kısmi çalıştı.",
-                "scan_partial_fail"
-            )
+            await send_admin_alert(f"⚠️ <b>Yavaş Tarama Sorunu</b>\n{failed_count}/{len(SYMBOLS)} hisse için veri alınamadı.", "scan_slow_fail")
     finally:
-        is_scanning = False
+        is_scanning_slow = False
 
-async def tracker_tick():
+# YENİ: İşlem Takip Döngüleri
+async def tracker_fast():
     if not is_market_open(): return
     try: await check_active_trades()
     except Exception as e: logger.error(f"check_active_trades hatası: {e}")
@@ -1327,6 +1363,9 @@ async def tracker_tick():
     except Exception as e: logger.error(f"check_5m_confirmations hatası: {e}")
     try: await check_triple_ema()
     except Exception as e: logger.error(f"check_triple_ema hatası: {e}")
+
+async def tracker_slow():
+    if not is_market_open(): return
     try: await check_gap_hunter() 
     except Exception as e: logger.error(f"check_gap_hunter hatası: {e}")
     try: await check_mukemmel_fibo()
@@ -1339,12 +1378,12 @@ async def market_open_scan():
             await bot_app.bot.send_message(chat_id=cid, text="🟢 Seans açıldı, tarama ve takip başladı.", parse_mode="HTML")
             await bot_app.bot.send_message(chat_id=cid, text="Sistem her zaman senin için çalışıyor, kazanmak istiyorsan sadece sistemle kal... MZB 😉", parse_mode="HTML")
         except Exception as e: pass
-    await tick(force=True)
+    await asyncio.gather(tick_fast(force=True), tick_slow(force=True))
 
 async def clear_daily_state():
     async with trade_lock:
         instant_states.clear(); atr_states.clear(); earnings_cache.clear(); fibo_cache.clear()
-        pending_confirmations.clear(); pending_trades.clear(); CACHE_5M.clear(); CACHE_15M.clear(); pending_ema_crosses.clear()
+        pending_confirmations.clear(); pending_trades.clear(); CACHE_5M.clear(); CACHE_15M.clear()
         gap_hunter_states.clear(); MUK_FIBO_TRADES.clear(); MUK_FIBO_SETUPS.clear()
 
 async def task_morning_summary(): await generate_market_summary("Sabah")
@@ -1365,16 +1404,24 @@ async def main():
     sched = AsyncIOScheduler(timezone=TIMEZONE, job_defaults={'coalesce': True, 'max_instances': 1, 'misfire_grace_time': 60})
     
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
-    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
-    sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
-    sched.add_job(tracker_tick, CronTrigger(day_of_week="mon-fri", hour=17, minute=58, timezone=TIMEZONE))
-    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour=18, minute=10, timezone=TIMEZONE), kwargs={'force': True})
+    
+    # 5 DAKİKALIK DÖNGÜ (ATR ve EMA)
+    sched.add_job(tick_fast, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
+    sched.add_job(tracker_fast, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="*/5", timezone=TIMEZONE))
+    
+    # 15 DAKİKALIK DÖNGÜ (RSI, Fibo, Gap)
+    sched.add_job(tick_slow, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="0,15,30,45", timezone=TIMEZONE))
+    sched.add_job(tracker_slow, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="0,15,30,45", timezone=TIMEZONE))
+    
+    sched.add_job(tick_fast, CronTrigger(day_of_week="mon-fri", hour=18, minute=10, timezone=TIMEZONE), kwargs={'force': True})
+    sched.add_job(tick_slow, CronTrigger(day_of_week="mon-fri", hour=18, minute=10, timezone=TIMEZONE), kwargs={'force': True})
+    
     sched.add_job(clear_daily_state, CronTrigger(day_of_week="mon-fri", hour=18, minute=30, timezone=TIMEZONE))
     sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=15, timezone=TIMEZONE))
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
     
     sched.start()
-    logger.info("✅ Bot çalışıyor. Anlık tetikleme (Mum tamamlanmadı) eklendi. Loglar açık.")
+    logger.info("✅ Bot çalışıyor. 5dk (ATR/EMA) ve 15dk (RSI/Fibo/Gap) olarak optimize edildi.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
