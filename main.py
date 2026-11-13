@@ -74,16 +74,8 @@ SYMBOLS = [
     "GARAN", "GUBRF", "HALKB", "ISCTR", "KCHOL", "KRDMD", "MGROS", "ODAS", "PETKM", "PGSUS",
     "SAHOL", "SASA", "SISE", "TAVHL", "TCELL", "THYAO", "TKFEN", "TOASO", "TRALT", "TRMET",
     "TTKOM", "TUPRS", "VAKBN", "VESTL", "YKBNK", "AEFES", "ARCLK", "CIMSA", "DOAS", "OYAKC",
-    "SOKM", "ULKER", "BRSAN", "AKSEN", "ENJSA",
+    "SOKM", "ULKER", "BRSAN", "AKSEN", "ENJSA", 
     
-    # --- Endeksler ---
-    "XU030",      # BIST 30 Endeksi
-    "XU100",      # BIST 100 Endeksi
-    
-    # --- Emtialar (TradingView / Borsapy Uyumlu) ---
-    "XAUUSD",     # Altın (Ons)
-    "XAGUSD",     # Gümüş (Ons)
-    "UKOIL"       # Brent Petrol
 ]
 BIST_STOCKS = [s for s in SYMBOLS if not s.startswith("XU")]
 
