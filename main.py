@@ -108,7 +108,7 @@ RSI_COOLDOWN_HOURS = 3
 ALARM_SHORT_UPPER = 82
 ALARM_LONG_LOWER = 22
 ALARM_ATR_DROP = 1.0
-ATR_PERIOD = 7 # YENİ: ATR Periyodu 7
+ATR_PERIOD = 7
 
 TIME_FRAMES_RSI = ["1h"]
 TIME_FRAMES_ATR = ["15m", "30m", "1h", "4h"]
@@ -127,11 +127,8 @@ MUK_FIBO_TRADES = {}
 MUK_FIBO_SETUPS = {} 
 PIVOT_CACHE = {} 
 
-# EMA Cooldown
 EMA_COOLDOWN_MIN = 15
 ema_cooldowns = {}
-
-# EMA Akıllı Önbellek
 EMA_DATA_CACHE = {} 
 
 active_trades = {}
@@ -423,11 +420,9 @@ def fetch_ohlc(symbol, interval, limit=500):
     return None
 
 async def fetch_ohlc_async(symbol, interval, limit=500):
-    # EMA AKILLI ÖNBELLEK KONTROLÜ
     if interval in ["15m", "30m"]:
         if symbol in EMA_DATA_CACHE and interval in EMA_DATA_CACHE[symbol]:
             cached_df = EMA_DATA_CACHE[symbol][interval]
-            # Son 5 barı çek ve birleştir
             loop = asyncio.get_running_loop()
             new_df = await loop.run_in_executor(EXECUTOR, fetch_ohlc, symbol, interval, 5)
             if new_df is not None and not new_df.empty:
@@ -853,7 +848,6 @@ async def check_triple_ema():
                     lag_dk = get_real_lag_minutes(bar_time, tf)
                     inc_txt = " <i>(Mum tamamlanmadı)</i>" if is_bar_incomplete(bar_time, tf) else ""
                     
-                    # 15 Dakikalık Cooldown Kontrolü
                     c_key = f"ema_{sym}_{tf}"
                     last_sig = ema_cooldowns.get(c_key)
                     if last_sig and (bar_time - last_sig) < timedelta(minutes=EMA_COOLDOWN_MIN):
@@ -1050,18 +1044,20 @@ async def check_5m_confirmations():
             del pending_confirmations[key]
 
 # ==========================================
-# BIST 30 ÖZETİ
+# BIST 30 ÖZETİ (HATA DURUMUNDA ADMİNE HABER VERİR)
 # ==========================================
 async def generate_market_summary(session_name):
     try:
         df_30m, df_1h = await asyncio.gather(fetch_ohlc_async("XU030", "30m", limit=500), fetch_ohlc_async("XU030", "1h", limit=500))
         if df_30m is None or df_1h is None: 
             logger.warning("XU030 özeti için veri çekilemedi. (API Hatası)")
+            await send_admin_alert(f"⚠️ <b>Özet Hatası:</b> XU030 30m/1h verisi çekilemedi. (API Kaynaklı)", "ozet_api_fail")
             return
         
         today = datetime.now(TIMEZONE).date(); df_today = df_30m[df_30m.index.date == today]
         if df_today.empty: 
             logger.warning("XU030 özeti için bugünün verisi bulunamadı.")
+            await send_admin_alert(f"⚠️ <b>Özet Hatası:</b> XU030 için bugünün verisi boş geldi.", "ozet_empty_fail")
             return
         
         if "Sabah" in session_name: session_df = df_today.between_time('09:55', '14:00'); time_str = "09:55 - 14:00"
@@ -1150,7 +1146,7 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
     text = update.message.text.upper().replace("/", "").strip()
     if not text.isalnum() or len(text) < 2 or len(text) > 10: return
-    if text in ["START", "HELP", "YARDIM", "TARA"]: return
+    if text in ["START", "HELP", "YARDIM", "TARA", "OZET"]: return
     if text not in SYMBOLS:
         await update.message.reply_text(f"❌ '{text}' tarama listesinde bulunamadı."); return
     await update.message.reply_text(f"🔍 {text} analiz ediliyor, lütfen bekleyin...")
@@ -1189,7 +1185,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
-    msg = "🤖 <b>Yardım Menüsü</b>\n\n• Hisse analizi için: <code>/ASELS</code> veya <code>ASELS</code>\n• Endeks analizi için: <code>/XU030</code>\n• Tüm piyasayı anında taramak için: <code>/tara</code>\n\nSistem, RSI Büyüsü, ATR Dünyası, EMA, Gap Avcısı (16:00-17:40) ve <b>Mükemmel Fibo (1H & 4H)</b> sinyallerini otomatik olarak takip eder."
+    msg = "🤖 <b>Yardım Menüsü</b>\n\n• Hisse analizi için: <code>/ASELS</code> veya <code>ASELS</code>\n• Endeks analizi için: <code>/XU030</code>\n• Tüm piyasayı anında taramak için: <code>/tara</code>\n• Piyasa özetini anında almak için: <code>/ozet</code>\n\nSistem, RSI Büyüsü, ATR Dünyası, EMA, Gap Avcısı (16:00-17:40) ve <b>Mükemmel Fibo (1H & 4H)</b> sinyallerini otomatik olarak takip eder."
     await update.message.reply_text(msg, parse_mode="HTML")
 
 async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1205,6 +1201,14 @@ async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             try: await bot_app.bot.send_message(chat_id=cid, text="✅ Tarama tamamlandı. Eğer sinyal koşulu oluştuysa mesajınız gelmiştir.", parse_mode="HTML")
             except: pass
     task = asyncio.create_task(run_manual_scan()); background_tasks.add(task); task.add_done_callback(background_tasks.discard)
+
+# YENİ: /ozet KOMUTU
+async def cmd_ozet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id not in CHAT_IDS: return
+    await update.message.reply_text("⏳ Piyasa özeti hazırlanıyor, lütfen bekleyin...")
+    now = datetime.now(TIMEZONE)
+    session_name = "Sabah" if now.time() < dt_time(14, 0) else "Öğleden Sonra"
+    await generate_market_summary(session_name)
 
 # ==========================================
 # BOT BAŞLATMA VE HANDLER'LAR
@@ -1250,6 +1254,7 @@ auth_filter = filters.User(user_id=CHAT_IDS)
 bot_app.add_handler(CommandHandler("start", cmd_start, filters=auth_filter))
 bot_app.add_handler(CommandHandler(["help", "yardim", "durum"], cmd_help, filters=auth_filter))
 bot_app.add_handler(CommandHandler("tara", cmd_tara, filters=auth_filter))
+bot_app.add_handler(CommandHandler("ozet", cmd_ozet, filters=auth_filter)) # YENİ EKLENDİ
 bot_app.add_handler(MessageHandler(filters.TEXT & auth_filter, analyze_symbol))
 
 # YENİ: 5 Dk'lık Döngü (ATR ve EMA)
@@ -1387,7 +1392,6 @@ async def main():
     
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
     
-    # Dakikalar: 1,5,11,21,31,41,51
     sched.add_job(tick_fast, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="1,5,11,21,31,41,51", timezone=TIMEZONE))
     sched.add_job(tracker_fast, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="1,5,11,21,31,41,51", timezone=TIMEZONE))
     
@@ -1402,7 +1406,7 @@ async def main():
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
     
     sched.start()
-    logger.info("✅ Bot çalışıyor. EMA (15m/30m), ATR (Periyot 7) ve diğer tüm güncellemeler aktif.")
+    logger.info("✅ Bot çalışıyor. /ozet komutu ve Admin özet uyarıları eklendi.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
