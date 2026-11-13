@@ -121,6 +121,7 @@ FIBO_LEVEL = 0.618
 FIBO_SL = 2.0
 MUK_FIBO_TRADES = {} 
 MUK_FIBO_SETUPS = {} 
+PIVOT_CACHE = {} # YENİ: Fibo Pivot Hafızası
 
 active_trades = {}
 pending_trades = set()
@@ -135,9 +136,8 @@ pending_ema_crosses = {}
 active_gap_hunter_trades = {}
 gap_hunter_states = {}
 
-# YENİ: İki Farklı Tarama İçin İki Farklı Kilit
-is_scanning_fast = False  # 5 Dk'lık döngü (ATR, EMA)
-is_scanning_slow = False  # 15 Dk'lık döngü (RSI, Fibo, Gap)
+is_scanning_fast = False  
+is_scanning_slow = False  
 
 background_tasks = set()
 
@@ -153,8 +153,8 @@ TRIPLE_EMA_FILE = os.path.join(DATA_DIR, "active_triple_ema.json")
 GAP_HUNTER_FILE = os.path.join(DATA_DIR, "active_gap_hunter.json")
 
 EXECUTOR = ThreadPoolExecutor(max_workers=20)
-# YENİ: Aynı anda API'ye giden istek sayısı 16'dan 8'e düşürüldü
-FETCH_SEM = asyncio.Semaphore(8)
+# YENİ: Semaphore 8'den 6'ya düşürüldü
+FETCH_SEM = asyncio.Semaphore(6)
 
 # ==========================================
 # YARDIMCI: GERÇEK GECİKME HESAPLAMA & MUM TAMAMLANMA
@@ -372,6 +372,16 @@ def _get_daily_pivots_sync(symbol):
         logger.error(f"Günlük Pivot çekme hatası ({symbol}): {e}")
         return None
 
+# YENİ: HAFIZALI PIVOT FONKSİYONU
+async def get_cached_pivots(sym):
+    if sym in PIVOT_CACHE:
+        return PIVOT_CACHE[sym]
+    
+    pivots = await asyncio.to_thread(_get_daily_pivots_sync, sym)
+    if pivots:
+        PIVOT_CACHE[sym] = pivots
+    return pivots
+
 # ==========================================
 # MATEMATİK
 # ==========================================
@@ -400,7 +410,7 @@ def fetch_ohlc(symbol, interval, limit=500):
                 return df
         except Exception as e: 
             logger.error(f"Veri çekme hatası ({symbol} {interval}): {e}")
-            time_module.sleep(2) # YENİ: Bekleme süresi 1'den 2 saniyeye çıkarıldı
+            time_module.sleep(2)
     return None
 
 async def fetch_ohlc_async(symbol, interval, limit=500):
@@ -562,7 +572,8 @@ async def check_mukemmel_fibo():
     async def scan_single_fibo(sym):
         async with sem:
             try:
-                pivots = await asyncio.to_thread(_get_daily_pivots_sync, sym)
+                # YENİ: Hafızadaki pivotları kullan veya bir kez çek
+                pivots = await get_cached_pivots(sym)
                 if not pivots: return
                 
                 R_0618 = pivots['R_0618']
@@ -1218,7 +1229,6 @@ async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("🔄 Manuel tarama arka planda başlatıldı. Tüm hisseler kontrol ediliyor...")
     async def run_manual_scan():
-        # Manuel taramada hem hızlı hem yavaş döngüyü çalıştırıyoruz
         await asyncio.gather(tick_fast(force=True), tick_slow(force=True))
         for cid in CHAT_IDS:
             try: await bot_app.bot.send_message(chat_id=cid, text="✅ Tarama tamamlandı. Eğer sinyal koşulu oluştuysa mesajınız gelmiştir.", parse_mode="HTML")
@@ -1385,6 +1395,7 @@ async def clear_daily_state():
         instant_states.clear(); atr_states.clear(); earnings_cache.clear(); fibo_cache.clear()
         pending_confirmations.clear(); pending_trades.clear(); CACHE_5M.clear(); CACHE_15M.clear()
         gap_hunter_states.clear(); MUK_FIBO_TRADES.clear(); MUK_FIBO_SETUPS.clear()
+        PIVOT_CACHE.clear() # YENİ: Fibo hafızası her gün sıfırlanır
 
 async def task_morning_summary(): await generate_market_summary("Sabah")
 async def task_afternoon_summary(): await generate_market_summary("Öğleden Sonra")
@@ -1421,7 +1432,7 @@ async def main():
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
     
     sched.start()
-    logger.info("✅ Bot çalışıyor. 5dk (ATR/EMA) ve 15dk (RSI/Fibo/Gap) olarak optimize edildi.")
+    logger.info("✅ Bot çalışıyor. Fibo Hafızası, Semaphore 6, 5dk (ATR/EMA) ve 15dk (Diğerleri) optimize edildi.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
