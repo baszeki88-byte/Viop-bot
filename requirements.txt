@@ -7,3 +7,4 @@ holidays
 pytz
 mplfinance
 matplotlib
+scipy
