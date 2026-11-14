@@ -7,11 +7,18 @@ import time as time_module
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import logging
+import io
 
 import pandas as pd
 import borsapy as bp
 import pytz
 import holidays
+
+import matplotlib
+matplotlib.use('Agg') # Render için arka plan çizim modu
+import matplotlib.pyplot as plt
+import mplfinance as mpf
+from scipy.signal import argrelextrema
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -130,6 +137,9 @@ PIVOT_CACHE = {}
 EMA_COOLDOWN_MIN = 15
 ema_cooldowns = {}
 EMA_DATA_CACHE = {} 
+
+FORMASYON_TRADES = {}
+FORMASYON_DATA_CACHE = {}
 
 active_trades = {}
 pending_trades = set()
@@ -1044,14 +1054,137 @@ async def check_5m_confirmations():
             del pending_confirmations[key]
 
 # ==========================================
-# BIST 30 ÖZETİ (HATA DURUMUNDA ADMİNE HABER VERİR)
+# FORMASYON AVCISI (6 FORMASYON + GRAFİKLİ)
+# ==========================================
+def _draw_chart(df, pattern_name, sl, tp, direction):
+    try:
+        df_plot = df.tail(60).copy()
+        df_plot.index.name = 'Date'
+        hlines = dict(hlines=[sl, tp], colors=['red', 'green'], linestyle='--', linewidths=1)
+        buf = io.BytesIO()
+        mpf.plot(df_plot, type='candle', style='charles', title=f"{pattern_name} - {direction}",
+                 hlines=hlines, savefig=dict(fname=buf, dpi=120, bbox_inches='tight'))
+        buf.seek(0)
+        return buf
+    except Exception as e:
+        logger.error(f"Grafik çizim hatası: {e}")
+        return None
+
+async def check_formasyon_avcisi():
+    if not is_market_open(): return
+    now = datetime.now(TIMEZONE)
+    
+    sem = asyncio.Semaphore(10)
+    async def scan_single_pattern(sym):
+        async with sem:
+            try:
+                for tf in ["1h", "4h"]:
+                    df = await fetch_ohlc_async(sym, tf, limit=100)
+                    if df is None or len(df) < 20: continue
+                    
+                    bar_time = df.index[-1]
+                    if is_bar_incomplete(bar_time, tf):
+                        continue # Mum henüz kapanmadı, formasyon aramayı geç.
+                        
+                    lag_dk = get_real_lag_minutes(bar_time, tf)
+                    
+                    # Pivotları bul (Basit local ekstremalar)
+                    order = 3
+                    low_idx = argrelextrema(df['low'].values, np.less_equal, order=order)[0]
+                    high_idx = argrelextrema(df['high'].values, np.greater_equal, order=order)[0]
+                    
+                    # Formasyon Tespit Mantığı (Sadece son 10 pivotu inceleyerek)
+                    pivots = []
+                    for idx in list(low_idx) + list(high_idx):
+                        pivots.append({'type': 'L' if idx in low_idx else 'H', 'idx': idx, 'price': df['low'].iloc[idx] if idx in low_idx else df['high'].iloc[idx]})
+                    pivots = sorted(pivots, key=lambda x: x['idx'])
+                    
+                    if len(pivots) < 5: continue
+
+                    # Son 5 pivotu alalım
+                    p1, p2, p3, p4, p5 = pivots[-5], pivots[-4], pivots[-3], pivots[-2], pivots[-1]
+                    
+                    last_close = df['close'].iloc[-1]
+                    entry = last_close
+                    msg = ""
+                    sl, tp = 0, 0
+                    sig_key = ""
+
+                    # --- 1. İkili Dip (DB) ---
+                    if p4['type'] == 'L' and p2['type'] == 'L':
+                        low1, low2 = p4['price'], p2['price']
+                        if abs(low1 - low2) < (low1 * 0.01):
+                            neck = max(p3['price'], p5['price']) # Aradaki en yüksek
+                            if last_close > neck:
+                                sig_key = f"form_{sym}_{tf}_DB"
+                                if sig_key not in FORMASYON_TRADES or (now - FORMASYON_TRADES[sig_key]).total_seconds() > 3600*6:
+                                    FORMASYON_TRADES[sig_key] = now
+                                    sl = min(low1, low2) * 0.995; tp = entry + (entry - sl) * 2
+                                    msg = (f"🏛️ <b>FORMASYON AVCISI: İKİLİ DİP - {sym} [{tf.upper()}]</b>\n✅ <b>Mum kapandı, formasyon oluştu.</b>\n\n📈 <b>Yön:</b> LONG\n💰 <b>Giriş:</b> {entry:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f}\n🎯 <b>Hedef:</b> {tp:,.2f}\n\n⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag_dk)} {lag_dk} dk")
+
+                    # --- 2. İkili Tepe (DT) ---
+                    elif p4['type'] == 'H' and p2['type'] == 'H':
+                        high1, high2 = p4['price'], p2['price']
+                        if abs(high1 - high2) < (high1 * 0.01):
+                            neck = min(p3['price'], p5['price'])
+                            if last_close < neck:
+                                sig_key = f"form_{sym}_{tf}_DT"
+                                if sig_key not in FORMASYON_TRADES or (now - FORMASYON_TRADES[sig_key]).total_seconds() > 3600*6:
+                                    FORMASYON_TRADES[sig_key] = now
+                                    sl = max(high1, high2) * 1.005; tp = entry - (sl - entry) * 2
+                                    msg = (f"🏛️ <b>FORMASYON AVCISI: İKİLİ TEPE - {sym} [{tf.upper()}]</b>\n✅ <b>Mum kapandı, formasyon oluştu.</b>\n\n📉 <b>Yön:</b> SHORT\n💰 <b>Giriş:</b> {entry:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f}\n🎯 <b>Hedef:</b> {tp:,.2f}\n\n⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag_dk)} {lag_dk} dk")
+
+                    # --- 3. OBO (Omuz-Baş-Omuz) ---
+                    elif p5['type'] == 'H' and p4['type'] == 'L' and p3['type'] == 'H' and p2['type'] == 'L' and p1['type'] == 'H':
+                        ls, n1, hd, n2, rs = p5, p4, p3, p2, p1
+                        neck = (n1['price'] + n2['price']) / 2
+                        h = hd['price'] - neck
+                        if hd['price'] > ls['price'] and hd['price'] > rs['price'] and abs(ls['price'] - rs['price']) < h * 0.4:
+                            if last_close < neck:
+                                sig_key = f"form_{sym}_{tf}_OBO"
+                                if sig_key not in FORMASYON_TRADES or (now - FORMASYON_TRADES[sig_key]).total_seconds() > 3600*6:
+                                    FORMASYON_TRADES[sig_key] = now
+                                    sl = hd['price']; tp = neck - h
+                                    msg = (f"🏛️ <b>FORMASYON AVCISI: OBO - {sym} [{tf.upper()}]</b>\n✅ <b>Mum kapandı, formasyon oluştu.</b>\n\n📉 <b>Yön:</b> SHORT\n💰 <b>Giriş:</b> {entry:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f}\n🎯 <b>Hedef:</b> {tp:,.2f}\n\n⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag_dk)} {lag_dk} dk")
+
+                    # --- 4. Ters OBO (Ters Omuz-Baş-Omuz) ---
+                    elif p5['type'] == 'L' and p4['type'] == 'H' and p3['type'] == 'L' and p2['type'] == 'H' and p1['type'] == 'L':
+                        ls, n1, hd, n2, rs = p5, p4, p3, p2, p1
+                        neck = (n1['price'] + n2['price']) / 2
+                        h = neck - hd['price']
+                        if hd['price'] < ls['price'] and hd['price'] < rs['price'] and abs(ls['price'] - rs['price']) < h * 0.4:
+                            if last_close > neck:
+                                sig_key = f"form_{sym}_{tf}_TERS_OBO"
+                                if sig_key not in FORMASYON_TRADES or (now - FORMASYON_TRADES[sig_key]).total_seconds() > 3600*6:
+                                    FORMASYON_TRADES[sig_key] = now
+                                    sl = hd['price']; tp = neck + h
+                                    msg = (f"🏛️ <b>FORMASYON AVCISI: TERS OBO - {sym} [{tf.upper()}]</b>\n✅ <b>Mum kapandı, formasyon oluştu.</b>\n\n📈 <b>Yön:</b> LONG\n💰 <b>Giriş:</b> {entry:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f}\n🎯 <b>Hedef:</b> {tp:,.2f}\n\n⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag_dk)} {lag_dk} dk")
+
+                    if msg and sig_key:
+                        buf = _draw_chart(df, msg.split(': ')[1].split(' -')[0], sl, tp, "LONG" if "LONG" in msg else "SHORT")
+                        for cid in CHAT_IDS:
+                            try:
+                                if buf: 
+                                    buf.seek(0)
+                                    await bot_app.bot.send_photo(chat_id=cid, photo=buf, caption=msg, parse_mode="HTML")
+                                else: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                            except Exception as e: logger.error(f"Telegram Formasyon Mesaj hatası: {e}")
+                                
+            except Exception as e:
+                logger.error(f"Formasyon tarama hatası ({sym}): {e}")
+
+    tasks_scan = [scan_single_pattern(sym) for sym in SYMBOLS]
+    await asyncio.gather(*tasks_scan)
+
+# ==========================================
+# BIST 30 ÖZETİ
 # ==========================================
 async def generate_market_summary(session_name):
     try:
         df_30m, df_1h = await asyncio.gather(fetch_ohlc_async("XU030", "30m", limit=500), fetch_ohlc_async("XU030", "1h", limit=500))
         if df_30m is None or df_1h is None: 
             logger.warning("XU030 özeti için veri çekilemedi. (API Hatası)")
-            await send_admin_alert(f"⚠️ <b>Özet Hatası:</b> XU030 30m/1h verisi çekilemedi. (API Kaynaklı)", "ozet_api_fail")
+            await send_admin_alert(f"⚠️ <b>Özet Hatası:</b> XU030 30m/1h verisi çekilemedi.", "ozet_api_fail")
             return
         
         today = datetime.now(TIMEZONE).date(); df_today = df_30m[df_30m.index.date == today]
@@ -1185,7 +1318,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
-    msg = "🤖 <b>Yardım Menüsü</b>\n\n• Hisse analizi için: <code>/ASELS</code> veya <code>ASELS</code>\n• Endeks analizi için: <code>/XU030</code>\n• Tüm piyasayı anında taramak için: <code>/tara</code>\n• Piyasa özetini anında almak için: <code>/ozet</code>\n\nSistem, RSI Büyüsü, ATR Dünyası, EMA, Gap Avcısı (16:00-17:40) ve <b>Mükemmel Fibo (1H & 4H)</b> sinyallerini otomatik olarak takip eder."
+    msg = "🤖 <b>Yardım Menüsü</b>\n\n• Hisse analizi için: <code>/ASELS</code> veya <code>ASELS</code>\n• Endeks analizi için: <code>/XU030</code>\n• Tüm piyasayı anında taramak için: <code>/tara</code>\n• Piyasa özetini anında almak için: <code>/ozet</code>\n\nSistem, RSI Büyüsü, ATR Dünyası, EMA, Gap Avcısı, Formasyon Avcısı ve <b>Mükemmel Fibo</b> sinyallerini takip eder."
     await update.message.reply_text(msg, parse_mode="HTML")
 
 async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1202,7 +1335,6 @@ async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except: pass
     task = asyncio.create_task(run_manual_scan()); background_tasks.add(task); task.add_done_callback(background_tasks.discard)
 
-# YENİ: /ozet KOMUTU
 async def cmd_ozet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
     await update.message.reply_text("⏳ Piyasa özeti hazırlanıyor, lütfen bekleyin...")
@@ -1254,7 +1386,7 @@ auth_filter = filters.User(user_id=CHAT_IDS)
 bot_app.add_handler(CommandHandler("start", cmd_start, filters=auth_filter))
 bot_app.add_handler(CommandHandler(["help", "yardim", "durum"], cmd_help, filters=auth_filter))
 bot_app.add_handler(CommandHandler("tara", cmd_tara, filters=auth_filter))
-bot_app.add_handler(CommandHandler("ozet", cmd_ozet, filters=auth_filter)) # YENİ EKLENDİ
+bot_app.add_handler(CommandHandler("ozet", cmd_ozet, filters=auth_filter))
 bot_app.add_handler(MessageHandler(filters.TEXT & auth_filter, analyze_symbol))
 
 # YENİ: 5 Dk'lık Döngü (ATR ve EMA)
@@ -1298,13 +1430,13 @@ async def tick_fast(force=False):
     finally:
         is_scanning_fast = False
 
-# YENİ: 15 Dk'lık Döngü (RSI, Fibo, Gap, EMA)
+# YENİ: 15 Dk'lık Döngü (RSI, Fibo, Gap, EMA, Formasyon)
 async def tick_slow(force=False):
     global is_scanning_slow
     if not force and not is_market_open(): return
     if is_scanning_slow: return
     is_scanning_slow = True
-    logger.info(f"🔄 Yavaş Tarama (RSI, Fibo, Gap, EMA) başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
+    logger.info(f"🔄 Yavaş Tarama (RSI, Fibo, Gap, EMA, Formasyon) başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
     failed_count = 0
     try:
         sem = asyncio.Semaphore(10)
@@ -1354,6 +1486,8 @@ async def tracker_slow():
     except Exception as e: logger.error(f"check_gap_hunter hatası: {e}")
     try: await check_mukemmel_fibo()
     except Exception as e: logger.error(f"check_mukemmel_fibo hatası: {e}")
+    try: await check_formasyon_avcisi() # YENİ EKLENDİ
+    except Exception as e: logger.error(f"check_formasyon_avcisi hatası: {e}")
 
 async def market_open_scan():
     if not is_market_open(): return
@@ -1372,6 +1506,7 @@ async def clear_daily_state():
         PIVOT_CACHE.clear()
         ema_cooldowns.clear()
         EMA_DATA_CACHE.clear()
+        FORMASYON_TRADES.clear()
 
 async def task_morning_summary(): await generate_market_summary("Sabah")
 async def task_afternoon_summary(): await generate_market_summary("Öğleden Sonra")
@@ -1406,7 +1541,7 @@ async def main():
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
     
     sched.start()
-    logger.info("✅ Bot çalışıyor. /ozet komutu ve Admin özet uyarıları eklendi.")
+    logger.info("✅ Bot çalışıyor. OBO, Ters OBO, İkili Tepe, İkili Dip, Üçlü Dip ve Üçlü Tepe eklendi.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
