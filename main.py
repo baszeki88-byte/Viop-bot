@@ -139,7 +139,9 @@ ema_cooldowns = {}
 EMA_DATA_CACHE = {} 
 
 FORMASYON_TRADES = {}
-FORMASYON_DATA_CACHE = {}
+
+# YENİ: KOŞAN AT STATE
+KOSAN_AT_STATES = {}
 
 active_trades = {}
 pending_trades = set()
@@ -484,6 +486,88 @@ def get_volume_and_trend_tag(df_current, df_4h):
         ema200_4h = df_4h['close'].ewm(span=200, adjust=False).mean().iloc[-1]
         trend_tag = "📈 <b>4H Trend: Yukarı</b>" if ema50_4h > ema200_4h else "📉 <b>4H Trend: Aşağı</b>"
     return f"{vol_tag} | {trend_tag}"
+
+# YENİ: KOŞAN AT (5M RSI MOMENTUM) MOTORU
+async def check_kosan_at(sym):
+    try:
+        df_5m = await fetch_ohlc_async(sym, "5m", limit=100)
+        df_1h = await fetch_ohlc_async(sym, "1h", limit=100)
+        
+        if df_5m is None or df_1h is None: return
+        
+        df_5m['rsi'] = get_rsi(df_5m['close'], 8)
+        df_5m['ema50'] = df_5m['close'].ewm(span=50, adjust=False).mean()
+        
+        df_1h['rsi_1h'] = get_rsi(df_1h['close'], 8)
+        
+        df = pd.merge_asof(df_5m.sort_index(), df_1h[['rsi_1h']].sort_index(), left_index=True, right_index=True, direction='backward')
+        df = df.dropna()
+        
+        if len(df) < 2: return
+        
+        # Mum kapanışı kontrolü
+        bar_time = df.index[-1]
+        if is_bar_incomplete(bar_time, "5m"): return # Mum henüz kapanmadıysa bekle
+        
+        curr = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        # Kesişim Mantığı
+        long_trigger = (prev['rsi'] <= 75) and (curr['rsi'] > 75)
+        short_trigger = (prev['rsi'] >= 35) and (curr['rsi'] < 35)
+        
+        # Trend Filtreleri
+        long_cond = long_trigger and (curr['close'] > curr['ema50']) and (curr['rsi_1h'] > 60)
+        short_cond = short_trigger and (curr['close'] < curr['ema50']) and (curr['rsi_1h'] < 40)
+        
+        sig_key = f"kosan_at_{sym}"
+        if KOSAN_AT_STATES.get(sig_key) == bar_time: return # Aynı mumda tekrar sinyal atma
+        
+        lag_dk = get_real_lag_minutes(bar_time, "5m")
+        emoji = get_lag_emoji(lag_dk)
+        
+        if long_cond:
+            KOSAN_AT_STATES[sig_key] = bar_time
+            entry = curr['close']
+            sl = entry * 0.985 # %1.5
+            tp = entry * 1.02  # %2.0
+            
+            msg = (f"🐎 <b>KOŞAN AT SİNYALİ (LONG) - {sym} [5M]</b> 🐎\n"
+                   f"✅ <b>Mum kapandı, sinyal onaylandı.</b>\n\n"
+                   f"📈 <b>Yön:</b> LONG\n"
+                   f"📊 <b>1H RSI:</b> {curr['rsi_1h']:.1f} | <b>5M RSI:</b> {curr['rsi']:.1f}\n"
+                   f"📉 <b>5M EMA 50:</b> {curr['ema50']:,.2f}\n\n"
+                   f"💰 <b>Giriş:</b> {entry:,.2f}\n"
+                   f"🛑 <b>Stop (SL %1.5):</b> {sl:,.2f}\n"
+                   f"🎯 <b>Hedef (TP %2.0):</b> {tp:,.2f}\n\n"
+                   f"⏱ <b>Veri Gecikmesi:</b> {emoji} {lag_dk} dk")
+            
+            for cid in CHAT_IDS:
+                try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                except: pass
+                
+        elif short_cond:
+            KOSAN_AT_STATES[sig_key] = bar_time
+            entry = curr['close']
+            sl = entry * 1.015 # %1.5
+            tp = entry * 0.98  # %2.0
+            
+            msg = (f"🐎 <b>KOŞAN AT SİNYALİ (SHORT) - {sym} [5M]</b> 🐎\n"
+                   f"✅ <b>Mum kapandı, sinyal onaylandı.</b>\n\n"
+                   f"📉 <b>Yön:</b> SHORT\n"
+                   f"📊 <b>1H RSI:</b> {curr['rsi_1h']:.1f} | <b>5M RSI:</b> {curr['rsi']:.1f}\n"
+                   f"📈 <b>5M EMA 50:</b> {curr['ema50']:,.2f}\n\n"
+                   f"💰 <b>Giriş:</b> {entry:,.2f}\n"
+                   f"🛑 <b>Stop (SL %1.5):</b> {sl:,.2f}\n"
+                   f"🎯 <b>Hedef (TP %2.0):</b> {tp:,.2f}\n\n"
+                   f"⏱ <b>Veri Gecikmesi:</b> {emoji} {lag_dk} dk")
+            
+            for cid in CHAT_IDS:
+                try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+                except: pass
+                
+    except Exception as e:
+        logger.error(f"Koşan At hatası ({sym}): {e}")
 
 async def process_rsi_signals(symbol, dfs):
     msgs = []
@@ -1054,7 +1138,7 @@ async def check_5m_confirmations():
             del pending_confirmations[key]
 
 # ==========================================
-# FORMASYON AVCISI (6 FORMASYON + GRAFİKLİ)
+# FORMASYON AVCISI (GRAFİKLİ)
 # ==========================================
 def _draw_chart(df, pattern_name, sl, tp, direction):
     try:
@@ -1084,16 +1168,14 @@ async def check_formasyon_avcisi():
                     
                     bar_time = df.index[-1]
                     if is_bar_incomplete(bar_time, tf):
-                        continue # Mum henüz kapanmadı, formasyon aramayı geç.
+                        continue 
                         
                     lag_dk = get_real_lag_minutes(bar_time, tf)
                     
-                    # Pivotları bul (Basit local ekstremalar)
                     order = 3
                     low_idx = argrelextrema(df['low'].values, np.less_equal, order=order)[0]
                     high_idx = argrelextrema(df['high'].values, np.greater_equal, order=order)[0]
                     
-                    # Formasyon Tespit Mantığı (Sadece son 10 pivotu inceleyerek)
                     pivots = []
                     for idx in list(low_idx) + list(high_idx):
                         pivots.append({'type': 'L' if idx in low_idx else 'H', 'idx': idx, 'price': df['low'].iloc[idx] if idx in low_idx else df['high'].iloc[idx]})
@@ -1101,7 +1183,6 @@ async def check_formasyon_avcisi():
                     
                     if len(pivots) < 5: continue
 
-                    # Son 5 pivotu alalım
                     p1, p2, p3, p4, p5 = pivots[-5], pivots[-4], pivots[-3], pivots[-2], pivots[-1]
                     
                     last_close = df['close'].iloc[-1]
@@ -1110,11 +1191,11 @@ async def check_formasyon_avcisi():
                     sl, tp = 0, 0
                     sig_key = ""
 
-                    # --- 1. İkili Dip (DB) ---
+                    # 1. İkili Dip (DB)
                     if p4['type'] == 'L' and p2['type'] == 'L':
                         low1, low2 = p4['price'], p2['price']
                         if abs(low1 - low2) < (low1 * 0.01):
-                            neck = max(p3['price'], p5['price']) # Aradaki en yüksek
+                            neck = max(p3['price'], p5['price'])
                             if last_close > neck:
                                 sig_key = f"form_{sym}_{tf}_DB"
                                 if sig_key not in FORMASYON_TRADES or (now - FORMASYON_TRADES[sig_key]).total_seconds() > 3600*6:
@@ -1122,7 +1203,7 @@ async def check_formasyon_avcisi():
                                     sl = min(low1, low2) * 0.995; tp = entry + (entry - sl) * 2
                                     msg = (f"🏛️ <b>FORMASYON AVCISI: İKİLİ DİP - {sym} [{tf.upper()}]</b>\n✅ <b>Mum kapandı, formasyon oluştu.</b>\n\n📈 <b>Yön:</b> LONG\n💰 <b>Giriş:</b> {entry:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f}\n🎯 <b>Hedef:</b> {tp:,.2f}\n\n⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag_dk)} {lag_dk} dk")
 
-                    # --- 2. İkili Tepe (DT) ---
+                    # 2. İkili Tepe (DT)
                     elif p4['type'] == 'H' and p2['type'] == 'H':
                         high1, high2 = p4['price'], p2['price']
                         if abs(high1 - high2) < (high1 * 0.01):
@@ -1134,7 +1215,7 @@ async def check_formasyon_avcisi():
                                     sl = max(high1, high2) * 1.005; tp = entry - (sl - entry) * 2
                                     msg = (f"🏛️ <b>FORMASYON AVCISI: İKİLİ TEPE - {sym} [{tf.upper()}]</b>\n✅ <b>Mum kapandı, formasyon oluştu.</b>\n\n📉 <b>Yön:</b> SHORT\n💰 <b>Giriş:</b> {entry:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f}\n🎯 <b>Hedef:</b> {tp:,.2f}\n\n⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag_dk)} {lag_dk} dk")
 
-                    # --- 3. OBO (Omuz-Baş-Omuz) ---
+                    # 3. OBO (Omuz-Baş-Omuz)
                     elif p5['type'] == 'H' and p4['type'] == 'L' and p3['type'] == 'H' and p2['type'] == 'L' and p1['type'] == 'H':
                         ls, n1, hd, n2, rs = p5, p4, p3, p2, p1
                         neck = (n1['price'] + n2['price']) / 2
@@ -1147,7 +1228,7 @@ async def check_formasyon_avcisi():
                                     sl = hd['price']; tp = neck - h
                                     msg = (f"🏛️ <b>FORMASYON AVCISI: OBO - {sym} [{tf.upper()}]</b>\n✅ <b>Mum kapandı, formasyon oluştu.</b>\n\n📉 <b>Yön:</b> SHORT\n💰 <b>Giriş:</b> {entry:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f}\n🎯 <b>Hedef:</b> {tp:,.2f}\n\n⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag_dk)} {lag_dk} dk")
 
-                    # --- 4. Ters OBO (Ters Omuz-Baş-Omuz) ---
+                    # 4. Ters OBO (Ters Omuz-Baş-Omuz)
                     elif p5['type'] == 'L' and p4['type'] == 'H' and p3['type'] == 'L' and p2['type'] == 'H' and p1['type'] == 'L':
                         ls, n1, hd, n2, rs = p5, p4, p3, p2, p1
                         neck = (n1['price'] + n2['price']) / 2
@@ -1318,7 +1399,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
-    msg = "🤖 <b>Yardım Menüsü</b>\n\n• Hisse analizi için: <code>/ASELS</code> veya <code>ASELS</code>\n• Endeks analizi için: <code>/XU030</code>\n• Tüm piyasayı anında taramak için: <code>/tara</code>\n• Piyasa özetini anında almak için: <code>/ozet</code>\n\nSistem, RSI Büyüsü, ATR Dünyası, EMA, Gap Avcısı, Formasyon Avcısı ve <b>Mükemmel Fibo</b> sinyallerini takip eder."
+    msg = "🤖 <b>Yardım Menüsü</b>\n\n• Hisse analizi için: <code>/ASELS</code> veya <code>ASELS</code>\n• Endeks analizi için: <code>/XU030</code>\n• Tüm piyasayı anında taramak için: <code>/tara</code>\n• Piyasa özetini anında almak için: <code>/ozet</code>\n\nSistem, RSI Büyüsü, ATR Dünyası, EMA, Gap Avcısı, Formasyon Avcısı, <b>Mükemmel Fibo</b> ve <b>Koşan At</b> sinyallerini takip eder."
     await update.message.reply_text(msg, parse_mode="HTML")
 
 async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1395,7 +1476,7 @@ async def tick_fast(force=False):
     if not force and not is_market_open(): return
     if is_scanning_fast: return
     is_scanning_fast = True
-    logger.info(f"🔄 Hızlı Tarama (ATR & EMA) başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
+    logger.info(f"🔄 Hızlı Tarama (ATR & EMA & Koşan At) başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
     failed_count = 0
     try:
         sem = asyncio.Semaphore(10)
@@ -1419,6 +1500,7 @@ async def tick_fast(force=False):
                 try:
                     atr_msgs = await process_atr_signals(sym, dfs)
                     for msg_data in atr_msgs: await send_signal_message(msg_data)
+                    await check_kosan_at(sym) # YENİ: Koşan At modülü burada çağrılıyor
                 except Exception as e:
                     logger.error(f"Sinyal işleme hatası ({sym}): {e}")
             except Exception as e:
@@ -1486,7 +1568,7 @@ async def tracker_slow():
     except Exception as e: logger.error(f"check_gap_hunter hatası: {e}")
     try: await check_mukemmel_fibo()
     except Exception as e: logger.error(f"check_mukemmel_fibo hatası: {e}")
-    try: await check_formasyon_avcisi() # YENİ EKLENDİ
+    try: await check_formasyon_avcisi() 
     except Exception as e: logger.error(f"check_formasyon_avcisi hatası: {e}")
 
 async def market_open_scan():
@@ -1507,6 +1589,7 @@ async def clear_daily_state():
         ema_cooldowns.clear()
         EMA_DATA_CACHE.clear()
         FORMASYON_TRADES.clear()
+        KOSAN_AT_STATES.clear() # YENİ
 
 async def task_morning_summary(): await generate_market_summary("Sabah")
 async def task_afternoon_summary(): await generate_market_summary("Öğleden Sonra")
@@ -1541,7 +1624,7 @@ async def main():
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
     
     sched.start()
-    logger.info("✅ Bot çalışıyor. OBO, Ters OBO, İkili Tepe, İkili Dip, Üçlü Dip ve Üçlü Tepe eklendi.")
+    logger.info("✅ Bot çalışıyor. Koşan At (5m RSI Momentum) modülü eklendi.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
