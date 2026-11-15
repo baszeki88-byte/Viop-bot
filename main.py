@@ -554,8 +554,8 @@ async def check_kosan_at(sym):
         short_trigger = (prev['rsi'] >= 35) and (curr['rsi'] < 35)
         
         # Trend Filtreleri
-        long_cond = long_trigger and (curr['close'] > curr['ema50']) and (curr['rsi_1h'] > 60)
-        short_cond = short_trigger and (curr['close'] < curr['ema50']) and (curr['rsi_1h'] < 40)
+        long_cond = long_trigger and (curr['close'] > curr['ema50']) and (60 < curr['rsi_1h'] < 80)
+        short_cond = short_trigger and (curr['close'] < curr['ema50']) and (20 < curr['rsi_1h'] < 40)
         
         sig_key = f"kosan_at_{sym}"
         if KOSAN_AT_STATES.get(sig_key) == bar_time: return # Aynı mumda tekrar sinyal atma
