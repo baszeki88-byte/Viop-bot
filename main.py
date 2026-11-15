@@ -81,7 +81,7 @@ SYMBOLS = [
     "SAHOL", "SASA", "SISE", "TAVHL", "TCELL", "THYAO", "TKFEN", "TOASO", "TRALT", "TRMET",
     "TTKOM", "TUPRS", "VAKBN", "VESTL", "YKBNK", "AEFES", "ARCLK", "CIMSA", "DOAS", "OYAKC",
     "SOKM", "ULKER", "BRSAN", "AKSEN", "ENJSA",
-    "XU030", "XU100", "XAUUSD", "XAGUSD", "UKOIL"
+    "XU030"
 ]
 
 BIST_STOCKS = [s for s in SYMBOLS if not s.startswith("XU")]
@@ -108,8 +108,8 @@ SECTORS = {
 # SİNYAL PARAMETRELERİ
 # ==========================================
 RSI_PERIOD = 8
-INSTANT_SHORT = 75
-INSTANT_LONG = 20
+INSTANT_SHORT = 85
+INSTANT_LONG = 15
 RSI_COOLDOWN_HOURS = 3   
 
 ALARM_SHORT_UPPER = 82
@@ -142,6 +142,8 @@ FORMASYON_TRADES = {}
 
 # YENİ: KOŞAN AT STATE
 KOSAN_AT_STATES = {}
+# YENİ: RSI EMA KESİŞİM STATE
+rsi_ema_cross_states = {}
 
 active_trades = {}
 pending_trades = set()
@@ -487,6 +489,41 @@ def get_volume_and_trend_tag(df_current, df_4h):
         trend_tag = "📈 <b>4H Trend: Yukarı</b>" if ema50_4h > ema200_4h else "📉 <b>4H Trend: Aşağı</b>"
     return f"{vol_tag} | {trend_tag}"
 
+# YENİ: RSI EMA 13 KESİŞİM TAKİBİ
+async def check_rsi_ema_crossover(symbol, df_1h):
+    if df_1h is None or len(df_1h) < 30: return
+    
+    rsi = get_rsi(df_1h['close'], 8)
+    rsi_ema = rsi.ewm(span=13, adjust=False).mean()
+    
+    curr_rsi = float(rsi.iloc[-1])
+    prev_rsi = float(rsi.iloc[-2])
+    curr_ema = float(rsi_ema.iloc[-1])
+    prev_ema = float(rsi_ema.iloc[-2])
+    
+    bar_time = df_1h.index[-1]
+    
+    cross_key = f"rsi_ema_{symbol}_1h"
+    if rsi_ema_cross_states.get(cross_key) == bar_time: return
+    
+    direction = None
+    if prev_rsi <= prev_ema and curr_rsi > curr_ema: direction = "YUKARI"
+    elif prev_rsi >= prev_ema and curr_rsi < curr_ema: direction = "AŞAĞI"
+    
+    if direction:
+        rsi_ema_cross_states[cross_key] = bar_time
+        emoji = "🟢" if direction == "YUKARI" else "🔴"
+        msg = f"⚡ <b>RSI EMA KESİŞİMİ ({direction}) - {symbol} [1H]</b> ⚡\n\n"
+        msg += f"RSI(8) ve EMA(13) <b>{direction}</b> yönlü kesişti! (Teyit Sinyali)\n\n"
+        msg += f"📊 <b>RSI(8):</b> {curr_rsi:.1f}\n"
+        msg += f"📈 <b>EMA(13):</b> {curr_ema:.1f}\n"
+        msg += f"💰 <b>Fiyat:</b> {df_1h['close'].iloc[-1]:,.2f}\n\n"
+        msg += f"{emoji} <b>Giriş Onayı:</b> {direction} yönlü işlemler düşünülebilir."
+        
+        for cid in CHAT_IDS:
+            try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
+            except: pass
+
 # YENİ: KOŞAN AT (5M RSI MOMENTUM) MOTORU
 async def check_kosan_at(sym):
     try:
@@ -578,7 +615,10 @@ async def process_rsi_signals(symbol, dfs):
         rsi = get_rsi(df["close"], period=RSI_PERIOD)
         if rsi is None or len(rsi) < 2: continue
         
+        rsi_ema_13 = rsi.ewm(span=13, adjust=False).mean()
         r_now = float(rsi.iloc[-1])
+        curr_ema = float(rsi_ema_13.iloc[-1])
+        
         bar_time = df.index[-1]
         gecikme_dk = get_real_lag_minutes(bar_time, tf)
         incomplete_txt = " <i>(Mum tamamlanmadı)</i>" if is_bar_incomplete(bar_time, tf) else ""
@@ -594,13 +634,25 @@ async def process_rsi_signals(symbol, dfs):
                 continue
             instant_states[inst_key] = bar_time
 
+            cross_status_msg = ""
+            if direction == "SHORT":
+                if r_now > curr_ema:
+                    cross_status_msg = "🔍 <b>RSI EMA(13) Kesişimi:</b> Henüz Olmadı (Aşağı kesişim bekleniyor)"
+                else:
+                    cross_status_msg = "✅ <b>RSI EMA(13) Kesişimi:</b> Onaylı"
+            elif direction == "LONG":
+                if r_now < curr_ema:
+                    cross_status_msg = "🔍 <b>RSI EMA(13) Kesişimi:</b> Henüz Olmadı (Yukarı kesişim bekleniyor)"
+                else:
+                    cross_status_msg = "✅ <b>RSI EMA(13) Kesişimi:</b> Onaylı"
+
             tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol)
             current_price = float(df['close'].iloc[-1]); fibo_note = await get_nearest_fibo_levels_async(symbol, current_price)
             if direction == "SHORT":
-                msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — AŞIRI ALIM BÖLGESİ{incomplete_txt}\nRSI 8: {r_now:.1f} (75 Üzeri)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 1.02:,.2f} (Tahmini +%2)"
+                msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — AŞIRI ALIM BÖLGESİ{incomplete_txt}\nRSI 8: {r_now:.1f} (85 Üzeri)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 1.02:,.2f} (Tahmini +%2)"
             else:
-                msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — AŞIRI SATIM BÖLGESİ{incomplete_txt}\nRSI 8: {r_now:.1f} (20 Altı)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 0.98:,.2f} (Tahmini -%2)"
-            msg += fibo_note + "\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>" + earnings_note
+                msg = f"✨ <b>RSI BÜYÜSÜ (1H)</b> ✨\n⚠️ <b>{symbol}</b> — AŞIRI SATIM BÖLGESİ{incomplete_txt}\nRSI 8: {r_now:.1f} (15 Altı)\n📊 {tags}\n\n🚨 <b>Alarm Fiyatı:</b> {current_price:,.2f}\n🎯 <b>Olası Giriş:</b> {current_price * 0.98:,.2f} (Tahmini -%2)"
+            msg += fibo_note + f"\n\n{cross_status_msg}" + "\n👀 <b>Grafiği kontrol edin. Teyit sinyali bekleniyor...</b>" + earnings_note
             msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(gecikme_dk)} {gecikme_dk} dk" 
             msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "alert_instant", "direction": direction})
     return msgs
@@ -1542,6 +1594,7 @@ async def tick_slow(force=False):
                 try:
                     rsi_msgs = await process_rsi_signals(sym, dfs)
                     for msg_data in rsi_msgs: await send_signal_message(msg_data)
+                    await check_rsi_ema_crossover(sym, dfs.get("1h")) # YENİ
                 except Exception as e:
                     logger.error(f"Sinyal işleme hatası ({sym}): {e}")
             except Exception as e:
@@ -1589,7 +1642,8 @@ async def clear_daily_state():
         ema_cooldowns.clear()
         EMA_DATA_CACHE.clear()
         FORMASYON_TRADES.clear()
-        KOSAN_AT_STATES.clear() # YENİ
+        KOSAN_AT_STATES.clear() 
+        rsi_ema_cross_states.clear() # YENİ
 
 async def task_morning_summary(): await generate_market_summary("Sabah")
 async def task_afternoon_summary(): await generate_market_summary("Öğleden Sonra")
@@ -1624,7 +1678,7 @@ async def main():
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
     
     sched.start()
-    logger.info("✅ Bot çalışıyor. Koşan At (5m RSI Momentum) modülü eklendi.")
+    logger.info("✅ Bot çalışıyor. Koşan At (5m RSI Momentum) ve RSI EMA(13) Kesişim modülü eklendi.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
