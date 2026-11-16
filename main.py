@@ -118,8 +118,10 @@ ALARM_ATR_DROP = 1.0
 ATR_PERIOD = 7
 
 TIME_FRAMES_RSI = ["1h"]
-TIME_FRAMES_ATR = ["15m", "30m", "1h", "4h"]
-FETCH_TFS = ["15m", "30m", "1h", "4h"]
+# DEĞİŞİKLİK 1: 15m ATR sinyallerinden çıkarıldı
+TIME_FRAMES_ATR = ["30m", "1h", "4h"]
+# DEĞİŞİKLİK 1: 15m veri çekme listesinden çıkarıldı (Gap Avcısı kendi içinde çekiyor)
+FETCH_TFS = ["30m", "1h", "4h"] 
 TF_MINUTES = {"15m": 15, "30m": 30, "1h": 60, "4h": 240}
 
 VOLUME_LOOKBACK = 20
@@ -569,11 +571,12 @@ async def check_kosan_at(sym):
             sl = entry * 0.985 # %1.5
             tp = entry * 1.02  # %2.0
             
+            # DEĞİŞİKLİK 3: 5M EMA 50 Giriş Yeri olarak eklendi
             msg = (f"🐎 <b>KOŞAN AT SİNYALİ (LONG) - {sym} [5M]</b> 🐎\n"
                    f"✅ <b>Mum kapandı, sinyal onaylandı.</b>\n\n"
                    f"📈 <b>Yön:</b> LONG\n"
                    f"📊 <b>1H RSI:</b> {curr['rsi_1h']:.1f} | <b>5M RSI:</b> {curr['rsi']:.1f}\n"
-                   f"📉 <b>5M EMA 50:</b> {curr['ema50']:,.2f}\n\n"
+                   f"🎯 <b>5M EMA 50 (Giriş Yeri):</b> {curr['ema50']:,.2f}\n\n"
                    f"💰 <b>Giriş:</b> {entry:,.2f}\n"
                    f"🛑 <b>Stop (SL %1.5):</b> {sl:,.2f}\n"
                    f"🎯 <b>Hedef (TP %2.0):</b> {tp:,.2f}\n\n"
@@ -589,11 +592,12 @@ async def check_kosan_at(sym):
             sl = entry * 1.015 # %1.5
             tp = entry * 0.98  # %2.0
             
+            # DEĞİŞİKLİK 3: 5M EMA 50 Giriş Yeri olarak eklendi
             msg = (f"🐎 <b>KOŞAN AT SİNYALİ (SHORT) - {sym} [5M]</b> 🐎\n"
                    f"✅ <b>Mum kapandı, sinyal onaylandı.</b>\n\n"
                    f"📉 <b>Yön:</b> SHORT\n"
                    f"📊 <b>1H RSI:</b> {curr['rsi_1h']:.1f} | <b>5M RSI:</b> {curr['rsi']:.1f}\n"
-                   f"📈 <b>5M EMA 50:</b> {curr['ema50']:,.2f}\n\n"
+                   f"🎯 <b>5M EMA 50 (Giriş Yeri):</b> {curr['ema50']:,.2f}\n\n"
                    f"💰 <b>Giriş:</b> {entry:,.2f}\n"
                    f"🛑 <b>Stop (SL %1.5):</b> {sl:,.2f}\n"
                    f"🎯 <b>Hedef (TP %2.0):</b> {tp:,.2f}\n\n"
@@ -974,7 +978,7 @@ async def check_active_trades():
     await asyncio.gather(*tasks)
 
 # ==========================================
-# EMA (SADECE 15M VE 30M)
+# EMA (SADECE 30M)
 # ==========================================
 async def check_triple_ema():
     if not is_market_open(): return
@@ -983,7 +987,8 @@ async def check_triple_ema():
     async def scan_ema(sym):
         async with sem:
             try:
-                for tf, fast, slow in [("15m", 21, 200), ("30m", 21, 50)]:
+                # DEĞİŞİKLİK 2: ("15m", 21, 200) kaldırıldı. Sadece 30M kaldı.
+                for tf, fast, slow in [("30m", 21, 50)]:
                     df = await fetch_ohlc_async(sym, tf, limit=500)
                     if df is None or len(df) < slow + 10: continue
                     
@@ -1140,7 +1145,7 @@ async def check_gap_hunter():
     await asyncio.gather(*tasks)
 
 # ==========================================
-# 5M TEYİT TAKİBİ
+# 5M TEYİT TAKİBİ (SADECE RSI BÜYÜSÜNDE ÇALIŞIR)
 # ==========================================
 async def check_5m_confirmations():
     if not pending_confirmations: return
