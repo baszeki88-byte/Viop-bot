@@ -125,7 +125,6 @@ PIVOT_CACHE = {}
 KOSAN_AT_STATES = {}
 rsi_ema_cross_states = {}
 
-# DÜZELTİLEN HATA: Eksik olan EMA_DATA_CACHE eklendi
 EMA_DATA_CACHE = {}
 
 active_trades = {}
@@ -150,7 +149,7 @@ DATA_DIR = os.getenv("DATA_DIR", "/tmp")
 TRADES_FILE = os.path.join(DATA_DIR, "active_trades.json")
 
 EXECUTOR = ThreadPoolExecutor(max_workers=20)
-# Semaphore 4 olarak güncellendi
+# Semaphore 4 olarak ayarlandı (API'yi yormamak için)
 FETCH_SEM = asyncio.Semaphore(4)
 
 # ==========================================
@@ -495,13 +494,19 @@ async def check_kosan_at(sym):
         short_cond = short_trigger and (curr['close'] < curr['ema50']) and (30 < curr['rsi_1h'] < 50)
         
         sig_key = f"kosan_at_{sym}"
-        if KOSAN_AT_STATES.get(sig_key) == bar_time: return
+        last_signal_time = KOSAN_AT_STATES.get(sig_key)
+        
+        # YENİ: 2 saatlik cooldown (bekleme) kontrolü
+        if last_signal_time is not None and isinstance(last_signal_time, (datetime, pd.Timestamp)):
+            time_diff_hours = (datetime.now(TIMEZONE) - last_signal_time).total_seconds() / 3600
+            if time_diff_hours < 2.0:
+                return  # Son sinyalden bu yana 2 saat geçmediyse sinyal üretme
         
         lag_dk = get_real_lag_minutes(bar_time, "5m")
         emoji = get_lag_emoji(lag_dk)
         
         if long_cond:
-            KOSAN_AT_STATES[sig_key] = bar_time
+            KOSAN_AT_STATES[sig_key] = datetime.now(TIMEZONE) # Gerçek zaman kaydediliyor
             entry = curr['close']
             sl = entry * 0.985
             tp = entry * 1.02
@@ -521,7 +526,7 @@ async def check_kosan_at(sym):
                 except: pass
                 
         elif short_cond:
-            KOSAN_AT_STATES[sig_key] = bar_time
+            KOSAN_AT_STATES[sig_key] = datetime.now(TIMEZONE) # Gerçek zaman kaydediliyor
             entry = curr['close']
             sl = entry * 1.015
             tp = entry * 0.98
@@ -1248,7 +1253,7 @@ async def main():
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
     
     sched.start()
-    logger.info("✅ Bot çalışıyor. Sadeleştirilmiş sürüm: ATR, Koşan At, Fibo (4H), Gap Avcısı, RSI EMA Kesişimi.")
+    logger.info("✅ Bot çalışıyor. Sadeleştirilmiş sürüm: ATR, Koşan At (2S Cooldown), Fibo (4H), Gap Avcısı, RSI EMA Kesişimi.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
