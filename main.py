@@ -980,65 +980,6 @@ async def check_active_trades():
     await asyncio.gather(*tasks)
 
 # ==========================================
-# EMA (SADECE 30M)
-# ==========================================
-async def check_triple_ema():
-    if not is_market_open(): return
-    
-    sem = asyncio.Semaphore(10)
-    async def scan_ema(sym):
-        async with sem:
-            try:
-                for tf, fast, slow in [("30m", 21, 50)]:
-                    df = await fetch_ohlc_async(sym, tf, limit=500)
-                    if df is None or len(df) < slow + 10: continue
-                    
-                    df['ema_fast'] = df['close'].ewm(span=fast, adjust=False).mean()
-                    df['ema_slow'] = df['close'].ewm(span=slow, adjust=False).mean()
-                    
-                    bar_time = df.index[-1]
-                    lag_dk = get_real_lag_minutes(bar_time, tf)
-                    inc_txt = " <i>(Mum tamamlanmadı)</i>" if is_bar_incomplete(bar_time, tf) else ""
-                    
-                    c_key = f"ema_{sym}_{tf}"
-                    last_sig = ema_cooldowns.get(c_key)
-                    if last_sig and (bar_time - last_sig) < timedelta(minutes=EMA_COOLDOWN_MIN):
-                        continue
-                        
-                    curr_fast = df['ema_fast'].iloc[-1]
-                    curr_slow = df['ema_slow'].iloc[-1]
-                    prev_fast = df['ema_fast'].iloc[-2]
-                    prev_slow = df['ema_slow'].iloc[-2]
-                    
-                    direction = None
-                    if prev_fast <= prev_slow and curr_fast > curr_slow: direction = "LONG"
-                    elif prev_fast >= prev_slow and curr_fast < curr_slow: direction = "SHORT"
-                    
-                    if direction:
-                        ema_cooldowns[c_key] = bar_time
-                        entry_price = df['close'].iloc[-1]
-                        sl = entry_price * (1 - 0.015) if direction == "LONG" else entry_price * (1 + 0.015)
-                        tp = entry_price * (1 + 0.03) if direction == "LONG" else entry_price * (1 - 0.03)
-                        
-                        emoji = "📈" if direction == "LONG" else "📉"
-                        msg = f"{emoji} <b>EMA KESİŞİM SİNYALİ - {sym} [{tf.upper()}]</b> {emoji}{inc_txt}\n"
-                        msg += f"🚨 <b>Yön:</b> {direction}\n"
-                        msg += f"EMA {fast}, EMA {slow}'yi {'yukarı' if direction == 'LONG' else 'aşağı'} kesti.\n\n"
-                        msg += f"💰 <b>Giriş:</b> {entry_price:,.2f}\n"
-                        msg += f"🛑 <b>Stop (SL %1.5):</b> {sl:,.2f}\n"
-                        msg += f"🎯 <b>Hedef (TP %3.0):</b> {tp:,.2f}\n\n"
-                        msg += f"⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag_dk)} {lag_dk} dk"
-                        
-                        for cid in CHAT_IDS:
-                            try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
-                            except: pass
-            except Exception as e:
-                logger.error(f"EMA scan hatası ({sym}): {e}")
-
-    tasks_scan = [scan_ema(sym) for sym in SYMBOLS]
-    await asyncio.gather(*tasks_scan)
-
-# ==========================================
 # GAP AVCISI (16:00 - 17:40)
 # ==========================================
 async def check_gap_hunter():
@@ -1618,8 +1559,6 @@ async def tracker_fast():
     except Exception as e: logger.error(f"check_active_trades hatası: {e}")
     try: await check_5m_confirmations()
     except Exception as e: logger.error(f"check_5m_confirmations hatası: {e}")
-    try: await check_triple_ema()
-    except Exception as e: logger.error(f"check_triple_ema hatası: {e}")
 
 async def tracker_slow():
     if not is_market_open(): return
