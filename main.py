@@ -463,7 +463,7 @@ async def check_rsi_ema_crossover(symbol, df_1h):
             try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
             except: pass
 
-async def check_kosan_at(sym):
+async def check_kosan_at(sym, xu_trend):
     try:
         df_5m = await fetch_ohlc_async(sym, "5m", limit=100)
         df_1h = await fetch_ohlc_async(sym, "1h", limit=100)
@@ -473,7 +473,7 @@ async def check_kosan_at(sym):
         df_5m['rsi'] = get_rsi(df_5m['close'], 8)
         df_5m['ema50'] = df_5m['close'].ewm(span=50, adjust=False).mean()
         
-        # DEĞİŞİKLİK: 1H RSI periyodu 14 yapıldı
+        # 1H RSI periyodu 14
         df_1h['rsi_1h'] = get_rsi(df_1h['close'], 14)
         
         df = pd.merge_asof(df_5m.sort_index(), df_1h[['rsi_1h']].sort_index(), left_index=True, right_index=True, direction='backward')
@@ -490,9 +490,9 @@ async def check_kosan_at(sym):
         long_trigger = (prev['rsi'] <= 75) and (curr['rsi'] > 75)
         short_trigger = (prev['rsi'] >= 35) and (curr['rsi'] < 35)
         
-        # Trend Filtreleri (1H RSI sınırları: LONG >50, SHORT <50)
-        long_cond = long_trigger and (curr['close'] > curr['ema50']) and (curr['rsi_1h'] > 50)
-        short_cond = short_trigger and (curr['close'] < curr['ema50']) and (curr['rsi_1h'] < 50)
+        # Trend Filtreleri (1H RSI >50 ve XU030 Yönü)
+        long_cond = long_trigger and (curr['close'] > curr['ema50']) and (curr['rsi_1h'] > 50) and (xu_trend == 1)
+        short_cond = short_trigger and (curr['close'] < curr['ema50']) and (curr['rsi_1h'] < 50) and (xu_trend == -1)
         
         sig_key = f"kosan_at_{sym}"
         last_signal_time = KOSAN_AT_STATES.get(sig_key)
@@ -506,6 +506,8 @@ async def check_kosan_at(sym):
         lag_dk = get_real_lag_minutes(bar_time, "5m")
         emoji = get_lag_emoji(lag_dk)
         
+        xu_text = "📈 <b>Yukarı</b>" if xu_trend == 1 else "📉 <b>Aşağı</b>"
+        
         if long_cond:
             KOSAN_AT_STATES[sig_key] = datetime.now(TIMEZONE) # Gerçek zaman kaydediliyor
             entry = curr['close']
@@ -516,6 +518,7 @@ async def check_kosan_at(sym):
                    f"✅ <b>Mum kapandı, sinyal onaylandı.</b>\n\n"
                    f"📈 <b>Yön:</b> LONG\n"
                    f"📊 <b>1H RSI(14):</b> {curr['rsi_1h']:.1f} | <b>5M RSI(8):</b> {curr['rsi']:.1f}\n"
+                   f"🌍 <b>Endeks (XU30):</b> {xu_text}\n"
                    f"🎯 <b>5M EMA 50 (Giriş Yeri):</b> {curr['ema50']:,.2f}\n\n"
                    f"💰 <b>Giriş:</b> {entry:,.2f}\n"
                    f"🛑 <b>Stop (SL %1.5):</b> {sl:,.2f}\n"
@@ -536,6 +539,7 @@ async def check_kosan_at(sym):
                    f"✅ <b>Mum kapandı, sinyal onaylandı.</b>\n\n"
                    f"📉 <b>Yön:</b> SHORT\n"
                    f"📊 <b>1H RSI(14):</b> {curr['rsi_1h']:.1f} | <b>5M RSI(8):</b> {curr['rsi']:.1f}\n"
+                   f"🌍 <b>Endeks (XU30):</b> {xu_text}\n"
                    f"🎯 <b>5M EMA 50 (Giriş Yeri):</b> {curr['ema50']:,.2f}\n\n"
                    f"💰 <b>Giriş:</b> {entry:,.2f}\n"
                    f"🛑 <b>Stop (SL %1.5):</b> {sl:,.2f}\n"
@@ -1042,7 +1046,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
-    msg = "🤖 <b>Yardım Menüsü</b>\n\n• Hisse analizi için: <code>/ASELS</code> veya <code>ASELS</code>\n• Endeks analizi için: <code>/XU030</code>\n• Tüm piyasayı anında taramak için: <code>/tara</code>\n• Piyasa özetini anında almak için: <code>/ozet</code>\n\nSistem, ATR Dünyası, Gap Avcısı, <b>Mükemmel Fibo (4H)</b>, <b>Koşan At</b> ve <b>RSI EMA Kesişimi</b> sinyallerini takip eder."
+    msg = "🤖 <b>Yardım Menüsü</b>\n\n• Hisse analizi için: <code>/ASELS</code> veya <code>ASELS</code>\n• Endeks analizi için: <code>/XU030</code>\n• Tüm piyasayı anında taramak için: <code>/tara</code>\n• Piyasa özetini anında almak için: <code>/ozet</code>\n\nSistem, ATR Dünyası, Gap Avcısı, <b>Mükemmel Fibo (4H)</b>, <b>Koşan At (XU030 Filtreli)</b> ve <b>RSI EMA Kesişimi</b> sinyallerini takip eder."
     await update.message.reply_text(msg, parse_mode="HTML")
 
 async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1117,6 +1121,18 @@ async def tick_fast(force=False):
     is_scanning_fast = True
     logger.info(f"🔄 Hızlı Tarama (ATR & Koşan At) başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
     failed_count = 0
+    
+    # XU030 Trendini Çek (Endeks Filtresi)
+    xu_trend = 0
+    try:
+        df_xu = await fetch_ohlc_async("XU030", "1h", limit=100)
+        if df_xu is not None and len(df_xu) > 50:
+            xu_ema50 = df_xu['close'].ewm(span=50, adjust=False).mean().iloc[-1]
+            xu_close = df_xu['close'].iloc[-1]
+            xu_trend = 1 if xu_close > xu_ema50 else -1
+    except Exception as e:
+        logger.error(f"XU030 endeks verisi çekilemedi: {e}")
+
     try:
         sem = asyncio.Semaphore(10)
         async def limited_fetch(sym):
@@ -1139,7 +1155,7 @@ async def tick_fast(force=False):
                 try:
                     atr_msgs = await process_atr_signals(sym, dfs)
                     for msg_data in atr_msgs: await send_signal_message(msg_data)
-                    await check_kosan_at(sym) 
+                    await check_kosan_at(sym, xu_trend) 
                 except Exception as e:
                     logger.error(f"Sinyal işleme hatası ({sym}): {e}")
             except Exception as e:
@@ -1254,7 +1270,7 @@ async def main():
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
     
     sched.start()
-    logger.info("✅ Bot çalışıyor. Sadeleştirilmiş sürüm: ATR, Koşan At (1H RSI14), Fibo (4H), Gap Avcısı, RSI EMA Kesişimi.")
+    logger.info("✅ Bot çalışıyor. Sadeleştirilmiş sürüm: ATR, Koşan At (XU030 Filtreli), Fibo (4H), Gap Avcısı, RSI EMA Kesişimi.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
