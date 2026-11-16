@@ -473,7 +473,8 @@ async def check_kosan_at(sym):
         df_5m['rsi'] = get_rsi(df_5m['close'], 8)
         df_5m['ema50'] = df_5m['close'].ewm(span=50, adjust=False).mean()
         
-        df_1h['rsi_1h'] = get_rsi(df_1h['close'], 8)
+        # DEĞİŞİKLİK: 1H RSI periyodu 14 yapıldı
+        df_1h['rsi_1h'] = get_rsi(df_1h['close'], 14)
         
         df = pd.merge_asof(df_5m.sort_index(), df_1h[['rsi_1h']].sort_index(), left_index=True, right_index=True, direction='backward')
         df = df.dropna()
@@ -489,7 +490,7 @@ async def check_kosan_at(sym):
         long_trigger = (prev['rsi'] <= 75) and (curr['rsi'] > 75)
         short_trigger = (prev['rsi'] >= 35) and (curr['rsi'] < 35)
         
-        # Trend Filtreleri (Öneri 2: LONG >50, SHORT <50)
+        # Trend Filtreleri (1H RSI sınırları: LONG >50, SHORT <50)
         long_cond = long_trigger and (curr['close'] > curr['ema50']) and (curr['rsi_1h'] > 50)
         short_cond = short_trigger and (curr['close'] < curr['ema50']) and (curr['rsi_1h'] < 50)
         
@@ -514,7 +515,7 @@ async def check_kosan_at(sym):
             msg = (f"🐎 <b>KOŞAN AT SİNYALİ (LONG) - {sym} [5M]</b> 🐎\n"
                    f"✅ <b>Mum kapandı, sinyal onaylandı.</b>\n\n"
                    f"📈 <b>Yön:</b> LONG\n"
-                   f"📊 <b>1H RSI:</b> {curr['rsi_1h']:.1f} | <b>5M RSI:</b> {curr['rsi']:.1f}\n"
+                   f"📊 <b>1H RSI(14):</b> {curr['rsi_1h']:.1f} | <b>5M RSI(8):</b> {curr['rsi']:.1f}\n"
                    f"🎯 <b>5M EMA 50 (Giriş Yeri):</b> {curr['ema50']:,.2f}\n\n"
                    f"💰 <b>Giriş:</b> {entry:,.2f}\n"
                    f"🛑 <b>Stop (SL %1.5):</b> {sl:,.2f}\n"
@@ -534,7 +535,7 @@ async def check_kosan_at(sym):
             msg = (f"🐎 <b>KOŞAN AT SİNYALİ (SHORT) - {sym} [5M]</b> 🐎\n"
                    f"✅ <b>Mum kapandı, sinyal onaylandı.</b>\n\n"
                    f"📉 <b>Yön:</b> SHORT\n"
-                   f"📊 <b>1H RSI:</b> {curr['rsi_1h']:.1f} | <b>5M RSI:</b> {curr['rsi']:.1f}\n"
+                   f"📊 <b>1H RSI(14):</b> {curr['rsi_1h']:.1f} | <b>5M RSI(8):</b> {curr['rsi']:.1f}\n"
                    f"🎯 <b>5M EMA 50 (Giriş Yeri):</b> {curr['ema50']:,.2f}\n\n"
                    f"💰 <b>Giriş:</b> {entry:,.2f}\n"
                    f"🛑 <b>Stop (SL %1.5):</b> {sl:,.2f}\n"
@@ -1253,7 +1254,7 @@ async def main():
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
     
     sched.start()
-    logger.info("✅ Bot çalışıyor. Sadeleştirilmiş sürüm: ATR, Koşan At (Öneri 2 & 3s Cooldown), Fibo (4H), Gap Avcısı, RSI EMA Kesişimi.")
+    logger.info("✅ Bot çalışıyor. Sadeleştirilmiş sürüm: ATR, Koşan At (1H RSI14), Fibo (4H), Gap Avcısı, RSI EMA Kesişimi.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
