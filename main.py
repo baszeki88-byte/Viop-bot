@@ -118,9 +118,9 @@ ALARM_ATR_DROP = 1.0
 ATR_PERIOD = 7
 
 TIME_FRAMES_RSI = ["1h"]
-# DEĞİŞİKLİK: 15m ATR sinyallerinden çıkarıldı
+# 15m ATR sinyallerinden çıkarıldı
 TIME_FRAMES_ATR = ["30m", "1h", "4h"]
-# DEĞİŞİKLİK: 15m veri çekme listesinden çıkarıldı
+# 15m veri çekme listesinden çıkarıldı
 FETCH_TFS = ["30m", "1h", "4h"] 
 TF_MINUTES = {"15m": 15, "30m": 30, "1h": 60, "4h": 240}
 
@@ -142,9 +142,9 @@ EMA_DATA_CACHE = {}
 
 FORMASYON_TRADES = {}
 
-# YENİ: KOŞAN AT STATE
+# KOŞAN AT STATE
 KOSAN_AT_STATES = {}
-# YENİ: RSI EMA KESİŞİM STATE
+# RSI EMA KESİŞİM STATE
 rsi_ema_cross_states = {}
 
 active_trades = {}
@@ -491,7 +491,7 @@ def get_volume_and_trend_tag(df_current, df_4h):
         trend_tag = "📈 <b>4H Trend: Yukarı</b>" if ema50_4h > ema200_4h else "📉 <b>4H Trend: Aşağı</b>"
     return f"{vol_tag} | {trend_tag}"
 
-# YENİ: RSI EMA 13 KESİŞİM TAKİBİ
+# RSI EMA 13 KESİŞİM TAKİBİ (SADECE AŞIRI BÖLGELERDE)
 async def check_rsi_ema_crossover(symbol, df_1h):
     if df_1h is None or len(df_1h) < 30: return
     
@@ -509,14 +509,18 @@ async def check_rsi_ema_crossover(symbol, df_1h):
     if rsi_ema_cross_states.get(cross_key) == bar_time: return
     
     direction = None
-    if prev_rsi <= prev_ema and curr_rsi > curr_ema: direction = "YUKARI"
-    elif prev_rsi >= prev_ema and curr_rsi < curr_ema: direction = "AŞAĞI"
+    # Yukarı kesişim: Sadece RSI 20'nin altındayken (aşırı satım bölgesinden çıkış)
+    if prev_rsi <= prev_ema and curr_rsi > curr_ema and (curr_rsi < 20 or prev_rsi < 20): 
+        direction = "YUKARI"
+    # Aşağı kesişim: Sadece RSI 85'in üzerindeyken (aşırı alım bölgesinden çıkış)
+    elif prev_rsi >= prev_ema and curr_rsi < curr_ema and (curr_rsi > 85 or prev_rsi > 85): 
+        direction = "AŞAĞI"
     
     if direction:
         rsi_ema_cross_states[cross_key] = bar_time
         emoji = "🟢" if direction == "YUKARI" else "🔴"
         msg = f"⚡ <b>RSI EMA KESİŞİMİ ({direction}) - {symbol} [1H]</b> ⚡\n\n"
-        msg += f"RSI(8) ve EMA(13) <b>{direction}</b> yönlü kesişti! (Teyit Sinyali)\n\n"
+        msg += f"RSI(8) ve EMA(13) <b>{direction}</b> yönlü kesişti! (Aşırı Bölge Teyidi)\n\n"
         msg += f"📊 <b>RSI(8):</b> {curr_rsi:.1f}\n"
         msg += f"📈 <b>EMA(13):</b> {curr_ema:.1f}\n"
         msg += f"💰 <b>Fiyat:</b> {df_1h['close'].iloc[-1]:,.2f}\n\n"
@@ -526,7 +530,7 @@ async def check_rsi_ema_crossover(symbol, df_1h):
             try: await bot_app.bot.send_message(chat_id=cid, text=msg, parse_mode="HTML")
             except: pass
 
-# YENİ: KOŞAN AT (5M RSI MOMENTUM) MOTORU
+# KOŞAN AT (5M RSI MOMENTUM) MOTORU
 async def check_kosan_at(sym):
     try:
         df_5m = await fetch_ohlc_async(sym, "5m", limit=100)
@@ -546,7 +550,7 @@ async def check_kosan_at(sym):
         
         # Mum kapanışı kontrolü
         bar_time = df.index[-1]
-        if is_bar_incomplete(bar_time, "5m"): return # Mum henüz kapanmadıysa bekle
+        if is_bar_incomplete(bar_time, "5m"): return
         
         curr = df.iloc[-1]
         prev = df.iloc[-2]
@@ -555,12 +559,12 @@ async def check_kosan_at(sym):
         long_trigger = (prev['rsi'] <= 75) and (curr['rsi'] > 75)
         short_trigger = (prev['rsi'] >= 35) and (curr['rsi'] < 35)
         
-        # Trend Filtreleri (DEĞİŞİKLİK: 1H RSI sınırları daraltıldı. LONG 60-70, SHORT 30-40)
+        # Trend Filtreleri (1H RSI sınırları: LONG 60-70, SHORT 30-40)
         long_cond = long_trigger and (curr['close'] > curr['ema50']) and (60 < curr['rsi_1h'] < 70)
         short_cond = short_trigger and (curr['close'] < curr['ema50']) and (30 < curr['rsi_1h'] < 40)
         
         sig_key = f"kosan_at_{sym}"
-        if KOSAN_AT_STATES.get(sig_key) == bar_time: return # Aynı mumda tekrar sinyal atma
+        if KOSAN_AT_STATES.get(sig_key) == bar_time: return
         
         lag_dk = get_real_lag_minutes(bar_time, "5m")
         emoji = get_lag_emoji(lag_dk)
@@ -571,7 +575,6 @@ async def check_kosan_at(sym):
             sl = entry * 0.985 # %1.5
             tp = entry * 1.02  # %2.0
             
-            # DEĞİŞİKLİK: 5M EMA 50 Giriş Yeri olarak eklendi
             msg = (f"🐎 <b>KOŞAN AT SİNYALİ (LONG) - {sym} [5M]</b> 🐎\n"
                    f"✅ <b>Mum kapandı, sinyal onaylandı.</b>\n\n"
                    f"📈 <b>Yön:</b> LONG\n"
@@ -592,7 +595,6 @@ async def check_kosan_at(sym):
             sl = entry * 1.015 # %1.5
             tp = entry * 0.98  # %2.0
             
-            # DEĞİŞİKLİK: 5M EMA 50 Giriş Yeri olarak eklendi
             msg = (f"🐎 <b>KOŞAN AT SİNYALİ (SHORT) - {sym} [5M]</b> 🐎\n"
                    f"✅ <b>Mum kapandı, sinyal onaylandı.</b>\n\n"
                    f"📉 <b>Yön:</b> SHORT\n"
@@ -987,7 +989,6 @@ async def check_triple_ema():
     async def scan_ema(sym):
         async with sem:
             try:
-                # DEĞİŞİKLİK: ("15m", 21, 200) kaldırıldı. Sadece 30M kaldı.
                 for tf, fast, slow in [("30m", 21, 50)]:
                     df = await fetch_ohlc_async(sym, tf, limit=500)
                     if df is None or len(df) < slow + 10: continue
