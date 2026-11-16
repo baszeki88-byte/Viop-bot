@@ -107,14 +107,14 @@ ALARM_LONG_LOWER = 22
 ALARM_ATR_DROP = 1.0
 ATR_PERIOD = 7
 
-TIME_FRAMES_ATR = ["30m", "1h", "4h"]
-FETCH_TFS = ["30m", "1h", "4h"] 
+TIME_FRAMES_ATR = ["15m", "30m", "1h", "4h"]
+FETCH_TFS = ["15m", "30m", "1h", "4h"] 
 TF_MINUTES = {"15m": 15, "30m": 30, "1h": 60, "4h": 240}
 
 VOLUME_LOOKBACK = 20
 VOLUME_MULT = 1.5
 TP_PCT = 3.0
-SL_PCT = 3.5
+SL_PCT = 1.5 
 TIMEOUT_HOURS = 10
 
 FIBO_SL = 2.0
@@ -149,7 +149,6 @@ DATA_DIR = os.getenv("DATA_DIR", "/tmp")
 TRADES_FILE = os.path.join(DATA_DIR, "active_trades.json")
 
 EXECUTOR = ThreadPoolExecutor(max_workers=20)
-# Semaphore 4 olarak ayarlandı (API'yi yormamak için)
 FETCH_SEM = asyncio.Semaphore(4)
 
 # ==========================================
@@ -307,7 +306,6 @@ async def get_nearest_fibo_levels_async(symbol, current_price):
 
 def _get_daily_pivots_sync(symbol):
     try:
-        # Haftalık Pivot için 1w kullanıldı
         df = bp.Ticker(symbol).history(period="5 bar", interval="1w")
         if df is None or len(df) < 2: return None
         df.columns = [str(c).lower() for c in df.columns]
@@ -394,7 +392,6 @@ async def fetch_ohlc_async(symbol, interval, limit=500):
             
     try:
         async with FETCH_SEM:
-            # Websocket fırtınasını önlemek için istekler arasına bekleme eklendi
             await asyncio.sleep(0.5) 
             loop = asyncio.get_running_loop()
             df = await asyncio.wait_for(loop.run_in_executor(EXECUTOR, fetch_ohlc, symbol, interval, limit), timeout=15.0)
@@ -442,10 +439,8 @@ async def check_rsi_ema_crossover(symbol, df_1h):
     if rsi_ema_cross_states.get(cross_key) == bar_time: return
     
     direction = None
-    # Yukarı kesişim: Sadece RSI 20'nin altındayken
     if prev_rsi <= prev_ema and curr_rsi > curr_ema and (curr_rsi < 20 or prev_rsi < 20): 
         direction = "YUKARI"
-    # Aşağı kesişim: Sadece RSI 85'in üzerindeyken
     elif prev_rsi >= prev_ema and curr_rsi < curr_ema and (curr_rsi > 85 or prev_rsi > 85): 
         direction = "AŞAĞI"
     
@@ -473,7 +468,6 @@ async def check_kosan_at(sym, xu_trend):
         df_5m['rsi'] = get_rsi(df_5m['close'], 8)
         df_5m['ema50'] = df_5m['close'].ewm(span=50, adjust=False).mean()
         
-        # 1H RSI periyodu 14
         df_1h['rsi_1h'] = get_rsi(df_1h['close'], 14)
         
         df = pd.merge_asof(df_5m.sort_index(), df_1h[['rsi_1h']].sort_index(), left_index=True, right_index=True, direction='backward')
@@ -490,18 +484,16 @@ async def check_kosan_at(sym, xu_trend):
         long_trigger = (prev['rsi'] <= 75) and (curr['rsi'] > 75)
         short_trigger = (prev['rsi'] >= 35) and (curr['rsi'] < 35)
         
-        # Trend Filtreleri (1H RSI >50 ve XU030 Yönü)
         long_cond = long_trigger and (curr['close'] > curr['ema50']) and (curr['rsi_1h'] > 50) and (xu_trend == 1)
         short_cond = short_trigger and (curr['close'] < curr['ema50']) and (curr['rsi_1h'] < 50) and (xu_trend == -1)
         
         sig_key = f"kosan_at_{sym}"
         last_signal_time = KOSAN_AT_STATES.get(sig_key)
         
-        # 3 saatlik cooldown (bekleme) kontrolü
         if last_signal_time is not None and isinstance(last_signal_time, (datetime, pd.Timestamp)):
             time_diff_hours = (datetime.now(TIMEZONE) - last_signal_time).total_seconds() / 3600
             if time_diff_hours < 3.0:
-                return  # Son sinyalden bu yana 3 saat geçmediyse sinyal üretme
+                return
         
         lag_dk = get_real_lag_minutes(bar_time, "5m")
         emoji = get_lag_emoji(lag_dk)
@@ -509,10 +501,12 @@ async def check_kosan_at(sym, xu_trend):
         xu_text = "📈 <b>Yukarı</b>" if xu_trend == 1 else "📉 <b>Aşağı</b>"
         
         if long_cond:
-            KOSAN_AT_STATES[sig_key] = datetime.now(TIMEZONE) # Gerçek zaman kaydediliyor
+            KOSAN_AT_STATES[sig_key] = datetime.now(TIMEZONE)
             entry = curr['close']
+            # SL: %1.5, TP1: %2.0, TP2: %3.0
             sl = entry * 0.985
-            tp = entry * 1.02
+            tp1 = entry * 1.02
+            tp2 = entry * 1.03
             
             msg = (f"🐎 <b>KOŞAN AT SİNYALİ (LONG) - {sym} [5M]</b> 🐎\n"
                    f"✅ <b>Mum kapandı, sinyal onaylandı.</b>\n\n"
@@ -522,7 +516,8 @@ async def check_kosan_at(sym, xu_trend):
                    f"🎯 <b>5M EMA 50 (Giriş Yeri):</b> {curr['ema50']:,.2f}\n\n"
                    f"💰 <b>Giriş:</b> {entry:,.2f}\n"
                    f"🛑 <b>Stop (SL %1.5):</b> {sl:,.2f}\n"
-                   f"🎯 <b>Hedef (TP %2.0):</b> {tp:,.2f}\n\n"
+                   f"🎯 <b>Hedef 1 (TP1 %2.0):</b> {tp1:,.2f}\n"
+                   f"🎯 <b>Hedef 2 (TP2 %3.0):</b> {tp2:,.2f}\n\n"
                    f"⏱ <b>Veri Gecikmesi:</b> {emoji} {lag_dk} dk")
             
             for cid in CHAT_IDS:
@@ -530,10 +525,12 @@ async def check_kosan_at(sym, xu_trend):
                 except: pass
                 
         elif short_cond:
-            KOSAN_AT_STATES[sig_key] = datetime.now(TIMEZONE) # Gerçek zaman kaydediliyor
+            KOSAN_AT_STATES[sig_key] = datetime.now(TIMEZONE)
             entry = curr['close']
+            # SL: %1.5, TP1: %2.0, TP2: %3.0
             sl = entry * 1.015
-            tp = entry * 0.98
+            tp1 = entry * 0.98
+            tp2 = entry * 0.97
             
             msg = (f"🐎 <b>KOŞAN AT SİNYALİ (SHORT) - {sym} [5M]</b> 🐎\n"
                    f"✅ <b>Mum kapandı, sinyal onaylandı.</b>\n\n"
@@ -543,7 +540,8 @@ async def check_kosan_at(sym, xu_trend):
                    f"🎯 <b>5M EMA 50 (Giriş Yeri):</b> {curr['ema50']:,.2f}\n\n"
                    f"💰 <b>Giriş:</b> {entry:,.2f}\n"
                    f"🛑 <b>Stop (SL %1.5):</b> {sl:,.2f}\n"
-                   f"🎯 <b>Hedef (TP %2.0):</b> {tp:,.2f}\n\n"
+                   f"🎯 <b>Hedef 1 (TP1 %2.0):</b> {tp1:,.2f}\n"
+                   f"🎯 <b>Hedef 2 (TP2 %3.0):</b> {tp2:,.2f}\n\n"
                    f"⏱ <b>Veri Gecikmesi:</b> {emoji} {lag_dk} dk")
             
             for cid in CHAT_IDS:
@@ -593,40 +591,45 @@ async def process_atr_signals(symbol, dfs):
             atr_val = atr_series.loc[idx] if idx in atr_series.index else None
             if pd.isna(atr_val) or atr_val is None or atr_val <= 0: continue
             
+            # Ters Momentum Mantığı
             if state == "IDLE":
-                if r_now > ALARM_SHORT_UPPER: atr_data.update({"state": "SHORT_ARMED", "peak_rsi": r_now, "peak_price": candle_high, "reject_count": 0})
-                elif r_now < ALARM_LONG_LOWER: atr_data.update({"state": "LONG_ARMED", "low_rsi": r_now, "low_price": candle_low, "reject_count": 0})
-            elif state == "SHORT_ARMED":
-                if r_now > atr_data["peak_rsi"]: atr_data["peak_rsi"] = r_now; atr_data["peak_price"] = candle_high
-                price_ok = (atr_data["peak_price"] - close_price) >= atr_val * ALARM_ATR_DROP; candle_ok = close_price < row['open']
-                if price_ok and candle_ok:
-                    tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol); fibo_note = await get_nearest_fibo_levels_async(symbol, close_price)
-                    entry_time = idx + timedelta(minutes=TF_MINUTES[tf])
-                    sl = close_price * (1 + SL_PCT / 100); tp = close_price * (1 - TP_PCT / 100)
-                    msg = f"✨ <b>ATR DÜNYASI (Short) - {symbol} [{tf.upper()}]</b> ✨{incomplete_txt}\n🔴 RSI Aşırı Alım Zirvesi: {atr_data['peak_rsi']:.1f}\n"
-                    if tf == "30m": msg += "📊 <b>Tarihsel Kazanma Oranı:</b> %83.33\n"
-                    msg += f"{tags}\n\n💰 <b>Olası Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (+%{SL_PCT})\n🎯 <b>TP (%{TP_PCT}):</b> {tp:,.2f}\n⏳ <i>Zaman Aşımı: {TIMEOUT_HOURS} Seans Saati</i>"
-                    msg += fibo_note; msg += earnings_note
-                    msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(gecikme_dk)} {gecikme_dk} dk" 
-                    msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "SHORT", "price": close_price, "sl": sl, "tp": tp, "bar_time": entry_time})
-                    atr_data["state"] = "IDLE"
-                    break 
-                else:
-                    atr_data["reject_count"] += 1
-                    if atr_data["reject_count"] >= 20 or r_now < 60: atr_data.update({"state": "IDLE", "reject_count": 0})
+                if r_now > ALARM_SHORT_UPPER: atr_data.update({"state": "LONG_ARMED", "peak_rsi": r_now, "peak_price": candle_high, "reject_count": 0})
+                elif r_now < ALARM_LONG_LOWER: atr_data.update({"state": "SHORT_ARMED", "low_rsi": r_now, "low_price": candle_low, "reject_count": 0})
+            
             elif state == "LONG_ARMED":
-                if r_now < atr_data["low_rsi"]: atr_data["low_rsi"] = r_now; atr_data["low_price"] = candle_low
-                price_ok = (close_price - atr_data["low_price"]) >= atr_val * ALARM_ATR_DROP; candle_ok = close_price > row['open']
+                if r_now > atr_data["peak_rsi"]: atr_data["peak_rsi"] = r_now; atr_data["peak_price"] = candle_high
+                price_ok = (atr_data["peak_price"] - close_price) >= atr_val * ALARM_ATR_DROP
+                candle_ok = close_price > row['open']
                 if price_ok and candle_ok:
                     tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol); fibo_note = await get_nearest_fibo_levels_async(symbol, close_price)
                     entry_time = idx + timedelta(minutes=TF_MINUTES[tf])
                     sl = close_price * (1 - SL_PCT / 100); tp = close_price * (1 + TP_PCT / 100)
-                    msg = f"✨ <b>ATR DÜNYASI (Long) - {symbol} [{tf.upper()}]</b> ✨{incomplete_txt}\n🟢 RSI Aşırı Satım Dibi: {atr_data['low_rsi']:.1f}\n"
+                    msg = f"✨ <b>ATR DÜNYASI (Long) - {symbol} [{tf.upper()}]</b> ✨{incomplete_txt}\n🔴 RSI Aşırı Alım Zirvesi: {atr_data['peak_rsi']:.1f}\n"
                     if tf == "30m": msg += "📊 <b>Tarihsel Kazanma Oranı:</b> %83.33\n"
                     msg += f"{tags}\n\n💰 <b>Olası Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (-%{SL_PCT})\n🎯 <b>TP (%{TP_PCT}):</b> {tp:,.2f}\n⏳ <i>Zaman Aşımı: {TIMEOUT_HOURS} Seans Saati</i>"
                     msg += fibo_note; msg += earnings_note
                     msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(gecikme_dk)} {gecikme_dk} dk" 
                     msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "LONG", "price": close_price, "sl": sl, "tp": tp, "bar_time": entry_time})
+                    atr_data["state"] = "IDLE"
+                    break 
+                else:
+                    atr_data["reject_count"] += 1
+                    if atr_data["reject_count"] >= 20 or r_now < 60: atr_data.update({"state": "IDLE", "reject_count": 0})
+            
+            elif state == "SHORT_ARMED":
+                if r_now < atr_data["low_rsi"]: atr_data["low_rsi"] = r_now; atr_data["low_price"] = candle_low
+                price_ok = (close_price - atr_data["low_price"]) >= atr_val * ALARM_ATR_DROP
+                candle_ok = close_price < row['open']
+                if price_ok and candle_ok:
+                    tags = get_volume_and_trend_tag(df, df_4h); earnings_note = await get_earnings_note_async(symbol); fibo_note = await get_nearest_fibo_levels_async(symbol, close_price)
+                    entry_time = idx + timedelta(minutes=TF_MINUTES[tf])
+                    sl = close_price * (1 + SL_PCT / 100); tp = close_price * (1 - TP_PCT / 100)
+                    msg = f"✨ <b>ATR DÜNYASI (Short) - {symbol} [{tf.upper()}]</b> ✨{incomplete_txt}\n🟢 RSI Aşırı Satım Dibi: {atr_data['low_rsi']:.1f}\n"
+                    if tf == "30m": msg += "📊 <b>Tarihsel Kazanma Oranı:</b> %83.33\n"
+                    msg += f"{tags}\n\n💰 <b>Olası Giriş:</b> {close_price:,.2f}\n🛑 <b>Stop:</b> {sl:,.2f} (+%{SL_PCT})\n🎯 <b>TP (%{TP_PCT}):</b> {tp:,.2f}\n⏳ <i>Zaman Aşımı: {TIMEOUT_HOURS} Seans Saati</i>"
+                    msg += fibo_note; msg += earnings_note
+                    msg += f"\n\n⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(gecikme_dk)} {gecikme_dk} dk" 
+                    msgs.append({"text": msg, "symbol": symbol, "tf": tf, "type": "atr_dunyasi", "direction": "SHORT", "price": close_price, "sl": sl, "tp": tp, "bar_time": entry_time})
                     atr_data["state"] = "IDLE"
                     break
                 else:
@@ -659,7 +662,6 @@ async def check_mukemmel_fibo():
                 lag_4h_dk = get_real_lag_minutes(df_4h.index[-1], "4h")
                 inc_4h = " <i>(Mum tamamlanmadı)</i>" if is_bar_incomplete(df_4h.index[-1], "4h") else ""
                 
-                # --- 4H KRAL ---
                 rsi_4h = get_rsi(df_4h['close'], 14).iloc[-1]
                 current_price_4h = float(df_4h['close'].iloc[-1])
                 current_high_4h = float(df_4h['high'].iloc[-1])
@@ -1122,7 +1124,6 @@ async def tick_fast(force=False):
     logger.info(f"🔄 Hızlı Tarama (ATR & Koşan At) başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
     failed_count = 0
     
-    # XU030 Trendini Çek (Endeks Filtresi)
     xu_trend = 0
     try:
         df_xu = await fetch_ohlc_async("XU030", "1h", limit=100)
@@ -1270,7 +1271,7 @@ async def main():
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
     
     sched.start()
-    logger.info("✅ Bot çalışıyor. Sadeleştirilmiş sürüm: ATR, Koşan At (XU030 Filtreli), Fibo (4H), Gap Avcısı, RSI EMA Kesişimi.")
+    logger.info("✅ Bot çalışıyor. Koşan At (Kısmi Kâr Al: TP1/TP2) özelliği eklendi.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
