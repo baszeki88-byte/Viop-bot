@@ -147,7 +147,8 @@ DATA_DIR = os.getenv("DATA_DIR", "/tmp")
 TRADES_FILE = os.path.join(DATA_DIR, "active_trades.json")
 
 EXECUTOR = ThreadPoolExecutor(max_workers=20)
-FETCH_SEM = asyncio.Semaphore(6)
+# DEĞİŞİKLİK 1: Semaphore 4'e düşürüldü
+FETCH_SEM = asyncio.Semaphore(4)
 
 # ==========================================
 # YARDIMCI: GECİKME VE MUM TAMAMLANMA
@@ -309,12 +310,9 @@ def _get_daily_pivots_sync(symbol):
         if df is None or len(df) < 2: return None
         df.columns = [str(c).lower() for c in df.columns]
         
-        # Haftalık veride son (henüz kapanmamış) haftayı atlayıp bir önceki haftayı alıyoruz.
-        # Basitlik adına, mevcut günden küçük olan son barı alıyoruz. (Borsapy 1w verisini haftanın başlangıcı olarak veriyorsa)
         today = datetime.now(TIMEZONE).date()
         df_gecmis = df[df.index.date < today]
         if df_gecmis.empty: 
-            # Eğer bugün pazartesi ise ve henüz geçen haftanın verisi yoksa, son barı al
             df_gecmis = df.iloc[:-1] if len(df) > 1 else df
         
         if df_gecmis.empty: return None
@@ -394,6 +392,8 @@ async def fetch_ohlc_async(symbol, interval, limit=500):
             
     try:
         async with FETCH_SEM:
+            # DEĞİŞİKLİK 3: Websocket fırtınasını önlemek için istekler arasına bekleme eklendi
+            await asyncio.sleep(0.5) 
             loop = asyncio.get_running_loop()
             df = await asyncio.wait_for(loop.run_in_executor(EXECUTOR, fetch_ohlc, symbol, interval, limit), timeout=15.0)
             
@@ -624,7 +624,7 @@ async def process_atr_signals(symbol, dfs):
     return msgs
 
 # ==========================================
-# MÜKEMMEL FİBO MOTORU (SADECE 4H KRAL)
+# MÜKEMMEL FİBO MOTORU (4H KRAL)
 # ==========================================
 async def check_mukemmel_fibo():
     if not is_market_open(): return
