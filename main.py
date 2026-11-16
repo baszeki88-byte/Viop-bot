@@ -125,6 +125,9 @@ PIVOT_CACHE = {}
 KOSAN_AT_STATES = {}
 rsi_ema_cross_states = {}
 
+# DÜZELTİLEN HATA: Eksik olan EMA_DATA_CACHE eklendi
+EMA_DATA_CACHE = {}
+
 active_trades = {}
 pending_trades = set()
 atr_states = {}
@@ -147,7 +150,7 @@ DATA_DIR = os.getenv("DATA_DIR", "/tmp")
 TRADES_FILE = os.path.join(DATA_DIR, "active_trades.json")
 
 EXECUTOR = ThreadPoolExecutor(max_workers=20)
-# DEĞİŞİKLİK 1: Semaphore 4'e düşürüldü
+# Semaphore 4 olarak güncellendi
 FETCH_SEM = asyncio.Semaphore(4)
 
 # ==========================================
@@ -392,7 +395,7 @@ async def fetch_ohlc_async(symbol, interval, limit=500):
             
     try:
         async with FETCH_SEM:
-            # DEĞİŞİKLİK 3: Websocket fırtınasını önlemek için istekler arasına bekleme eklendi
+            # Websocket fırtınasını önlemek için istekler arasına bekleme eklendi
             await asyncio.sleep(0.5) 
             loop = asyncio.get_running_loop()
             df = await asyncio.wait_for(loop.run_in_executor(EXECUTOR, fetch_ohlc, symbol, interval, limit), timeout=15.0)
