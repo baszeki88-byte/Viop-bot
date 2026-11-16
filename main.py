@@ -489,18 +489,18 @@ async def check_kosan_at(sym):
         long_trigger = (prev['rsi'] <= 75) and (curr['rsi'] > 75)
         short_trigger = (prev['rsi'] >= 35) and (curr['rsi'] < 35)
         
-        # Trend Filtreleri (1H RSI sınırları: LONG 60-70, SHORT 30-50)
-        long_cond = long_trigger and (curr['close'] > curr['ema50']) and (60 < curr['rsi_1h'] < 70)
-        short_cond = short_trigger and (curr['close'] < curr['ema50']) and (30 < curr['rsi_1h'] < 50)
+        # Trend Filtreleri (Öneri 2: LONG >50, SHORT <50)
+        long_cond = long_trigger and (curr['close'] > curr['ema50']) and (curr['rsi_1h'] > 50)
+        short_cond = short_trigger and (curr['close'] < curr['ema50']) and (curr['rsi_1h'] < 50)
         
         sig_key = f"kosan_at_{sym}"
         last_signal_time = KOSAN_AT_STATES.get(sig_key)
         
-        # YENİ: 2 saatlik cooldown (bekleme) kontrolü
+        # 3 saatlik cooldown (bekleme) kontrolü
         if last_signal_time is not None and isinstance(last_signal_time, (datetime, pd.Timestamp)):
             time_diff_hours = (datetime.now(TIMEZONE) - last_signal_time).total_seconds() / 3600
-            if time_diff_hours < 2.0:
-                return  # Son sinyalden bu yana 2 saat geçmediyse sinyal üretme
+            if time_diff_hours < 3.0:
+                return  # Son sinyalden bu yana 3 saat geçmediyse sinyal üretme
         
         lag_dk = get_real_lag_minutes(bar_time, "5m")
         emoji = get_lag_emoji(lag_dk)
@@ -1253,7 +1253,7 @@ async def main():
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
     
     sched.start()
-    logger.info("✅ Bot çalışıyor. Sadeleştirilmiş sürüm: ATR, Koşan At (2S Cooldown), Fibo (4H), Gap Avcısı, RSI EMA Kesişimi.")
+    logger.info("✅ Bot çalışıyor. Sadeleştirilmiş sürüm: ATR, Koşan At (Öneri 2 & 3s Cooldown), Fibo (4H), Gap Avcısı, RSI EMA Kesişimi.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
