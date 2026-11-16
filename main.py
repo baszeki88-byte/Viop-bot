@@ -118,9 +118,9 @@ ALARM_ATR_DROP = 1.0
 ATR_PERIOD = 7
 
 TIME_FRAMES_RSI = ["1h"]
-# DEĞİŞİKLİK 1: 15m ATR sinyallerinden çıkarıldı
+# DEĞİŞİKLİK: 15m ATR sinyallerinden çıkarıldı
 TIME_FRAMES_ATR = ["30m", "1h", "4h"]
-# DEĞİŞİKLİK 1: 15m veri çekme listesinden çıkarıldı (Gap Avcısı kendi içinde çekiyor)
+# DEĞİŞİKLİK: 15m veri çekme listesinden çıkarıldı
 FETCH_TFS = ["30m", "1h", "4h"] 
 TF_MINUTES = {"15m": 15, "30m": 30, "1h": 60, "4h": 240}
 
@@ -555,9 +555,9 @@ async def check_kosan_at(sym):
         long_trigger = (prev['rsi'] <= 75) and (curr['rsi'] > 75)
         short_trigger = (prev['rsi'] >= 35) and (curr['rsi'] < 35)
         
-        # Trend Filtreleri
-        long_cond = long_trigger and (curr['close'] > curr['ema50']) and (60 < curr['rsi_1h'] < 80)
-        short_cond = short_trigger and (curr['close'] < curr['ema50']) and (20 < curr['rsi_1h'] < 40)
+        # Trend Filtreleri (DEĞİŞİKLİK: 1H RSI sınırları daraltıldı. LONG 60-70, SHORT 30-40)
+        long_cond = long_trigger and (curr['close'] > curr['ema50']) and (60 < curr['rsi_1h'] < 70)
+        short_cond = short_trigger and (curr['close'] < curr['ema50']) and (30 < curr['rsi_1h'] < 40)
         
         sig_key = f"kosan_at_{sym}"
         if KOSAN_AT_STATES.get(sig_key) == bar_time: return # Aynı mumda tekrar sinyal atma
@@ -571,7 +571,7 @@ async def check_kosan_at(sym):
             sl = entry * 0.985 # %1.5
             tp = entry * 1.02  # %2.0
             
-            # DEĞİŞİKLİK 3: 5M EMA 50 Giriş Yeri olarak eklendi
+            # DEĞİŞİKLİK: 5M EMA 50 Giriş Yeri olarak eklendi
             msg = (f"🐎 <b>KOŞAN AT SİNYALİ (LONG) - {sym} [5M]</b> 🐎\n"
                    f"✅ <b>Mum kapandı, sinyal onaylandı.</b>\n\n"
                    f"📈 <b>Yön:</b> LONG\n"
@@ -592,7 +592,7 @@ async def check_kosan_at(sym):
             sl = entry * 1.015 # %1.5
             tp = entry * 0.98  # %2.0
             
-            # DEĞİŞİKLİK 3: 5M EMA 50 Giriş Yeri olarak eklendi
+            # DEĞİŞİKLİK: 5M EMA 50 Giriş Yeri olarak eklendi
             msg = (f"🐎 <b>KOŞAN AT SİNYALİ (SHORT) - {sym} [5M]</b> 🐎\n"
                    f"✅ <b>Mum kapandı, sinyal onaylandı.</b>\n\n"
                    f"📉 <b>Yön:</b> SHORT\n"
@@ -987,7 +987,7 @@ async def check_triple_ema():
     async def scan_ema(sym):
         async with sem:
             try:
-                # DEĞİŞİKLİK 2: ("15m", 21, 200) kaldırıldı. Sadece 30M kaldı.
+                # DEĞİŞİKLİK: ("15m", 21, 200) kaldırıldı. Sadece 30M kaldı.
                 for tf, fast, slow in [("30m", 21, 50)]:
                     df = await fetch_ohlc_async(sym, tf, limit=500)
                     if df is None or len(df) < slow + 10: continue
