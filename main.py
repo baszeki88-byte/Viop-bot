@@ -46,6 +46,7 @@ DATA_DIR = os.getenv("DATA_DIR", "/tmp")
 if DATA_DIR == "/tmp":
     logger.warning("⚠️ DATA_DIR=/tmp: Restart/deploy sonrası açık pozisyonlar kaybolur!")
 KOSAN_AT_FILE = os.path.join(DATA_DIR, "kosan_at_trades.json")
+RSI_EMA_FILE = os.path.join(DATA_DIR, "rsi_ema_trades.json")
 
 last_error_time = {}
 async def send_admin_alert(error_msg, error_key="general"):
@@ -119,12 +120,14 @@ RSI_X_PERIOD = 8
 RSI_X_EMA_SPAN = 13
 RSI_X_LOW = 20
 RSI_X_HIGH = 85
-RSI_X_SL_WINDOW = 3 # Sinyalden ÖNCEKİ son N kapanmış mum (SL için)
+RSI_X_SL_WINDOW = 3 
+MAX_RSI_EMA_TRADE_DAYS = 3 # YENİ: RSI EMA takip süresi (seans günü)
 
 KOSAN_AT_TRADES = {}
+RSI_EMA_TRADES = {} # YENİ: RSI EMA Açık İşlemler
 KOSAN_LAST_SIGNAL = {}
 rsi_ema_cross_states = {}
-rsi_ema_armed_states = {} # YENİ: RSI'ın aşırı bölgeye girme durumu
+rsi_ema_armed_states = {} 
 
 is_scanning = False
 background_tasks = set()
@@ -182,15 +185,27 @@ def session_days_elapsed(entry_date, today):
 # ==========================================
 def save_trades():
     try:
-        out = {}
+        # Koşan At
+        out_kosan = {}
         for k, v in KOSAN_AT_TRADES.items():
             t = v.copy()
             for f in ("entry_time", "last_bar"):
                 if isinstance(t.get(f), (datetime, pd.Timestamp)): t[f] = t[f].isoformat()
-            out[k] = t
+            out_kosan[k] = t
         with open(KOSAN_AT_FILE + ".tmp", "w", encoding="utf-8") as f:
-            json.dump(out, f, ensure_ascii=False, indent=2)
+            json.dump(out_kosan, f, ensure_ascii=False, indent=2)
         os.replace(KOSAN_AT_FILE + ".tmp", KOSAN_AT_FILE)
+        
+        # RSI EMA
+        out_rsi = {}
+        for k, v in RSI_EMA_TRADES.items():
+            t = v.copy()
+            if isinstance(t.get("entry_time"), (datetime, pd.Timestamp)): t["entry_time"] = t["entry_time"].isoformat()
+            out_rsi[k] = t
+        with open(RSI_EMA_FILE + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(out_rsi, f, ensure_ascii=False, indent=2)
+        os.replace(RSI_EMA_FILE + ".tmp", RSI_EMA_FILE)
+        
     except Exception as e:
         logger.error(f"Trade kayıt hatası: {e}")
 
@@ -199,18 +214,30 @@ def _parse_dt(s):
     return TIMEZONE.localize(dt) if dt.tzinfo is None else dt
 
 def load_trades():
-    if not os.path.exists(KOSAN_AT_FILE): return
-    try:
-        with open(KOSAN_AT_FILE, "r", encoding="utf-8") as f:
-            loaded = json.load(f)
-        for k, v in loaded.items():
-            for fld in ("entry_time", "last_bar"):
-                if isinstance(v.get(fld), str): v[fld] = _parse_dt(v[fld])
-            if "last_bar" not in v: v["last_bar"] = v["entry_time"]
-            KOSAN_AT_TRADES[k] = v
-        logger.info(f"✅ {len(KOSAN_AT_TRADES)} aktif Koşan At işlemi yüklendi.")
-    except Exception as e:
-        logger.error(f"Koşan At yükleme hatası: {e}")
+    global KOSAN_AT_TRADES, RSI_EMA_TRADES
+    if os.path.exists(KOSAN_AT_FILE):
+        try:
+            with open(KOSAN_AT_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            for k, v in loaded.items():
+                for fld in ("entry_time", "last_bar"):
+                    if isinstance(v.get(fld), str): v[fld] = _parse_dt(v[fld])
+                if "last_bar" not in v: v["last_bar"] = v["entry_time"]
+                KOSAN_AT_TRADES[k] = v
+            logger.info(f"✅ {len(KOSAN_AT_TRADES)} aktif Koşan At işlemi yüklendi.")
+        except Exception as e:
+            logger.error(f"Koşan At yükleme hatası: {e}")
+            
+    if os.path.exists(RSI_EMA_FILE):
+        try:
+            with open(RSI_EMA_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            for k, v in loaded.items():
+                if isinstance(v.get("entry_time"), str): v["entry_time"] = _parse_dt(v["entry_time"])
+                RSI_EMA_TRADES[k] = v
+            logger.info(f"✅ {len(RSI_EMA_TRADES)} aktif RSI EMA işlemi yüklendi.")
+        except Exception as e:
+            logger.error(f"RSI EMA yükleme hatası: {e}")
 
 # ==========================================
 # TELEGRAM GÖNDERİM (ALINTI DESTEKLİ)
@@ -274,7 +301,7 @@ async def fetch_ohlc_async(symbol, interval, limit=500):
         logger.error(f"Async Fetch Hatası ({symbol}): {e}"); return None
 
 # ==========================================
-# RSI EMA KESİŞİMİ (YENİ MANTIK)
+# RSI EMA KESİŞİMİ
 # ==========================================
 async def check_rsi_ema_crossover(symbol, df_1h_raw):
     df = closed_only(df_1h_raw, "1h")
@@ -290,31 +317,27 @@ async def check_rsi_ema_crossover(symbol, df_1h_raw):
     bar_time = df.index[-1]
     now = datetime.now(TIMEZONE)
 
-    # Durum kontrolü (Aşırı bölgeye girme)
     armed_state = rsi_ema_armed_states.get(symbol)
     if armed_state:
-        # 1 seans günü geçtiyse sil
         if session_days_elapsed(armed_state["time"].date(), now.date()) >= 1:
             del rsi_ema_armed_states[symbol]
             armed_state = None
 
-    # Aşırı bölgeye yeni girildiyse (Eğer zaten armed değilse)
     if not armed_state:
         if curr_rsi < RSI_X_LOW:
             rsi_ema_armed_states[symbol] = {"state": "LONG_ARMED", "time": bar_time}
         elif curr_rsi > RSI_X_HIGH:
             rsi_ema_armed_states[symbol] = {"state": "SHORT_ARMED", "time": bar_time}
-        return # Tetikleme için henüz kesişim aramıyoruz
+        return
 
-    # Eğer aşırı bölgedeysek ve kesişim arıyorsak
     cross_key = f"rsi_ema_{symbol}_1h"
-    if rsi_ema_cross_states.get(cross_key) == bar_time: return # Aynı mumda tekrar sinyal atma
+    if rsi_ema_cross_states.get(cross_key) == bar_time: return
 
     direction = None
     if armed_state["state"] == "LONG_ARMED" and prev_rsi <= prev_ema and curr_rsi > curr_ema:
-        direction = "YUKARI"
+        direction = "LONG"
     elif armed_state["state"] == "SHORT_ARMED" and prev_rsi >= prev_ema and curr_rsi < curr_ema:
-        direction = "AŞAĞI"
+        direction = "SHORT"
 
     if not direction: return
 
@@ -322,16 +345,14 @@ async def check_rsi_ema_crossover(symbol, df_1h_raw):
     if lag > 120: return
 
     rsi_ema_cross_states[cross_key] = bar_time
-    del rsi_ema_armed_states[symbol] # Sinyal üretildi, durumu sıfırla
+    del rsi_ema_armed_states[symbol]
 
-    # STOP LOSS HESABI (Sinyal mumu HARİÇ, önceki 3 kapanmış mum)
-    # df.iloc[-1] sinyal mumu, df.iloc[-4:-1] önceki 3 mum
     window_bars = df.iloc[-4:-1] 
     if len(window_bars) < RSI_X_SL_WINDOW: return
 
     price = float(df['close'].iloc[-1])
     
-    if direction == "YUKARI":
+    if direction == "LONG":
         stop = float(window_bars['low'].min())
         emoji = "🟢"
         stop_txt = f"Sinyal öncesi 3 mumun en düşüğü"
@@ -342,9 +363,25 @@ async def check_rsi_ema_crossover(symbol, df_1h_raw):
 
     risk_pct = abs(price - stop) / price * 100
 
+    # TERS SİNYAL KONTROLÜ
+    if symbol in RSI_EMA_TRADES:
+        existing = RSI_EMA_TRADES[symbol]
+        if existing["direction"] != direction:
+            del RSI_EMA_TRADES[symbol]
+            await send_all(f"🔄 <b>{symbol} - Ters Sinyal!</b>\nÖnceki {existing['direction']} işlemi kapatıldı, yeni {direction} yönlü işleme geçiliyor.")
+        else:
+            return # Aynı yönde zaten açık işlem varsa yeni sinyal atma
+
+    # KAYDET
+    RSI_EMA_TRADES[symbol] = {
+        "symbol": symbol, "direction": direction, "entry": price, "sl": stop,
+        "entry_time": now, "type": "RSI EMA"
+    }
+    save_trades()
+
     msg = (f"⚡ <b>RSI EMA KESİŞİMİ ({direction}) - {symbol} [1H]</b> ⚡\n\n"
            f"RSI({RSI_X_PERIOD}) ve EMA({RSI_X_EMA_SPAN}) <b>{direction}</b> yönlü kesişti!\n"
-           f"<i>(Önceki aşırı bölge: {RSI_X_LOW if direction == 'YUKARI' else RSI_X_HIGH} altı/üstü)</i>\n\n"
+           f"<i>(Önceki aşırı bölge: {RSI_X_LOW if direction == 'LONG' else RSI_X_HIGH} altı/üstü)</i>\n\n"
            f"📊 <b>RSI({RSI_X_PERIOD}):</b> {curr_rsi:.1f}\n"
            f"📈 <b>EMA({RSI_X_EMA_SPAN}):</b> {curr_ema:.1f}\n"
            f"💰 <b>Fiyat:</b> {price:,.2f}\n"
@@ -375,7 +412,6 @@ async def track_kosan(sym, df5):
         trade["last_bar"] = ts
         changed = True
 
-        # 2. Giriş İptal Kontrolü (Zaman aşımı)
         if trade["status"] == "WAITING_2ND":
             n = session_days_elapsed(trade["entry_time"].date(), datetime.now(TIMEZONE).date())
             if n >= 1:
@@ -390,7 +426,6 @@ async def track_kosan(sym, df5):
                 await send_all(msg, ids)
                 continue
 
-        # 1) STOP
         sl_hit = lo <= trade["sl"] if long else hi >= trade["sl"]
         if sl_hit:
             exit_p = min(op, trade["sl"]) if long else max(op, trade["sl"])
@@ -400,7 +435,6 @@ async def track_kosan(sym, df5):
             closed = True
             break
 
-        # 2) 2. GİRİŞ (EMA50 teması)
         if trade["status"] == "WAITING_2ND":
             ema = float(bar['ema50'])
             if (long and lo <= ema) or ((not long) and hi >= ema):
@@ -418,7 +452,6 @@ async def track_kosan(sym, df5):
                 await send_all(msg, ids)
                 continue
 
-        # 3) TP2
         tp2_hit = hi >= trade["tp2"] if long else lo <= trade["tp2"]
         if tp2_hit:
             pnl = (trade["tp2"] - trade["avg_cost"]) / trade["avg_cost"] * 100 * (1 if long else -1)
@@ -426,7 +459,6 @@ async def track_kosan(sym, df5):
             closed = True
             break
 
-        # 4) TP1
         tp1_touch = hi >= trade["tp1"] if long else lo <= trade["tp1"]
         if tp1_touch and not trade.get("tp1_hit", False):
             trade["tp1_hit"] = True
@@ -521,6 +553,46 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
         save_trades()
     except Exception as e:
         logger.error(f"Koşan At hatası ({sym}): {e}")
+
+# ==========================================
+# RSI EMA İŞLEM TAKİBİ (YENİ)
+# ==========================================
+async def track_rsi_ema_trades():
+    if not RSI_EMA_TRADES: return
+    for sym, trade in list(RSI_EMA_TRADES.items()):
+        try:
+            # 3 Seans Günü Kontrolü
+            now = datetime.now(TIMEZONE)
+            n = session_days_elapsed(trade["entry_time"].date(), now.date())
+            if n >= MAX_RSI_EMA_TRADE_DAYS:
+                del RSI_EMA_TRADES[sym]
+                save_trades()
+                await send_all(f"⏰ <b>{sym} - RSI EMA Takip Süresi Doldu</b>\n{MAX_RSI_EMA_TRADE_DAYS} seans günü geçti, işlem kapatıldı.")
+                continue
+            
+            # SL Kontrolü (5M verisi ile anlık kontrol)
+            df_5m = await fetch_ohlc_async(sym, "5m", limit=100)
+            if df_5m is None or df_5m.empty: continue
+            
+            df_after = df_5m[df_5m.index >= trade["entry_time"]]
+            if df_after.empty: continue
+            
+            low_after = float(df_after['low'].min())
+            high_after = float(df_after['high'].max())
+            
+            sl_hit = False
+            if trade["direction"] == "LONG" and low_after <= trade["sl"]:
+                sl_hit = True
+            elif trade["direction"] == "SHORT" and high_after >= trade["sl"]:
+                sl_hit = True
+                
+            if sl_hit:
+                del RSI_EMA_TRADES[sym]
+                save_trades()
+                await send_all(f"🛑 <b>{sym} - RSI EMA STOP OLDU</b>\nFiyat {trade['sl']:,.2f} seviyesine değdi.\nİşlem kapatıldı.")
+                
+        except Exception as e:
+            logger.error(f"RSI EMA Track hatası ({sym}): {e}")
 
 # ==========================================
 # BIST 30 ÖZETİ
@@ -658,6 +730,10 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             t = KOSAN_AT_TRADES[text]
             msg += (f"\n🐎 <b>Açık Koşan At ({t['direction']})</b>\n• Ort. maliyet: {t['avg_cost']:,.2f}\n"
                     f"• SL: {t['sl']:,.2f} | TP1: {t['tp1']:,.2f} | TP2: {t['tp2']:,.2f}\n")
+        if text in RSI_EMA_TRADES:
+            t = RSI_EMA_TRADES[text]
+            msg += (f"\n⚡ <b>Açık RSI EMA ({t['direction']})</b>\n• Giriş: {t['entry']:,.2f}\n"
+                    f"• SL: {t['sl']:,.2f}\n")
         await update.message.reply_text(msg, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Analiz hatası: {e}"); await update.message.reply_text(f"❌ Analiz hatası: {e}")
@@ -676,16 +752,37 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_pozlar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
-    if not KOSAN_AT_TRADES:
-        await update.message.reply_text("📭 Açık Koşan At pozisyonu yok."); return
-    lines = ["🐎 <b>Açık Koşan At Pozisyonları</b>\n"]
+    if not KOSAN_AT_TRADES and not RSI_EMA_TRADES:
+        await update.message.reply_text("📭 Açık pozisyon bulunmuyor."); return
+    
+    longs = []
+    shorts = []
     now = datetime.now(TIMEZONE)
+    
+    # Koşan At
     for sym, t in KOSAN_AT_TRADES.items():
         n = session_days_elapsed(t["entry_time"].date(), now.date())
-        durum = "2. giriş bekleniyor" if t["status"] == "WAITING_2ND" else "tam giriş"
-        lines.append(f"• <b>{sym}</b> {t['direction']} | {durum} | Ort: {t['avg_cost']:,.2f}\n"
-                     f"  SL {t['sl']:,.2f} | TP1 {t['tp1']:,.2f} | TP2 {t['tp2']:,.2f} | Gün {n}/{MAX_TRADE_SESSION_DAYS}")
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        durum = "2. giriş bek." if t["status"] == "WAITING_2ND" else "tam giriş"
+        line = (f"• <b>{sym}</b> (Koşan At) - {durum} | Ort: {t['avg_cost']:,.2f}\n"
+                f"  SL {t['sl']:,.2f} | TP1 {t['tp1']:,.2f} | TP2 {t['tp2']:,.2f} | Gün {n}/{MAX_TRADE_SESSION_DAYS}")
+        if t["direction"] == "LONG": longs.append(line)
+        else: shorts.append(line)
+        
+    # RSI EMA
+    for sym, t in RSI_EMA_TRADES.items():
+        n = session_days_elapsed(t["entry_time"].date(), now.date())
+        line = (f"• <b>{sym}</b> (RSI EMA) | Giriş: {t['entry']:,.2f}\n"
+                f"  SL {t['sl']:,.2f} | Gün {n}/{MAX_RSI_EMA_TRADE_DAYS}")
+        if t["direction"] == "LONG": longs.append(line)
+        else: shorts.append(line)
+
+    msg = "📊 <b>AÇIK POZİSYONLAR</b>\n\n"
+    if longs:
+        msg += "🟢 <b>LONG:</b>\n" + "\n".join(longs) + "\n\n"
+    if shorts:
+        msg += "🔴 <b>SHORT:</b>\n" + "\n".join(shorts)
+        
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
@@ -736,6 +833,9 @@ async def tick(force=False):
     is_scanning = True
     logger.info(f"🔄 Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
     try:
+        # RSI EMA Açık İşlemleri Takip Et
+        await track_rsi_ema_trades()
+
         xu_trend = 0
         try:
             df_xu = await fetch_ohlc_async("XU030", "1h", limit=100)
@@ -773,9 +873,6 @@ async def market_open_scan():
 async def clear_daily_state():
     DATA_CACHE.clear()
     rsi_ema_cross_states.clear()
-    # Not: rsi_ema_armed_states BURADA TEMİZLENMEZ! 
-    # Çünkü 1 seans günü kuralı check_rsi_ema_crossover içinde çalışıyor.
-    # Eğer gün sonunda silersek, ertesi gün aşırı bölgeye girip kesişim bekleyenleri kaybederiz.
 
 async def task_morning_summary(): await generate_market_summary("Sabah")
 async def task_afternoon_summary(): await generate_market_summary("Öğleden Sonra")
@@ -803,7 +900,7 @@ async def main():
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
 
     sched.start()
-    logger.info("✅ Bot çalışıyor. Koşan At + RSI EMA Kesişimi aktif.")
+    logger.info("✅ Bot çalışıyor. RSI EMA İşlem Takibi eklendi.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
