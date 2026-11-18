@@ -417,13 +417,6 @@ async def track_kosan(sym, df5):
             if n >= 1:
                 trade["status"] = "FULLY_ENTERED"
                 save_trades()
-                msg = (f"⚠️ <b>{sym} - 2. GİRİŞ İPTAL EDİLDİ</b> ⚠️\n"
-                       f"1 seans günü geçti, fiyat EMA 50'ye değmedi.\n"
-                       f"İşlem tek girişli olarak takip ediliyor.\n\n"
-                       f"💰 <b>Giriş Maliyeti:</b> {trade['avg_cost']:,.2f}\n"
-                       f"🛑 <b>Stop (SL %{SL_PCT}):</b> {trade['sl']:,.2f}\n"
-                       f"🎯 <b>TP1 (%{TP1_PCT}):</b> {trade['tp1']:,.2f} | 🎯 <b>TP2 (%{TP2_PCT}):</b> {trade['tp2']:,.2f}")
-                await send_all(msg, ids)
                 continue
 
         sl_hit = lo <= trade["sl"] if long else hi >= trade["sl"]
