@@ -6,7 +6,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timedelta, time as dt_time
 import time as time_module
 from concurrent.futures import ThreadPoolExecutor
-import numpy as np
 
 import pandas as pd
 import borsapy as bp
@@ -111,8 +110,8 @@ KOSAN_RSI_PERIOD = 8
 KOSAN_LONG_LEVEL = 75
 KOSAN_SHORT_LEVEL = 35
 SL_PCT = 1.5
-TP_PCT = 1.5 # DEĞİŞTİ: Tek TP %1.5
-MAX_TRADE_SESSION_DAYS = 4
+TP_PCT = 1.5
+MAX_TRADE_HOURS = 3.0
 MAX_SIGNAL_LAG_MIN = 30
 
 # RSI EMA Kesişimi (1H)
@@ -120,17 +119,19 @@ RSI_X_PERIOD = 8
 RSI_X_EMA_SPAN = 13
 RSI_X_LOW = 20
 RSI_X_HIGH = 85
-RSI_X_SL_WINDOW = 3 
-MAX_RSI_EMA_TRADE_DAYS = 3 
+RSI_X_POST_BARS = 5
+RSI_X_MAX_STOP_PCT = 2.5
+MAX_RSI_EMA_TRADE_HOURS = 3.0
 
 KOSAN_AT_TRADES = {}
 RSI_EMA_TRADES = {}
 KOSAN_LAST_SIGNAL = {}
 rsi_ema_cross_states = {}
-rsi_ema_armed_states = {} 
+rsi_ema_armed_states = {}
 
 is_scanning = False
 background_tasks = set()
+STATE_LOCK = asyncio.Lock()
 
 DATA_CACHE = {}
 CACHE_TTL = 60
@@ -144,16 +145,20 @@ FETCH_SEM = asyncio.Semaphore(4)
 def get_real_lag_minutes(last_bar_time, tf):
     bar_close_time = last_bar_time + timedelta(minutes=TF_MINUTES.get(tf, 0))
     now = datetime.now(TIMEZONE)
-    if now < bar_close_time: return 0
+    if now < bar_close_time:
+        return 0
     return int((now - bar_close_time).total_seconds() / 60)
 
 def get_lag_emoji(minutes):
-    if minutes <= 5: return "🟢"
-    elif minutes <= 15: return "🟡"
+    if minutes <= 5:
+        return "🟢"
+    elif minutes <= 15:
+        return "🟡"
     return "🔴"
 
 def closed_only(df, tf):
-    if df is None or df.empty: return df
+    if df is None or df.empty:
+        return df
     now = datetime.now(TIMEZONE)
     close_t = df.index + pd.Timedelta(minutes=TF_MINUTES[tf])
     mask = close_t <= now
@@ -168,17 +173,17 @@ def is_trading_day(d):
 
 def is_market_open(now=None):
     now = now or datetime.now(TIMEZONE)
-    if not is_trading_day(now.date()): return False
-    if is_arife(now): return dt_time(9, 55) <= now.time() <= dt_time(13, 0)
+    if not is_trading_day(now.date()):
+        return False
+    if is_arife(now):
+        return dt_time(9, 55) <= now.time() <= dt_time(13, 0)
     return dt_time(9, 55) <= now.time() <= dt_time(18, 10)
 
-def session_days_elapsed(entry_date, today):
-    n = 0
-    d = entry_date
-    while d <= today:
-        if is_trading_day(d): n += 1
-        d += timedelta(days=1)
-    return n
+def hours_elapsed(entry_time, now=None):
+    now = now or datetime.now(TIMEZONE)
+    if entry_time.tzinfo is None:
+        entry_time = TIMEZONE.localize(entry_time)
+    return max(0.0, (now - entry_time).total_seconds() / 3600.0)
 
 # ==========================================
 # KAYIT / YÜKLEME (ATOMİK)
@@ -189,21 +194,24 @@ def save_trades():
         for k, v in KOSAN_AT_TRADES.items():
             t = v.copy()
             for f in ("entry_time", "last_bar"):
-                if isinstance(t.get(f), (datetime, pd.Timestamp)): t[f] = t[f].isoformat()
+                if isinstance(t.get(f), (datetime, pd.Timestamp)):
+                    t[f] = t[f].isoformat()
             out_kosan[k] = t
         with open(KOSAN_AT_FILE + ".tmp", "w", encoding="utf-8") as f:
             json.dump(out_kosan, f, ensure_ascii=False, indent=2)
         os.replace(KOSAN_AT_FILE + ".tmp", KOSAN_AT_FILE)
-        
+
         out_rsi = {}
         for k, v in RSI_EMA_TRADES.items():
             t = v.copy()
-            if isinstance(t.get("entry_time"), (datetime, pd.Timestamp)): t["entry_time"] = t["entry_time"].isoformat()
+            for f in ("entry_time", "signal_bar_time"):
+                if isinstance(t.get(f), (datetime, pd.Timestamp)):
+                    t[f] = t[f].isoformat()
             out_rsi[k] = t
         with open(RSI_EMA_FILE + ".tmp", "w", encoding="utf-8") as f:
             json.dump(out_rsi, f, ensure_ascii=False, indent=2)
         os.replace(RSI_EMA_FILE + ".tmp", RSI_EMA_FILE)
-        
+
     except Exception as e:
         logger.error(f"Trade kayıt hatası: {e}")
 
@@ -219,19 +227,23 @@ def load_trades():
                 loaded = json.load(f)
             for k, v in loaded.items():
                 for fld in ("entry_time", "last_bar"):
-                    if isinstance(v.get(fld), str): v[fld] = _parse_dt(v[fld])
-                if "last_bar" not in v: v["last_bar"] = v["entry_time"]
+                    if isinstance(v.get(fld), str):
+                        v[fld] = _parse_dt(v[fld])
+                if "last_bar" not in v:
+                    v["last_bar"] = v["entry_time"]
                 KOSAN_AT_TRADES[k] = v
             logger.info(f"✅ {len(KOSAN_AT_TRADES)} aktif Koşan At işlemi yüklendi.")
         except Exception as e:
             logger.error(f"Koşan At yükleme hatası: {e}")
-            
+
     if os.path.exists(RSI_EMA_FILE):
         try:
             with open(RSI_EMA_FILE, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
             for k, v in loaded.items():
-                if isinstance(v.get("entry_time"), str): v["entry_time"] = _parse_dt(v["entry_time"])
+                for fld in ("entry_time", "signal_bar_time"):
+                    if isinstance(v.get(fld), str):
+                        v[fld] = _parse_dt(v[fld])
                 RSI_EMA_TRADES[k] = v
             logger.info(f"✅ {len(RSI_EMA_TRADES)} aktif RSI EMA işlemi yüklendi.")
         except Exception as e:
@@ -271,9 +283,12 @@ def fetch_ohlc(symbol, interval, limit=500):
             df = bp.Ticker(symbol).history(period=f"{limit + 2} bar", interval=interval)
             if df is not None and not df.empty:
                 df.columns = [str(c).lower() for c in df.columns]
-                if not isinstance(df.index, pd.DatetimeIndex): df.index = pd.to_datetime(df.index)
-                if df.index.tz is None: df.index = df.index.tz_localize(TIMEZONE)
-                else: df.index = df.index.tz_convert(TIMEZONE)
+                if not isinstance(df.index, pd.DatetimeIndex):
+                    df.index = pd.to_datetime(df.index)
+                if df.index.tz is None:
+                    df.index = df.index.tz_localize(TIMEZONE)
+                else:
+                    df.index = df.index.tz_convert(TIMEZONE)
                 return df
         except Exception as e:
             logger.error(f"Veri çekme hatası ({symbol} {interval}): {e}")
@@ -284,7 +299,8 @@ async def fetch_ohlc_async(symbol, interval, limit=500):
     cache_key = f"{symbol}_{interval}_{limit}"
     if cache_key in DATA_CACHE:
         cached_df, cache_time = DATA_CACHE[cache_key]
-        if time_module.time() - cache_time < CACHE_TTL: return cached_df.copy()
+        if time_module.time() - cache_time < CACHE_TTL:
+            return cached_df.copy()
     try:
         async with FETCH_SEM:
             await asyncio.sleep(0.3)
@@ -294,9 +310,11 @@ async def fetch_ohlc_async(symbol, interval, limit=500):
                 DATA_CACHE[cache_key] = (df, time_module.time())
             return df
     except asyncio.TimeoutError:
-        logger.warning(f"Timeout: {symbol} {interval}"); return None
+        logger.warning(f"Timeout: {symbol} {interval}")
+        return None
     except Exception as e:
-        logger.error(f"Async Fetch Hatası ({symbol}): {e}"); return None
+        logger.error(f"Async Fetch Hatası ({symbol}): {e}")
+        return None
 
 # ==========================================
 # ZEKİ BEY RSI TREND KIRILIMI
@@ -305,76 +323,113 @@ def check_zeki_bey(df_1h, direction):
     """1H grafikte RSI(8)'in son 30 mumunun dip/tepe trendini kırıp kırmadığını kontrol eder."""
     rsi = get_rsi(df_1h['close'], 8)
     rsi_window = rsi.iloc[-30:].dropna()
-    if len(rsi_window) < 15: return False
-    
+    if len(rsi_window) < 15:
+        return False
+
     vals = rsi_window.values
     curr_val = vals[-1]
     prev_val = vals[-2]
-    
+
     def find_peaks(data, order=3):
         peaks = []
-        for i in range(order, len(data)-order):
-            if data[i] == max(data[i-order:i+order+1]): peaks.append(i)
+        for i in range(order, len(data) - order):
+            if data[i] == max(data[i - order:i + order + 1]):
+                peaks.append(i)
         return peaks
 
     def find_troughs(data, order=3):
         troughs = []
-        for i in range(order, len(data)-order):
-            if data[i] == min(data[i-order:i+order+1]): troughs.append(i)
+        for i in range(order, len(data) - order):
+            if data[i] == min(data[i - order:i + order + 1]):
+                troughs.append(i)
         return troughs
 
     if direction == "LONG":
-        # Direnç (Tepe) trend çizgisi kırılımı
         peaks = find_peaks(vals)
         if len(peaks) >= 2:
             p1, p2 = peaks[-2], peaks[-1]
-            # Aradaki mesafe çok kısaysa trend çizgisi anlamsızdır
-            if p2 - p1 < 3: return False 
-            
+            if p2 - p1 < 3:
+                return False
             slope = (vals[p2] - vals[p1]) / (p2 - p1)
-            proj_curr = vals[p2] + slope * (len(vals)-1 - p2)
-            proj_prev = vals[p2] + slope * (len(vals)-2 - p2)
-            
-            # Kırılım: Önceki RSI çizginin altındaydı, şimdi üstüne çıktı
+            proj_curr = vals[p2] + slope * (len(vals) - 1 - p2)
+            proj_prev = vals[p2] + slope * (len(vals) - 2 - p2)
             if prev_val <= proj_prev and curr_val > proj_curr:
                 return True
-                
+
     elif direction == "SHORT":
-        # Destek (Dip) trend çizgisi kırılımı
         troughs = find_troughs(vals)
         if len(troughs) >= 2:
             t1, t2 = troughs[-2], troughs[-1]
-            if t2 - t1 < 3: return False
-            
+            if t2 - t1 < 3:
+                return False
             slope = (vals[t2] - vals[t1]) / (t2 - t1)
-            proj_curr = vals[t2] + slope * (len(vals)-1 - t2)
-            proj_prev = vals[t2] + slope * (len(vals)-2 - t2)
-            
+            proj_curr = vals[t2] + slope * (len(vals) - 1 - t2)
+            proj_prev = vals[t2] + slope * (len(vals) - 2 - t2)
             if prev_val >= proj_prev and curr_val < proj_curr:
                 return True
-                
+
     return False
 
 # ==========================================
-# RSI EMA KESİŞİMİ
+# RSI EMA KESİŞİMİ (1H) — Sinyal Mumu + Sonraki 5 Mum + Max %2.5 Tavan
 # ==========================================
+def compute_rsi_ema_stop(df, signal_bar_time, entry_price, direction):
+    """
+    Sinyal mumunun dibi/tepesi ile sonraki en fazla 5 mumun dibi/tepesini alır;
+    daha koruyucu olanı seçip giriş fiyatından en fazla %2.5 uzaklık tavanı uygular.
+    """
+    max_cap_pct = RSI_X_MAX_STOP_PCT / 100.0
+    if signal_bar_time in df.index:
+        sig_pos = df.index.get_loc(signal_bar_time)
+        if isinstance(sig_pos, slice):
+            sig_pos = sig_pos.start
+        sig_bar = df.iloc[sig_pos]
+        post_bars = df.iloc[sig_pos + 1:sig_pos + 1 + RSI_X_POST_BARS]
+    else:
+        sig_bar = df.iloc[-1]
+        post_bars = df.iloc[0:0]
+
+    if direction == "LONG":
+        cap_stop = entry_price * (1.0 - max_cap_pct)
+        cand_lows = [float(sig_bar['low'])]
+        if not post_bars.empty:
+            cand_lows.append(float(post_bars['low'].min()))
+        # LONG'da daha koruyucu stop = daha yüksek dip (ama tavanın altında kalmalı)
+        struct_stop = max(cand_lows)
+        stop = min(max(struct_stop, cap_stop), entry_price * 0.999)
+        return float(stop)
+    else:
+        cap_stop = entry_price * (1.0 + max_cap_pct)
+        cand_highs = [float(sig_bar['high'])]
+        if not post_bars.empty:
+            cand_highs.append(float(post_bars['high'].max()))
+        # SHORT'da daha koruyucu stop = daha düşük tepe (ama tavanın üstünde kalmalı)
+        struct_stop = min(cand_highs)
+        stop = max(min(struct_stop, cap_stop), entry_price * 1.001)
+        return float(stop)
+
 async def check_rsi_ema_crossover(symbol, df_1h_raw):
+    if symbol in RSI_EMA_TRADES:
+        return
+
     df = closed_only(df_1h_raw, "1h")
-    if df is None or len(df) < 30: return
+    if df is None or len(df) < 30:
+        return
 
     rsi = get_rsi(df['close'], RSI_X_PERIOD)
     rsi_ema = rsi.ewm(span=RSI_X_EMA_SPAN, adjust=False).mean()
 
     curr_rsi, prev_rsi = float(rsi.iloc[-1]), float(rsi.iloc[-2])
     curr_ema, prev_ema = float(rsi_ema.iloc[-1]), float(rsi_ema.iloc[-2])
-    if pd.isna(curr_rsi) or pd.isna(prev_rsi) or pd.isna(curr_ema) or pd.isna(prev_ema): return
+    if pd.isna(curr_rsi) or pd.isna(prev_rsi) or pd.isna(curr_ema) or pd.isna(prev_ema):
+        return
 
     bar_time = df.index[-1]
     now = datetime.now(TIMEZONE)
 
     armed_state = rsi_ema_armed_states.get(symbol)
     if armed_state:
-        if session_days_elapsed(armed_state["time"].date(), now.date()) >= 1:
+        if hours_elapsed(armed_state["time"], now) >= 24.0 or armed_state["time"].date() != now.date():
             del rsi_ema_armed_states[symbol]
             armed_state = None
 
@@ -386,7 +441,8 @@ async def check_rsi_ema_crossover(symbol, df_1h_raw):
         return
 
     cross_key = f"rsi_ema_{symbol}_1h"
-    if rsi_ema_cross_states.get(cross_key) == bar_time: return
+    if rsi_ema_cross_states.get(cross_key) == bar_time:
+        return
 
     direction = None
     if armed_state["state"] == "LONG_ARMED" and prev_rsi <= prev_ema and curr_rsi > curr_ema:
@@ -394,43 +450,26 @@ async def check_rsi_ema_crossover(symbol, df_1h_raw):
     elif armed_state["state"] == "SHORT_ARMED" and prev_rsi >= prev_ema and curr_rsi < curr_ema:
         direction = "SHORT"
 
-    if not direction: return
+    if not direction:
+        return
 
     lag = get_real_lag_minutes(bar_time, "1h")
-    if lag > 120: return
+    if lag > 120:
+        return
 
     rsi_ema_cross_states[cross_key] = bar_time
     del rsi_ema_armed_states[symbol]
 
-    window_bars = df.iloc[-4:-1] 
-    if len(window_bars) < RSI_X_SL_WINDOW: return
-
     price = float(df['close'].iloc[-1])
-    
-    if direction == "LONG":
-        stop = float(window_bars['low'].min())
-        emoji = "🟢"
-        stop_txt = f"Sinyal öncesi 3 mumun en düşüğü"
-    else:
-        stop = float(window_bars['high'].max())
-        emoji = "🔴"
-        stop_txt = f"Sinyal öncesi 3 mumun en yükseği"
-
+    stop = compute_rsi_ema_stop(df, bar_time, price, direction)
     risk_pct = abs(price - stop) / price * 100
 
-    if symbol in RSI_EMA_TRADES:
-        existing = RSI_EMA_TRADES[symbol]
-        if existing["direction"] != direction:
-            del RSI_EMA_TRADES[symbol]
-            await send_all(f"🔄 <b>{symbol} - Ters Sinyal!</b>\nÖnceki {existing['direction']} işlemi kapatıldı, yeni {direction} yönlü işleme geçiliyor.")
-        else:
-            return 
-
-    RSI_EMA_TRADES[symbol] = {
-        "symbol": symbol, "direction": direction, "entry": price, "sl": stop,
-        "entry_time": now, "type": "RSI EMA", "zeki_sent": False
-    }
-    save_trades()
+    if direction == "LONG":
+        emoji = "🟢"
+        stop_txt = f"Sinyal mumu + sonraki {RSI_X_POST_BARS} mum (max %{RSI_X_MAX_STOP_PCT} tavan)"
+    else:
+        emoji = "🔴"
+        stop_txt = f"Sinyal mumu + sonraki {RSI_X_POST_BARS} mum (max %{RSI_X_MAX_STOP_PCT} tavan)"
 
     msg = (f"⚡ <b>RSI EMA KESİŞİMİ ({direction}) - {symbol} [1H]</b> ⚡\n\n"
            f"RSI({RSI_X_PERIOD}) ve EMA({RSI_X_EMA_SPAN}) <b>{direction}</b> yönlü kesişti!\n"
@@ -439,13 +478,28 @@ async def check_rsi_ema_crossover(symbol, df_1h_raw):
            f"📈 <b>EMA({RSI_X_EMA_SPAN}):</b> {curr_ema:.1f}\n"
            f"💰 <b>Fiyat:</b> {price:,.2f}\n"
            f"🛑 <b>Stop:</b> {stop:,.2f} (%{risk_pct:.2f} uzaklık)\n"
-           f"<i>{stop_txt}</i>\n\n"
+           f"<i>{stop_txt}</i>\n"
+           f"⏳ <b>Takip Süresi:</b> {MAX_RSI_EMA_TRADE_HOURS:.0f} saat\n\n"
            f"{emoji} <b>Giriş Onayı:</b> {direction} yönlü işlemler düşünülebilir.\n"
            f"⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag)} {lag} dk")
-    await send_all(msg)
+
+    ids = await send_all(msg)
+
+    RSI_EMA_TRADES[symbol] = {
+        "symbol": symbol,
+        "direction": direction,
+        "entry": price,
+        "sl": stop,
+        "signal_bar_time": bar_time,
+        "entry_time": now,
+        "type": "RSI EMA",
+        "zeki_sent": False,
+        "msg_ids": ids,
+    }
+    save_trades()
 
 # ==========================================
-# KOŞAN AT
+# KOŞAN AT (5M)
 # ==========================================
 def build_levels(direction, base):
     if direction == "LONG":
@@ -464,13 +518,6 @@ async def track_kosan(sym, df5, df_1h):
         hi, lo, op = float(bar['high']), float(bar['low']), float(bar['open'])
         trade["last_bar"] = ts
         changed = True
-
-        if trade["status"] == "WAITING_2ND":
-            n = session_days_elapsed(trade["entry_time"].date(), datetime.now(TIMEZONE).date())
-            if n >= 1:
-                trade["status"] = "FULLY_ENTERED"
-                save_trades()
-                continue
 
         sl_hit = lo <= trade["sl"] if long else hi >= trade["sl"]
         if sl_hit:
@@ -513,10 +560,8 @@ async def track_kosan(sym, df5, df_1h):
         return
 
     now = datetime.now(TIMEZONE)
-    n = session_days_elapsed(trade["entry_time"].date(), now.date())
-    if n > MAX_TRADE_SESSION_DAYS or (n >= MAX_TRADE_SESSION_DAYS and now.time() >= dt_time(18, 10)):
-        msg = (f"⏰ <b>{sym}</b> — {MAX_TRADE_SESSION_DAYS}. seans günü geçti, TP/SL oluşmadı.\n"
-               f"Bot bu işlemi takipten çıkardı. <b>Kendiniz takip ediniz.</b>\n\n"
+    if hours_elapsed(trade["entry_time"], now) >= MAX_TRADE_HOURS:
+        msg = (f"⏰ <b>{sym}</b> — {MAX_TRADE_HOURS:.0f} saat doldu, takipten çıktı.\n\n"
                f"📍 Ort. maliyet: {trade['avg_cost']:,.2f} | SL: {trade['sl']:,.2f} | TP: {trade['tp']:,.2f}")
         await send_all(msg, ids)
         del KOSAN_AT_TRADES[sym]
@@ -531,14 +576,16 @@ async def track_kosan(sym, df5, df_1h):
             z_msg = f"🕵️‍♂️ <b>ZEKİ BEY ÖZEL SİNYALİ!</b>\n\n{sym} {trade['direction']} işlemi devam ederken 1H RSI trend kırılımı gerçekleşti."
             await send_all(z_msg, ids)
 
-    if changed: save_trades()
+    if changed:
+        save_trades()
 
 async def check_kosan_at(sym, xu_trend, df_1h_raw):
     try:
         has_trade = sym in KOSAN_AT_TRADES
         df_5m = await fetch_ohlc_async(sym, "5m", limit=500 if has_trade else 150)
         df_5m = closed_only(df_5m, "5m")
-        if df_5m is None or len(df_5m) < 60: return
+        if df_5m is None or len(df_5m) < 60:
+            return
         df_5m = df_5m.copy()
         df_5m['rsi'] = get_rsi(df_5m['close'], KOSAN_RSI_PERIOD)
         df_5m['ema50'] = df_5m['close'].ewm(span=50, adjust=False).mean()
@@ -547,7 +594,8 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
             await track_kosan(sym, df_5m, df_1h_raw)
             return
 
-        if df_1h_raw is None or len(df_1h_raw) < 20: return
+        if df_1h_raw is None or len(df_1h_raw) < 20:
+            return
         df_1h = df_1h_raw.copy()
         df_1h['rsi_1h'] = get_rsi(df_1h['close'], 14)
 
@@ -556,19 +604,23 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
             df_1h[['rsi_1h']].sort_index(),
             left_index=True, right_index=True, direction='backward'
         ).dropna()
-        if len(df) < 2: return
+        if len(df) < 2:
+            return
 
         bar_time = df.index[-1]
-        if KOSAN_LAST_SIGNAL.get(sym) == bar_time: return
+        if KOSAN_LAST_SIGNAL.get(sym) == bar_time:
+            return
         lag_dk = get_real_lag_minutes(bar_time, "5m")
-        if lag_dk > MAX_SIGNAL_LAG_MIN: return
+        if lag_dk > MAX_SIGNAL_LAG_MIN:
+            return
 
         curr, prev = df.iloc[-1], df.iloc[-2]
         long_cond = (prev['rsi'] <= KOSAN_LONG_LEVEL and curr['rsi'] > KOSAN_LONG_LEVEL
                      and curr['close'] > curr['ema50'] and curr['rsi_1h'] > 50 and xu_trend == 1)
         short_cond = (prev['rsi'] >= KOSAN_SHORT_LEVEL and curr['rsi'] < KOSAN_SHORT_LEVEL
                       and curr['close'] < curr['ema50'] and curr['rsi_1h'] < 50 and xu_trend == -1)
-        if not (long_cond or short_cond): return
+        if not (long_cond or short_cond):
+            return
 
         direction = "LONG" if long_cond else "SHORT"
         entry = float(curr['close'])
@@ -584,11 +636,11 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
                f"💰 <b>1. Giriş (Sinyal):</b> {entry:,.2f}\n"
                f"⏳ <b>2. Giriş (50K) Bekleniyor:</b> 5M EMA 50 ({curr['ema50']:,.2f})\n"
                f"🛑 <b>İlk Stop (SL %{SL_PCT}):</b> {sl:,.2f}\n"
-               f"🎯 <b>TP (%{TP_PCT}):</b> {tp:,.2f}\n\n"
-               f"⚠️ <i>İşlem aktif. SL/TP olana kadar yeni sinyal aranmayacak.</i>\n"
+               f"🎯 <b>TP (%{TP_PCT}):</b> {tp:,.2f}\n"
+               f"⏳ <b>Takip Süresi:</b> {MAX_TRADE_HOURS:.0f} saat\n\n"
+               f"⚠️ <i>İşlem aktif. 3 saat içinde SL/TP olana kadar takip edilir.</i>\n"
                f"⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag_dk)} {lag_dk} dk")
-        
-        # Sinyal anında Zeki Bey kırılımı var mı?
+
         zeki_sent = False
         if check_zeki_bey(df_1h_raw, direction):
             msg += "\n\n🕵️‍♂️ <b>Zeki Bey Özel Sinyali!</b> (1H RSI trend kırılımı onaylandı)"
@@ -609,49 +661,67 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
         logger.error(f"Koşan At hatası ({sym}): {e}")
 
 # ==========================================
-# RSI EMA İŞLEM TAKİBİ
+# RSI EMA İŞLEM TAKİBİ (3 SAAT + DİNAMİK STOP)
 # ==========================================
 async def track_rsi_ema_trades(df_1h_cache):
-    if not RSI_EMA_TRADES: return
+    if not RSI_EMA_TRADES:
+        return
     for sym, trade in list(RSI_EMA_TRADES.items()):
         try:
             now = datetime.now(TIMEZONE)
-            n = session_days_elapsed(trade["entry_time"].date(), now.date())
-            if n >= MAX_RSI_EMA_TRADE_DAYS:
-                del RSI_EMA_TRADES[sym]
-                save_trades()
-                await send_all(f"⏰ <b>{sym} - RSI EMA Takip Süresi Doldu</b>\n{MAX_RSI_EMA_TRADE_DAYS} seans günü geçti, işlem kapatıldı.")
-                continue
-            
+            ids = trade.get("msg_ids")
+            df_1h = df_1h_cache.get(sym)
+            df_1h_closed = closed_only(df_1h, "1h") if df_1h is not None else None
+
+            # Sinyal mumu + sonraki 5 mum tavanlı stop güncellemesi
+            if df_1h_closed is not None and not df_1h_closed.empty:
+                sig_bt = trade.get("signal_bar_time") or trade["entry_time"]
+                new_sl = compute_rsi_ema_stop(df_1h_closed, sig_bt, trade["entry"], trade["direction"])
+                if trade["direction"] == "LONG" and new_sl > trade["sl"]:
+                    trade["sl"] = new_sl
+                    save_trades()
+                elif trade["direction"] == "SHORT" and new_sl < trade["sl"]:
+                    trade["sl"] = new_sl
+                    save_trades()
+
             df_5m = await fetch_ohlc_async(sym, "5m", limit=100)
-            if df_5m is None or df_5m.empty: continue
-            
-            df_after = df_5m[df_5m.index >= trade["entry_time"]]
-            if df_after.empty: continue
-            
-            low_after = float(df_after['low'].min())
-            high_after = float(df_after['high'].max())
-            
-            sl_hit = False
-            if trade["direction"] == "LONG" and low_after <= trade["sl"]: sl_hit = True
-            elif trade["direction"] == "SHORT" and high_after >= trade["sl"]: sl_hit = True
-                
-            if sl_hit:
+            if df_5m is not None and not df_5m.empty:
+                df_after = df_5m[df_5m.index >= trade["entry_time"]]
+                if not df_after.empty:
+                    low_after = float(df_after['low'].min())
+                    high_after = float(df_after['high'].max())
+
+                    sl_hit = False
+                    if trade["direction"] == "LONG" and low_after <= trade["sl"]:
+                        sl_hit = True
+                    elif trade["direction"] == "SHORT" and high_after >= trade["sl"]:
+                        sl_hit = True
+
+                    if sl_hit:
+                        del RSI_EMA_TRADES[sym]
+                        save_trades()
+                        await send_all(
+                            f"🛑 <b>{sym} - RSI EMA STOP OLDU</b>\nFiyat {trade['sl']:,.2f} seviyesine değdi.\nİşlem kapatıldı.",
+                            ids
+                        )
+                        continue
+
+            if hours_elapsed(trade["entry_time"], now) >= MAX_RSI_EMA_TRADE_HOURS:
                 del RSI_EMA_TRADES[sym]
                 save_trades()
-                await send_all(f"🛑 <b>{sym} - RSI EMA STOP OLDU</b>\nFiyat {trade['sl']:,.2f} seviyesine değdi.\nİşlem kapatıldı.")
+                await send_all(
+                    f"⏰ <b>{sym}</b> — {MAX_RSI_EMA_TRADE_HOURS:.0f} saat doldu, takipten çıktı.",
+                    ids
+                )
                 continue
-                
-            # Zeki Bey Kontrolü
-            if not trade.get("zeki_sent", False):
-                df_1h = df_1h_cache.get(sym)
-                if df_1h is not None:
-                    if check_zeki_bey(df_1h, trade["direction"]):
-                        trade["zeki_sent"] = True
-                        save_trades()
-                        z_msg = f"🕵️‍♂️ <b>ZEKİ BEY ÖZEL SİNYALİ!</b>\n\n{sym} {trade['direction']} işlemi devam ederken 1H RSI trend kırılımı gerçekleşti."
-                        await send_all(z_msg)
-                
+
+            if not trade.get("zeki_sent", False) and df_1h is not None:
+                if check_zeki_bey(df_1h, trade["direction"]):
+                    trade["zeki_sent"] = True
+                    save_trades()
+                    z_msg = f"🕵️‍♂️ <b>ZEKİ BEY ÖZEL SİNYALİ!</b>\n\n{sym} {trade['direction']} işlemi devam ederken 1H RSI trend kırılımı gerçekleşti."
+                    await send_all(z_msg, ids)
+
         except Exception as e:
             logger.error(f"RSI EMA Track hatası ({sym}): {e}")
 
@@ -673,64 +743,88 @@ async def generate_market_summary(session_name):
             return
 
         if "Sabah" in session_name:
-            session_df = df_today.between_time('09:55', '14:00'); time_str = "09:55 - 14:00"
+            session_df = df_today.between_time('09:55', '14:00')
+            time_str = "09:55 - 14:00"
         else:
-            session_df = df_today.between_time('14:01', '18:05'); time_str = "14:01 - 18:05"
+            session_df = df_today.between_time('14:01', '18:05')
+            time_str = "14:01 - 18:05"
         if session_df.empty:
             logger.warning(f"{session_name} özeti için seans verisi boş!")
             return
 
-        open_price = session_df['open'].iloc[0]; close_price = session_df['close'].iloc[-1]
-        high_price = session_df['high'].max(); low_price = session_df['low'].min()
+        open_price = session_df['open'].iloc[0]
+        close_price = session_df['close'].iloc[-1]
+        high_price = session_df['high'].max()
+        low_price = session_df['low'].min()
         pct_change = ((close_price - open_price) / open_price) * 100
         dist_to_high = ((high_price - close_price) / high_price) * 100
         dist_to_low = ((close_price - low_price) / low_price) * 100
-        if dist_to_high < 0.2: close_status = "🟢 Zirvede Kapattı (Güçlü)"
-        elif dist_to_low < 0.2: close_status = "🔴 Dipte Kapattı (Zayıf)"
-        else: close_status = "⚪ Orta Bölgede Kapattı"
+        if dist_to_high < 0.2:
+            close_status = "🟢 Zirvede Kapattı (Güçlü)"
+        elif dist_to_low < 0.2:
+            close_status = "🔴 Dipte Kapattı (Zayıf)"
+        else:
+            close_status = "⚪ Orta Bölgede Kapattı"
 
-        session_vol = session_df['volume'].sum(); past_vols = []
+        session_vol = session_df['volume'].sum()
+        past_vols = []
         for i in range(1, 4):
             past_date = today - timedelta(days=i)
             past_df = df_30m[df_30m.index.date == past_date]
             if not past_df.empty:
-                if "Sabah" in session_name: p_vol = past_df.between_time('09:55', '14:00')['volume'].sum()
-                else: p_vol = past_df.between_time('14:01', '17:54')['volume'].sum()
+                if "Sabah" in session_name:
+                    p_vol = past_df.between_time('09:55', '14:00')['volume'].sum()
+                else:
+                    p_vol = past_df.between_time('14:01', '17:54')['volume'].sum()
                 past_vols.append(p_vol)
         avg_3d_vol = sum(past_vols) / len(past_vols) if past_vols else session_vol
         vol_change = ((session_vol - avg_3d_vol) / avg_3d_vol) * 100 if avg_3d_vol > 0 else 0
 
-        if vol_change > 10: vol_status = f"🟢 Son 3 günün %{vol_change:.1f} ÜZERİNDE (Hacimli)"
-        elif vol_change < -10: vol_status = f"🔴 Son 3 günün %{abs(vol_change):.1f} ALTINDA (Sessiz)"
-        else: vol_status = "⚪ Normal Seviyede"
+        if vol_change > 10:
+            vol_status = f"🟢 Son 3 günün %{vol_change:.1f} ÜZERİNDE (Hacimli)"
+        elif vol_change < -10:
+            vol_status = f"🔴 Son 3 günün %{abs(vol_change):.1f} ALTINDA (Sessiz)"
+        else:
+            vol_status = "⚪ Normal Seviyede"
 
-        stock_changes = {}; green_count = 0; red_count = 0
+        stock_changes = {}
+        green_count = 0
+        red_count = 0
+
         def _inner_change(s):
             try:
                 h = bp.Ticker(s).history(period="5d", interval="1d")
-                if h is None or h.empty: return s, None
+                if h is None or h.empty:
+                    return s, None
                 h.columns = [str(c).lower() for c in h.columns]
-                if len(h) >= 2: return s, ((h['close'].iloc[-1] - h['close'].iloc[-2]) / h['close'].iloc[-2]) * 100
+                if len(h) >= 2:
+                    return s, ((h['close'].iloc[-1] - h['close'].iloc[-2]) / h['close'].iloc[-2]) * 100
             except Exception:
                 pass
             return s, None
 
         sem_summary = asyncio.Semaphore(8)
         async def limited_change(s):
-            async with sem_summary: return await asyncio.to_thread(_inner_change, s)
+            async with sem_summary:
+                return await asyncio.to_thread(_inner_change, s)
 
         results = await asyncio.gather(*[limited_change(s) for s in BIST_STOCKS])
         for sym, change in results:
-            if change is None: continue
+            if change is None:
+                continue
             stock_changes[sym] = change
-            if change > 0: green_count += 1
-            else: red_count += 1
+            if change > 0:
+                green_count += 1
+            else:
+                red_count += 1
 
         sector_lines = []
         for sector_name, stocks in SECTORS.items():
             sector_stocks = [s for s in stocks if s in stock_changes]
-            if not sector_stocks: continue
-            greens = sum(1 for s in sector_stocks if stock_changes[s] > 0); reds = len(sector_stocks) - greens
+            if not sector_stocks:
+                continue
+            greens = sum(1 for s in sector_stocks if stock_changes[s] > 0)
+            reds = len(sector_stocks) - greens
             avg_chg = sum(stock_changes[s] for s in sector_stocks) / len(sector_stocks)
             emoji = "🟢" if greens > reds else ("🔴" if reds > greens else "⚪")
             sector_lines.append((avg_chg, f"{emoji} {sector_name}: {greens}Y/{reds}K (Ort: %{avg_chg:+.2f})"))
@@ -743,11 +837,16 @@ async def generate_market_summary(session_name):
         best_sector = sector_lines[0][1].split(":")[0] if sector_lines else ""
         worst_sector = sector_lines[-1][1].split(":")[0] if sector_lines else ""
 
-        if pct_change > 0 and vol_change > 0 and green_count > red_count: yorum = f"Alıcılar baskın. Özellikle {best_sector} sektörü öne çıkıyor. Long işlemler ön planda olabilir."
-        elif pct_change < 0 and vol_change > 0 and red_count > green_count: yorum = f"Satıcılar baskın. {best_sector} sektörü direniyor ama genel görünüm zayıf. Short işlemler düşünülebilir."
-        elif green_count > red_count and pct_change < 0: yorum = f"Endeks düşse de hisselerin çoğu yeşil. {best_sector} öne çıkıyor. Dönüş sinyali olabilir."
-        elif red_count > green_count and pct_change > 0: yorum = f"Endeks yükselse de hisselerin çoğu kırmızı. {worst_sector} zayıf. Yükseliş inandırıcı değil."
-        else: yorum = "Piyasa kararsız. Yön netleşene kadar beklemede kalmak mantıklı."
+        if pct_change > 0 and vol_change > 0 and green_count > red_count:
+            yorum = f"Alıcılar baskın. Özellikle {best_sector} sektörü öne çıkıyor. Long işlemler ön planda olabilir."
+        elif pct_change < 0 and vol_change > 0 and red_count > green_count:
+            yorum = f"Satıcılar baskın. {best_sector} sektörü direniyor ama genel görünüm zayıf. Short işlemler düşünülebilir."
+        elif green_count > red_count and pct_change < 0:
+            yorum = f"Endeks düşse de hisselerin çoğu yeşil. {best_sector} öne çıkıyor. Dönüş sinyali olabilir."
+        elif red_count > green_count and pct_change > 0:
+            yorum = f"Endeks yükselse de hisselerin çoğu kırmızı. {worst_sector} zayıf. Yükseliş inandırıcı değil."
+        else:
+            yorum = "Piyasa kararsız. Yön netleşene kadar beklemede kalmak mantıklı."
 
         msg = (f"🏛️ <b>BIST 30 (XU030) — {session_name} Özeti</b>\n⏱ ({time_str} Arası)\n\n"
                f"📈 <b>Fiyat:</b> {close_price:,.2f} (%{pct_change:+.2f})\n📍 <b>Kapanış:</b> {close_status}\n\n"
@@ -763,85 +862,106 @@ async def generate_market_summary(session_name):
 # KOMUTLAR
 # ==========================================
 async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id not in CHAT_IDS: return
+    if update.effective_chat.id not in CHAT_IDS:
+        return
     text = update.message.text.upper().replace("/", "").strip()
-    if not text.isalnum() or len(text) < 2 or len(text) > 10: return
-    if text in ["START", "HELP", "YARDIM", "TARA", "OZET", "POZLAR"]: return
+    if not text.isalnum() or len(text) < 2 or len(text) > 10:
+        return
+    if text in ["START", "HELP", "YARDIM", "TARA", "OZET", "POZLAR"]:
+        return
     if text not in SYMBOLS:
-        await update.message.reply_text(f"❌ '{text}' tarama listesinde bulunamadı."); return
+        await update.message.reply_text(f"❌ '{text}' tarama listesinde bulunamadı.")
+        return
     await update.message.reply_text(f"🔍 {text} analiz ediliyor, lütfen bekleyin...")
     try:
         df_30m, df_1h, df_4h, df_1d = await asyncio.gather(
             fetch_ohlc_async(text, "30m", limit=500), fetch_ohlc_async(text, "1h", limit=500),
             fetch_ohlc_async(text, "4h", limit=500), fetch_ohlc_async(text, "1d", limit=500))
         if df_1h is None or df_4h is None:
-            await update.message.reply_text("❌ Veri çekilemedi."); return
+            await update.message.reply_text("❌ Veri çekilemedi.")
+            return
         msg = f"🤖 <b>{text} — Kapsamlı Analiz</b>\n"
-        price = df_1h['close'].iloc[-1]; rsi_1h = get_rsi(df_1h['close'], 8).iloc[-1]
+        price = df_1h['close'].iloc[-1]
+        rsi_1h = get_rsi(df_1h['close'], 8).iloc[-1]
         trend_1h = "🟢 Yukarı" if price > df_1h['close'].ewm(span=200, adjust=False).mean().iloc[-1] else "🔴 Aşağı"
         msg += f"\n📊 <b>1 Saatlik (1H)</b>\n• Fiyat: {price:,.2f}\n• RSI(8): {rsi_1h:.1f}\n• Trend: {trend_1h} (EMA 200)\n"
         rsi_4h = get_rsi(df_4h['close'], 8).iloc[-1]
         trend_4h = "🟢 Yukarı" if price > df_4h['close'].ewm(span=200, adjust=False).mean().iloc[-1] else "🔴 Aşağı"
         msg += f"\n📊 <b>4 Saatlik (4H)</b>\n• RSI(8): {rsi_4h:.1f}\n• Trend: {trend_4h} (EMA 200)\n"
-        if df_1d is not None: msg += f"\n📊 <b>Günlük (1D)</b>\n• RSI(14): {get_rsi(df_1d['close'], 14).iloc[-1]:.1f}\n"
+        if df_1d is not None:
+            msg += f"\n📊 <b>Günlük (1D)</b>\n• RSI(14): {get_rsi(df_1d['close'], 14).iloc[-1]:.1f}\n"
         if df_30m is not None:
             ema50_30m = df_30m['close'].ewm(span=50, adjust=False).mean().iloc[-1]
             msg += f"\n⚓ <b>30 Dakikalık (30M)</b>\n• EMA 50: {ema50_30m:,.2f}\n"
         if text in KOSAN_AT_TRADES:
             t = KOSAN_AT_TRADES[text]
+            rem_h = max(0.0, MAX_TRADE_HOURS - hours_elapsed(t["entry_time"]))
             msg += (f"\n🐎 <b>Açık Koşan At ({t['direction']})</b>\n• Ort. maliyet: {t['avg_cost']:,.2f}\n"
-                    f"• SL: {t['sl']:,.2f} | TP: {t['tp']:,.2f}\n")
+                    f"• SL: {t['sl']:,.2f} | TP: {t['tp']:,.2f} | Kalan: {rem_h:.1f} sa\n")
         if text in RSI_EMA_TRADES:
             t = RSI_EMA_TRADES[text]
+            rem_h = max(0.0, MAX_RSI_EMA_TRADE_HOURS - hours_elapsed(t["entry_time"]))
             msg += (f"\n⚡ <b>Açık RSI EMA ({t['direction']})</b>\n• Giriş: {t['entry']:,.2f}\n"
-                    f"• SL: {t['sl']:,.2f}\n")
+                    f"• SL: {t['sl']:,.2f} | Kalan: {rem_h:.1f} sa\n")
         await update.message.reply_text(msg, parse_mode="HTML")
     except Exception as e:
-        logger.error(f"Analiz hatası: {e}"); await update.message.reply_text(f"❌ Analiz hatası: {e}")
+        logger.error(f"Analiz hatası: {e}")
+        await update.message.reply_text(f"❌ Analiz hatası: {e}")
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id not in CHAT_IDS: return
+    if update.effective_chat.id not in CHAT_IDS:
+        return
     await update.message.reply_text("✅ Sistem çalışıyor. Analiz için /ASELS gibi komut yazabilirsiniz. Manuel tarama için /tara yazın.")
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id not in CHAT_IDS: return
+    if update.effective_chat.id not in CHAT_IDS:
+        return
     msg = ("🤖 <b>Yardım Menüsü</b>\n\n• Hisse analizi: <code>/ASELS</code> veya <code>ASELS</code>\n"
            "• Anında tarama: <code>/tara</code>\n• Piyasa özeti: <code>/ozet</code>\n"
            "• Açık pozisyonlar: <code>/pozlar</code>\n\n"
-           "Sistem <b>Koşan At (Kademeli Giriş)</b> ve <b>RSI EMA Kesişimi</b> sinyallerini takip eder.")
+           "Sistem <b>Koşan At</b> ve <b>RSI EMA Kesişimi</b> sinyallerini bağımsız takip eder (3 saat takip, 18:30 gün sonu temizliği).")
     await update.message.reply_text(msg, parse_mode="HTML")
 
 async def cmd_pozlar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id not in CHAT_IDS: return
+    if update.effective_chat.id not in CHAT_IDS:
+        return
     if not KOSAN_AT_TRADES and not RSI_EMA_TRADES:
-        await update.message.reply_text("📭 Açık pozisyon bulunmuyor."); return
-    
+        await update.message.reply_text("📭 Açık pozisyon bulunmuyor.")
+        return
+
     longs = []
     shorts = []
     now = datetime.now(TIMEZONE)
-    
+
     for sym, t in KOSAN_AT_TRADES.items():
-        n = session_days_elapsed(t["entry_time"].date(), now.date())
+        elapsed = hours_elapsed(t["entry_time"], now)
         durum = "2. giriş bek." if t["status"] == "WAITING_2ND" else "tam giriş"
         line = (f"• <b>{sym}</b> (Koşan At) - {durum} | Ort: {t['avg_cost']:,.2f}\n"
-                f"  SL {t['sl']:,.2f} | TP {t['tp']:,.2f} | Gün {n}/{MAX_TRADE_SESSION_DAYS}")
-        if t["direction"] == "LONG": longs.append(line)
-        else: shorts.append(line)
-        
+                f"  SL {t['sl']:,.2f} | TP {t['tp']:,.2f} | Süre {elapsed:.1f}/{MAX_TRADE_HOURS:.0f} sa")
+        if t["direction"] == "LONG":
+            longs.append(line)
+        else:
+            shorts.append(line)
+
     for sym, t in RSI_EMA_TRADES.items():
-        n = session_days_elapsed(t["entry_time"].date(), now.date())
+        elapsed = hours_elapsed(t["entry_time"], now)
         line = (f"• <b>{sym}</b> (RSI EMA) | Giriş: {t['entry']:,.2f}\n"
-                f"  SL {t['sl']:,.2f} | Gün {n}/{MAX_RSI_EMA_TRADE_DAYS}")
-        if t["direction"] == "LONG": longs.append(line)
-        else: shorts.append(line)
+                f"  SL {t['sl']:,.2f} | Süre {elapsed:.1f}/{MAX_RSI_EMA_TRADE_HOURS:.0f} sa")
+        if t["direction"] == "LONG":
+            longs.append(line)
+        else:
+            shorts.append(line)
 
     msg = "📊 <b>AÇIK POZİSYONLAR</b>\n\n"
-    if longs: msg += "🟢 <b>LONG:</b>\n" + "\n".join(longs) + "\n\n"
-    if shorts: msg += "🔴 <b>SHORT:</b>\n" + "\n".join(shorts)
+    if longs:
+        msg += "🟢 <b>LONG:</b>\n" + "\n".join(longs) + "\n\n"
+    if shorts:
+        msg += "🔴 <b>SHORT:</b>\n" + "\n".join(shorts)
     await update.message.reply_text(msg, parse_mode="HTML")
 
 async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id not in CHAT_IDS: return
+    if update.effective_chat.id not in CHAT_IDS:
+        return
     if is_scanning:
         await update.message.reply_text("⏳ Şu an arka planda bir tarama devam ediyor. Lütfen bitmesini bekleyin...")
         return
@@ -849,10 +969,13 @@ async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     async def run_manual_scan():
         await tick(force=True)
         await send_all("✅ Tarama tamamlandı. Sinyal koşulu oluştuysa mesajınız gelmiştir.")
-    task = asyncio.create_task(run_manual_scan()); background_tasks.add(task); task.add_done_callback(background_tasks.discard)
+    task = asyncio.create_task(run_manual_scan())
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
 
 async def cmd_ozet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id not in CHAT_IDS: return
+    if update.effective_chat.id not in CHAT_IDS:
+        return
     await update.message.reply_text("⏳ Piyasa özeti hazırlanıyor, lütfen bekleyin...")
     now = datetime.now(TIMEZONE)
     session_name = "Sabah" if now.time() < dt_time(14, 0) else "Öğleden Sonra"
@@ -866,8 +989,10 @@ bot_app = Application.builder().token(BOT_TOKEN).build()
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(f"🚨 Telegram Hatası: {context.error}")
     if update and update.effective_chat:
-        try: await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Beklenmeyen bir hata oluştu, lütfen tekrar deneyin.")
-        except Exception: pass
+        try:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Beklenmeyen bir hata oluştu, lütfen tekrar deneyin.")
+        except Exception:
+            pass
 
 bot_app.add_error_handler(error_handler)
 
@@ -880,31 +1005,31 @@ bot_app.add_handler(CommandHandler("pozlar", cmd_pozlar, filters=auth_filter))
 bot_app.add_handler(MessageHandler(filters.TEXT & auth_filter, analyze_symbol))
 
 # ==========================================
-# TARAMA
+# TARAMA (BAĞIMSIZ İŞ PARÇALARI)
 # ==========================================
 async def tick(force=False):
     global is_scanning
-    if not force and not is_market_open(): return
-    if is_scanning: return
+    if not force and not is_market_open():
+        return
+    if is_scanning:
+        return
     is_scanning = True
     logger.info(f"🔄 Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
-    
-    # 1H Verilerini topluca çekelim (Hem RSI EMA hem de Zeki Bey için lazım)
+
     df_1h_cache = {}
     try:
         sem = asyncio.Semaphore(10)
         async def fetch_1h(s):
             async with sem:
                 df = await fetch_ohlc_async(s, "1h", limit=150)
-                if df is not None: df_1h_cache[s] = df
+                if df is not None:
+                    df_1h_cache[s] = df
                 return s
         await asyncio.gather(*[fetch_1h(s) for s in SYMBOLS])
     except Exception as e:
         logger.error(f"1H toplu veri çekme hatası: {e}")
 
     try:
-        await track_rsi_ema_trades(df_1h_cache)
-
         xu_trend = 0
         try:
             df_xu = df_1h_cache.get("XU030")
@@ -914,71 +1039,103 @@ async def tick(force=False):
         except Exception as e:
             logger.error(f"XU030 endeks verisi çekilemedi: {e}")
 
-        sem = asyncio.Semaphore(10)
-        async def work(sym):
-            async with sem:
-                try:
-                    df_1h = df_1h_cache.get(sym)
-                    if df_1h is None: return False
-                    await check_rsi_ema_crossover(sym, df_1h)
-                    await check_kosan_at(sym, xu_trend, df_1h)
-                    return True
-                except Exception as e:
-                    logger.error(f"Tarama hatası ({sym}): {e}")
-                    return False
+        async def run_rsi_ema_branch():
+            await track_rsi_ema_trades(df_1h_cache)
+            sem_rsi = asyncio.Semaphore(10)
+            async def work_rsi(sym):
+                async with sem_rsi:
+                    try:
+                        df_1h = df_1h_cache.get(sym)
+                        if df_1h is None:
+                            return False
+                        await check_rsi_ema_crossover(sym, df_1h)
+                        return True
+                    except Exception as e:
+                        logger.error(f"RSI EMA tarama hatası ({sym}): {e}")
+                        return False
+            return await asyncio.gather(*[work_rsi(s) for s in SYMBOLS])
 
-        results = await asyncio.gather(*[work(s) for s in SYMBOLS])
-        failed = results.count(False)
+        async def run_kosan_branch():
+            sem_kosan = asyncio.Semaphore(10)
+            async def work_kosan(sym):
+                async with sem_kosan:
+                    try:
+                        df_1h = df_1h_cache.get(sym)
+                        if df_1h is None:
+                            return False
+                        await check_kosan_at(sym, xu_trend, df_1h)
+                        return True
+                    except Exception as e:
+                        logger.error(f"Koşan At tarama hatası ({sym}): {e}")
+                        return False
+            return await asyncio.gather(*[work_kosan(s) for s in SYMBOLS])
+
+        rsi_res, kosan_res = await asyncio.gather(run_rsi_ema_branch(), run_kosan_branch())
+        failed = max(rsi_res.count(False), kosan_res.count(False))
         if failed >= 15:
             await send_admin_alert(f"⚠️ <b>Tarama Sorunu</b>\n{failed}/{len(SYMBOLS)} hisse için veri alınamadı.", "scan_fail")
     finally:
         is_scanning = False
 
 async def market_open_scan():
-    if not is_market_open(): return
+    if not is_market_open():
+        return
     await send_all("🟢 Seans açıldı, tarama ve takip başladı.")
     await send_all("Sistem her zaman senin için çalışıyor, kazanmak istiyorsan sadece sistemle kal... MZB 😉")
     await tick(force=True)
 
 async def clear_daily_state():
-    # 18:30'da tüm açık işlemleri sıfırla
-    async with asyncio.Lock():
+    async with STATE_LOCK:
         KOSAN_AT_TRADES.clear()
         RSI_EMA_TRADES.clear()
         KOSAN_LAST_SIGNAL.clear()
         DATA_CACHE.clear()
         rsi_ema_cross_states.clear()
+        rsi_ema_armed_states.clear()
         save_trades()
-    await send_all("🧹 <b>Gün Sonu Temizliği</b>\nSaat 18:30 oldu. Tüm açık işlemler listeden sıfırlandı. Yarın yeni sinyallerle devam edilecek.")
+    await send_all("🧹 <b>Gün Sonu Temizliği</b>\nSaat 18:30 oldu. Tüm açık işlemler ve takipler sıfırlandı. Yarın yeni sinyallerle devam edilecek.")
 
-async def task_morning_summary(): await generate_market_summary("Sabah")
-async def task_afternoon_summary(): await generate_market_summary("Öğleden Sonra")
+async def task_morning_summary():
+    await generate_market_summary("Sabah")
+
+async def task_afternoon_summary():
+    await generate_market_summary("Öğleden Sonra")
 
 class DummyHandler(BaseHTTPRequestHandler):
-    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Alive")
-    def do_HEAD(self): self.send_response(200); self.end_headers()
-    def log_message(self, format, *args): return
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Alive")
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+    def log_message(self, format, *args):
+        return
 
-def run_dummy_server(): HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8080))), DummyHandler).serve_forever()
+def run_dummy_server():
+    HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8080))), DummyHandler).serve_forever()
 
 async def main():
     load_trades()
     threading.Thread(target=run_dummy_server, daemon=True).start()
-    await bot_app.initialize(); await bot_app.start(); await bot_app.updater.start_polling(drop_pending_updates=True)
+    await bot_app.initialize()
+    await bot_app.start()
+    await bot_app.updater.start_polling(drop_pending_updates=True)
 
     sched = AsyncIOScheduler(timezone=TIMEZONE, job_defaults={'coalesce': True, 'max_instances': 1, 'misfire_grace_time': 60})
 
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=55, timezone=TIMEZONE))
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="1-59/5", timezone=TIMEZONE))
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour=18, minute=10, timezone=TIMEZONE), kwargs={'force': True})
-    
+
     sched.add_job(clear_daily_state, CronTrigger(day_of_week="mon-fri", hour=18, minute=30, timezone=TIMEZONE))
     sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=15, timezone=TIMEZONE))
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
 
     sched.start()
-    logger.info("✅ Bot çalışıyor. Zeki Bey Özel Sinyali ve 18:30 Gün Sonu Temizliği aktif.")
-    while True: await asyncio.sleep(3600)
+    logger.info("✅ Bot çalışıyor. Bağımsız taramalar, 3 saatlik takip ve 18:30 gün sonu temizliği aktif.")
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     asyncio.run(main())
