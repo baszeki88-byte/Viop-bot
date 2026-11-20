@@ -317,58 +317,53 @@ async def fetch_ohlc_async(symbol, interval, limit=500):
         return None
 
 # ==========================================
-# ZEKİ BEY RSI TREND KIRILIMI
+# ZEKİ BEY RSI TEPE/DİP KIRILIMI (1H)
 # ==========================================
 def check_zeki_bey(df_1h, direction):
-    """1H grafikte RSI(8)'in son 30 mumunun dip/tepe trendini kırıp kırmadığını kontrol eder."""
+    """1H RSI(8) son 30 mumun tepe/dip seviyesini kırdı mı kontrol eder.
+    Kırılım varsa detay dict döndürür, yoksa None."""
+    if df_1h is None:
+        return None
+
+    # Sadece KAPANMIŞ mumlar
+    df_1h = closed_only(df_1h, "1h")
+    if df_1h is None or len(df_1h) < 20:
+        return None
+
     rsi = get_rsi(df_1h['close'], 8)
     rsi_window = rsi.iloc[-30:].dropna()
     if len(rsi_window) < 15:
-        return False
+        return None
 
     vals = rsi_window.values
-    curr_val = vals[-1]
-    prev_val = vals[-2]
-
-    def find_peaks(data, order=3):
-        peaks = []
-        for i in range(order, len(data) - order):
-            if data[i] == max(data[i - order:i + order + 1]):
-                peaks.append(i)
-        return peaks
-
-    def find_troughs(data, order=3):
-        troughs = []
-        for i in range(order, len(data) - order):
-            if data[i] == min(data[i - order:i + order + 1]):
-                troughs.append(i)
-        return troughs
+    curr_val = float(vals[-1])
+    history = vals[:-1]   # güncel mum hariç
 
     if direction == "LONG":
-        peaks = find_peaks(vals)
-        if len(peaks) >= 2:
-            p1, p2 = peaks[-2], peaks[-1]
-            if p2 - p1 < 3:
-                return False
-            slope = (vals[p2] - vals[p1]) / (p2 - p1)
-            proj_curr = vals[p2] + slope * (len(vals) - 1 - p2)
-            proj_prev = vals[p2] + slope * (len(vals) - 2 - p2)
-            if prev_val <= proj_prev and curr_val > proj_curr:
-                return True
+        peak_idx = int(history.argmax())
+        peak_val = float(history[peak_idx])
+        if curr_val > peak_val:
+            bars_ago = len(history) - peak_idx
+            return {
+                "level": peak_val,
+                "bars_ago": bars_ago,
+                "curr": curr_val,
+                "type": "tepe",
+            }
 
     elif direction == "SHORT":
-        troughs = find_troughs(vals)
-        if len(troughs) >= 2:
-            t1, t2 = troughs[-2], troughs[-1]
-            if t2 - t1 < 3:
-                return False
-            slope = (vals[t2] - vals[t1]) / (t2 - t1)
-            proj_curr = vals[t2] + slope * (len(vals) - 1 - t2)
-            proj_prev = vals[t2] + slope * (len(vals) - 2 - t2)
-            if prev_val >= proj_prev and curr_val < proj_curr:
-                return True
+        trough_idx = int(history.argmin())
+        trough_val = float(history[trough_idx])
+        if curr_val < trough_val:
+            bars_ago = len(history) - trough_idx
+            return {
+                "level": trough_val,
+                "bars_ago": bars_ago,
+                "curr": curr_val,
+                "type": "dip",
+            }
 
-    return False
+    return None
 
 # ==========================================
 # RSI EMA KESİŞİMİ (1H) — Sinyal Mumu + Sonraki 5 Mum + Max %2.5 Tavan
@@ -570,10 +565,14 @@ async def track_kosan(sym, df5, df_1h):
 
     # ZEKİ BEY ÖZEL SİNYAL KONTROLÜ (İşlem devam ederken)
     if not trade.get("zeki_sent", False) and df_1h is not None:
-        if check_zeki_bey(df_1h, trade["direction"]):
+        zeki_info = check_zeki_bey(df_1h, trade["direction"])
+        if zeki_info:
             trade["zeki_sent"] = True
             save_trades()
-            z_msg = f"🕵️‍♂️ <b>ZEKİ BEY ÖZEL SİNYALİ!</b>\n\n{sym} {trade['direction']} işlemi devam ederken 1H RSI trend kırılımı gerçekleşti."
+            z_msg = (f"🕵️‍♂️ <b>ZEKİ BEY ÖZEL SİNYALİ!</b>\n\n"
+                     f"{sym} {trade['direction']} işlemi devam ederken:\n"
+                     f"1H RSI {zeki_info['bars_ago']} mum önceki <b>{zeki_info['type']}</b> "
+                     f"({zeki_info['level']:.1f}) kırıldı → şu an <b>{zeki_info['curr']:.1f}</b>")
             await send_all(z_msg, ids)
 
     if changed:
@@ -642,8 +641,11 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
                f"⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag_dk)} {lag_dk} dk")
 
         zeki_sent = False
-        if check_zeki_bey(df_1h_raw, direction):
-            msg += "\n\n🕵️‍♂️ <b>Zeki Bey Özel Sinyali!</b> (1H RSI trend kırılımı onaylandı)"
+        zeki_info = check_zeki_bey(df_1h_raw, direction)
+        if zeki_info:
+            msg += (f"\n\n🕵️‍♂️ <b>Zeki Bey Özel Sinyali!</b>\n"
+                    f"1H RSI {zeki_info['bars_ago']} mum önceki <b>{zeki_info['type']}</b> "
+                    f"({zeki_info['level']:.1f}) kırıldı → şu an <b>{zeki_info['curr']:.1f}</b>")
             zeki_sent = True
 
         ids = await send_all(msg)
@@ -716,10 +718,14 @@ async def track_rsi_ema_trades(df_1h_cache):
                 continue
 
             if not trade.get("zeki_sent", False) and df_1h is not None:
-                if check_zeki_bey(df_1h, trade["direction"]):
+                zeki_info = check_zeki_bey(df_1h, trade["direction"])
+                if zeki_info:
                     trade["zeki_sent"] = True
                     save_trades()
-                    z_msg = f"🕵️‍♂️ <b>ZEKİ BEY ÖZEL SİNYALİ!</b>\n\n{sym} {trade['direction']} işlemi devam ederken 1H RSI trend kırılımı gerçekleşti."
+                    z_msg = (f"🕵️‍♂️ <b>ZEKİ BEY ÖZEL SİNYALİ!</b>\n\n"
+                             f"{sym} {trade['direction']} işlemi devam ederken:\n"
+                             f"1H RSI {zeki_info['bars_ago']} mum önceki <b>{zeki_info['type']}</b> "
+                             f"({zeki_info['level']:.1f}) kırıldı → şu an <b>{zeki_info['curr']:.1f}</b>")
                     await send_all(z_msg, ids)
 
         except Exception as e:
