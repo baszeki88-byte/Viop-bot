@@ -24,7 +24,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 TV_SESSION = os.environ.get("TV_SESSION")
 TV_SESSION_SIGN = os.environ.get("TV_SESSION_SIGN")
 
-CHAT_IDS_STR = os.environ.get("CHAT_IDS", "5066109900,8776376951")
+CHAT_IDS_STR = os.environ.get("CHAT_IDS", "5066109900,8776376951,8634151585")
 try:
     CHAT_IDS = [int(cid.strip()) for cid in CHAT_IDS_STR.split(",")]
 except ValueError:
