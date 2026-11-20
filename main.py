@@ -28,7 +28,7 @@ CHAT_IDS_STR = os.environ.get("CHAT_IDS", "5066109900,8776376951")
 try:
     CHAT_IDS = [int(cid.strip()) for cid in CHAT_IDS_STR.split(",")]
 except ValueError:
-    CHAT_IDS = [5066109900, 8776376951]
+    CHAT_IDS = [5066109900, 8776376951, 8634151585]
 
 ADMIN_ID = CHAT_IDS[0] if CHAT_IDS else None
 
