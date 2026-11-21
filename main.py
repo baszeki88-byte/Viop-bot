@@ -2,12 +2,11 @@
 # KOŞAN AT — NİHAİ CANLI SİNYAL & POZİSYON TAKİP ASİSTANI (BIST + GLD + XU030)
 # Kurallar:
 #   - 09:50 Borsa Açıldı mesajı
-#   - Verimli Saat: 11:00 - 17:00 (Başlangıç & Bitiş mesajları)
-#   - BIST 17:00+ yeni işlem kapalı (sadece açık pozisyon, SL/TP ve ZB takibi)
-#   - White List: Baz TP %2.5 (Aynı yön ZB teyidinde %4.0), SL %1.5
-#     Verimli saat 100K / Saat dışı 75K + 5m EMA50 temasında +50K ekleme (güncel ort. SL/TP)
-#   - Red List  : Baz TP %1.5 (Aynı yön ZB teyidinde %3.0), SL %1.5 (ekleme yok)
-#     Verimli saat 50K / Saat dışı 30K
+#   - 10:00 - 11:00 arası: White List 50K / Red List 25K
+#   - 11:00 - 17:00 verimli saat: White List 100K / Red List 50K (+ başlangıç/bitiş mesajı)
+#   - 17:00 sonrası BIST'te hiç yeni işlem yok (sadece mevcut pozisyon takibi)
+#   - White List: Baz TP %2.5 (ZB onayında %4.0), SL %1.5, 5m EMA50'de +50K ekleme (güncel ort. SL/TP)
+#   - Red List  : Baz TP %1.5 (ZB onayında %3.0), SL %1.5 (ekleme yok)
 #   - Ters ZB kırılımı (18 bar, order=2): Sinyale alıntı + erken çıkış
 #   - Telegram /pozlar: Tarama kaynağı + anlık K/Z % (🟢 / 🔴)
 #   - Her gün 18:15 günlük özet | Cuma 18:25 haftalık özet | Cuma 18:30 temizlik
@@ -34,10 +33,10 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-logger = logging.getLogger("KosanAtFinalAsistan")
+logger = logging.getLogger("KosanAtNihaiAsistan")
 
 TZ = pytz.timezone("Europe/Istanbul")
-STATE_FILE = "kosan_at_final_state.json"
+STATE_FILE = "kosan_at_nihai_state.json"
 POLL_SECONDS = 60
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "BURAYA_BOT_TOKEN_YAZIN")
@@ -67,20 +66,19 @@ WHITE_LIST = {
     "TKFEN", "HALKB", "GUBRF", "ASELS", "ASTOR", "PETKM", "KCHOL", "ISCTR"
 }
 
-# Zamanlama ve Saat Kuralları
+# Zaman Penceleri
 MARKET_OPEN_MSG_TIME = dt_time(9, 50)
+EARLY_WINDOW_START = dt_time(10, 0)
+EARLY_WINDOW_END = dt_time(11, 0)
 PRIME_START = dt_time(11, 0)
 PRIME_END = dt_time(17, 0)
 NO_NEW_ENTRY_AFTER = dt_time(17, 0)
+
 DAILY_SUMMARY_TIME = dt_time(18, 15)
 WEEKLY_SUMMARY_TIME = dt_time(18, 25)
 WEEKLY_CLEANUP_TIME = dt_time(18, 30)
 
-# False: Yalnızca 11:00-17:00 verimli saatte yeni giriş açar (testteki Kademeli_11_17 ile birebir)
-# True : Saat dışında da (75K / 30K) giriş açar, 17:00+ BIST yasağı devam eder
-ALLOW_OFF_PRIME_ENTRIES = False
-
-# Strateji & Kademeli TP / Portföy Parametreleri
+# Strateji & Portföy Parametreleri
 KOSAN_RSI_PERIOD = 8
 KOSAN_LONG_LEVEL = 75
 KOSAN_SHORT_LEVEL = 35
@@ -92,9 +90,12 @@ RED_BASE_TP_PCT = 1.5
 RED_ZB_TP_PCT = 3.0
 
 WHITE_PRIME_ALLOC = 100_000.0
+WHITE_EARLY_ALLOC = 50_000.0
 WHITE_OFF_ALLOC = 75_000.0
 WHITE_ADD_ALLOC = 50_000.0
+
 RED_PRIME_ALLOC = 50_000.0
+RED_EARLY_ALLOC = 25_000.0
 RED_OFF_ALLOC = 30_000.0
 
 ZB_LOOKBACK = 18
@@ -305,17 +306,31 @@ def badge(symbol: str) -> str:
 
 
 def is_prime(now_t: dt_time) -> bool:
-    return PRIME_START <= now_t <= PRIME_END
+    return PRIME_START <= now_t < PRIME_END
+
+
+def is_early_10_11(now_t: dt_time) -> bool:
+    return EARLY_WINDOW_START <= now_t < EARLY_WINDOW_END
 
 
 def can_enter_now(symbol: str, now_t: dt_time) -> bool:
     if symbol == GOLD_SYMBOL:
         return True
+    # 17:00 ve sonrasında hiç yeni işlem yok
     if now_t >= NO_NEW_ENTRY_AFTER:
         return False
-    if not ALLOW_OFF_PRIME_ENTRIES and not is_prime(now_t):
-        return False
     return True
+
+
+def get_alloc_and_label(symbol: str, now_t: dt_time) -> tuple[float, str]:
+    white_flag = is_white(symbol)
+    if symbol == GOLD_SYMBOL:
+        return (WHITE_PRIME_ALLOC if white_flag else RED_PRIME_ALLOC), "Verimli Saat"
+    if is_prime(now_t):
+        return (WHITE_PRIME_ALLOC if white_flag else RED_PRIME_ALLOC), "Verimli Saat (11:00-17:00)"
+    if is_early_10_11(now_t):
+        return (WHITE_EARLY_ALLOC if white_flag else RED_EARLY_ALLOC), "10:00-11:00 Dilimi"
+    return (WHITE_OFF_ALLOC if white_flag else RED_OFF_ALLOC), "Saat Dışı"
 
 
 def calc_sl_tp(avg_cost: float, direction: str, tp_pct: float) -> tuple[float, float]:
@@ -454,10 +469,10 @@ def sync_schedules(state: dict, now_dt: datetime) -> None:
         prime_now = is_prime(now_t)
         prev_prime = state["sent_flags"]["prime_active"]
         if prime_now and not prev_prime:
-            send_tg("⚡ <b>En Verimli Saatler Başladı (11:00)</b>\nKademeli TP ve verimli saat kademe tutarları aktif.")
+            send_tg("⚡ <b>En Verimli Saatler Başladı (11:00)</b>\nWhite List 100K / Red List 50K kademeleri aktif.")
             state["sent_flags"]["prime_active"] = True
         elif (not prime_now) and prev_prime:
-            send_tg("💤 <b>En Verimli Saatler Bitti (17:00)</b>\nYeni işlem kapalı; yalnızca mevcut pozisyonlar takip ediliyor.")
+            send_tg("💤 <b>En Verimli Saatler Bitti (17:00)</b>\n17:00 sonrası yeni işlem kapalı; yalnızca mevcut pozisyonlar takip ediliyor.")
             state["sent_flags"]["prime_active"] = False
 
         if now_t >= DAILY_SUMMARY_TIME and not state["sent_flags"]["daily_summary"]:
@@ -488,7 +503,6 @@ def run_cycle(state: dict) -> None:
         xu_trend = 1 if float(xu_h1["close"].iloc[-1]) > float(xu_ema50.iloc[-1]) else -1
 
     latest_prices: dict[str, float] = {}
-    prime_now = is_prime(now_t)
 
     for sym in BIST_SYMBOLS + [GOLD_SYMBOL]:
         df5 = fetch_bars(sym, "5m", "5d")
@@ -608,7 +622,7 @@ def run_cycle(state: dict) -> None:
 
             continue
 
-        # 2) YENİ KOŞAN AT SİNYALİ
+        # 2) YENİ KOŞAN AT SİNYALİ (17:00 sonrası hiç işlem yok)
         if not can_enter_now(sym, now_t):
             continue
 
@@ -636,15 +650,8 @@ def run_cycle(state: dict) -> None:
         direction = "LONG" if long_sig else "SHORT"
         tp_pct = WHITE_BASE_TP_PCT if white_flag else RED_BASE_TP_PCT
         zb_target_tp = WHITE_ZB_TP_PCT if white_flag else RED_ZB_TP_PCT
-        prime_eff = prime_now or (sym == GOLD_SYMBOL)
-
-        if white_flag:
-            alloc_tl = WHITE_PRIME_ALLOC if prime_eff else WHITE_OFF_ALLOC
-        else:
-            alloc_tl = RED_PRIME_ALLOC if prime_eff else RED_OFF_ALLOC
-
+        alloc_tl, saat_etiket = get_alloc_and_label(sym, now_t)
         sl_val, tp_val = calc_sl_tp(cur_p, direction, tp_pct)
-        saat_etiket = "Verimli Saat (11:00-17:00)" if prime_eff else "Saat Dışı"
 
         sig_text = (
             f"🐎 <b>KOŞAN AT SİNYALİ — {sym} ({direction})</b>\n"
