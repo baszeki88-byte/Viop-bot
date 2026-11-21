@@ -162,7 +162,6 @@ def send_tg(text: str, reply_ids: dict = None, target_chat_id: int = None) -> di
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     sent_ids = {}
     
-    # Hedef belirtilmişse sadece o kişiye, yoksa herkese gönder
     targets = [target_chat_id] if target_chat_id else CHAT_IDS
 
     for cid in targets:
@@ -445,7 +444,6 @@ def poll_telegram(state: dict, latest_prices: dict[str, float]) -> None:
             if chat_id not in CHAT_IDS:
                 continue
                 
-            # Komut yanıtlarında artık alıntı (reply) yapılmıyor, sadece o kişiye gidiyor
             cmd_text = txt.upper().replace("/", "").split("@")[0].strip()
 
             if cmd_text == "START":
@@ -475,13 +473,17 @@ def poll_telegram(state: dict, latest_prices: dict[str, float]) -> None:
             elif cmd_text == "TARA":
                 send_tg("🔄 Manuel tarama başlatıldı, lütfen bekleyin...", target_chat_id=chat_id)
                 with STATE_LOCK:
-                    manual_notify_queue.append(chat_id) # Alıntısız bildirim için sadece chat_id tutuyoruz
-                scan_event.set() # Tarayıcı döngüsünü uyandır
+                    manual_notify_queue.append(chat_id)
+                scan_event.set() 
                 
             elif cmd_text in BIST_SYMBOLS or cmd_text == GOLD_SYMBOL or cmd_text == INDEX_SYMBOL:
-                send_tg(f"🔍 {cmd_text} analiz ediliyor, lütfen bekleyin...", target_chat_id=chat_id)
-                analysis = analyze_symbol_text(cmd_text)
-                send_tg(analysis, target_chat_id=chat_id)
+                # BLOKAJ ÇÖZÜMÜ: Analizi arka plan thread'ine atıyoruz
+                def bg_analyze(c_id, cmd):
+                    send_tg(f"🔍 {cmd} analiz ediliyor, lütfen bekleyin...", target_chat_id=c_id)
+                    analysis = analyze_symbol_text(cmd)
+                    send_tg(analysis, target_chat_id=c_id)
+                
+                threading.Thread(target=bg_analyze, args=(chat_id, cmd_text), daemon=True).start()
                 
     except Exception as e:
         logger.debug(f"Telegram polling hatası: {e}")
@@ -731,7 +733,6 @@ def scanner_worker() -> None:
     state = load_state()
     logger.info("Veri tarayıcı döngüsü başladı.")
     while True:
-        # 60 saniye bekle VEYA /tara komutu gelirse hemen uyan
         scan_event.wait(timeout=60)
         scan_event.clear()
         
@@ -754,14 +755,14 @@ def telegram_worker() -> None:
     logger.info("Telegram komut dinleyici döngüsü başladı.")
     while True:
         try:
-            with STATE_LOCK:
-                latest_p = {s: p["avg_cost"] for s, p in state["positions"].items()}
-                latest_p.update(LATEST_PRICES)
-                poll_telegram(state, latest_p)
-                save_state(state)
+            # KİLİTLER KALDIRILDI: Artık diğer kullanıcıların mesajları engellenmeyecek
+            latest_p = {s: p["avg_cost"] for s, p in state["positions"].items()}
+            latest_p.update(LATEST_PRICES)
+            poll_telegram(state, latest_p)
+            save_state(state)
         except Exception as e:
             logger.error(f"Telegram döngü hatası: {e}")
-        time.sleep(1) # Her 1 saniyede bir kontrol et (Anında yanıt)
+        time.sleep(1) # Her 1 saniyede bir kontrol et
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
