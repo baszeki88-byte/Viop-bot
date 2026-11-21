@@ -1,5 +1,6 @@
 # ==============================================================================
 # KOŞAN AT — NİHAİ CANLI SİNYAL & POZİSYON TAKİP ASİSTANI (BIST + GLD + XU030)
+# Render Web Service Uyumlu Tam Kod (main.py)
 # Kurallar:
 #   - 09:50 Borsa Açıldı mesajı
 #   - 10:00 - 11:00 arası: White List 50K / Red List 25K
@@ -15,7 +16,9 @@
 import os
 import json
 import time
+import threading
 import logging
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, time as dt_time
 import numpy as np
 import pandas as pd
@@ -39,14 +42,16 @@ TZ = pytz.timezone("Europe/Istanbul")
 STATE_FILE = "kosan_at_nihai_state.json"
 POLL_SECONDS = 60
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "BURAYA_BOT_TOKEN_YAZIN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "BURAYA_CHAT_ID_YAZIN")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+WEB_PORT = int(os.environ.get("PORT", "10000"))
 
-TV_SESSION = os.environ.get("TV_SESSION", "")
-TV_SESSION_SIGN = os.environ.get("TV_SESSION_SIGN", "")
+TV_SESSION = os.environ.get("TV_SESSION", "").strip()
+TV_SESSION_SIGN = os.environ.get("TV_SESSION_SIGN", "").strip()
 if TV_SESSION and TV_SESSION_SIGN:
     try:
         bp.set_tradingview_auth(session=TV_SESSION, session_sign=TV_SESSION_SIGN)
+        logger.info("TradingView auth aktif.")
     except Exception as e:
         logger.warning(f"TradingView auth uyarısı: {e}")
 
@@ -66,7 +71,7 @@ WHITE_LIST = {
     "TKFEN", "HALKB", "GUBRF", "ASELS", "ASTOR", "PETKM", "KCHOL", "ISCTR"
 }
 
-# Zaman Penceleri
+# Zaman Pencereleri
 MARKET_OPEN_MSG_TIME = dt_time(9, 50)
 EARLY_WINDOW_START = dt_time(10, 0)
 EARLY_WINDOW_END = dt_time(11, 0)
@@ -100,6 +105,9 @@ RED_OFF_ALLOC = 30_000.0
 
 ZB_LOOKBACK = 18
 ZB_ORDER = 2
+
+LATEST_PRICES: dict[str, float] = {}
+STATE_LOCK = threading.Lock()
 
 
 def default_state() -> dict:
@@ -167,8 +175,8 @@ def save_state(state: dict) -> None:
 
 
 def send_tg(text: str, reply_to_message_id: int | None = None) -> int | None:
-    if not TELEGRAM_TOKEN or TELEGRAM_TOKEN.startswith("BURAYA_") or not TELEGRAM_CHAT_ID or TELEGRAM_CHAT_ID.startswith("BURAYA_"):
-        logger.info(f"[TELEGRAM LOG]\n{text}")
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.info(f"[TELEGRAM LOG - TOKEN/CHAT_ID YOK]\n{text}")
         return None
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
@@ -316,7 +324,6 @@ def is_early_10_11(now_t: dt_time) -> bool:
 def can_enter_now(symbol: str, now_t: dt_time) -> bool:
     if symbol == GOLD_SYMBOL:
         return True
-    # 17:00 ve sonrasında hiç yeni işlem yok
     if now_t >= NO_NEW_ENTRY_AFTER:
         return False
     return True
@@ -403,7 +410,7 @@ def format_weekly(state: dict) -> str:
 
 
 def poll_telegram(state: dict, latest_prices: dict[str, float]) -> None:
-    if not TELEGRAM_TOKEN or TELEGRAM_TOKEN.startswith("BURAYA_"):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
     params = {"offset": state.get("tg_offset", 0) + 1, "timeout": 1}
@@ -416,7 +423,7 @@ def poll_telegram(state: dict, latest_prices: dict[str, float]) -> None:
             msg = upd.get("message") or {}
             txt = (msg.get("text") or "").strip().lower()
             chat_id = str((msg.get("chat") or {}).get("id", ""))
-            if TELEGRAM_CHAT_ID and not TELEGRAM_CHAT_ID.startswith("BURAYA_") and chat_id != str(TELEGRAM_CHAT_ID):
+            if TELEGRAM_CHAT_ID and chat_id != str(TELEGRAM_CHAT_ID):
                 continue
             if txt.startswith("/pozlar"):
                 send_tg(format_pozlar(state["positions"], latest_prices), reply_to_message_id=msg.get("message_id"))
@@ -502,8 +509,6 @@ def run_cycle(state: dict) -> None:
         xu_ema50 = xu_h1["close"].ewm(span=50, adjust=False).mean()
         xu_trend = 1 if float(xu_h1["close"].iloc[-1]) > float(xu_ema50.iloc[-1]) else -1
 
-    latest_prices: dict[str, float] = {}
-
     for sym in BIST_SYMBOLS + [GOLD_SYMBOL]:
         df5 = fetch_bars(sym, "5m", "5d")
         df1 = fetch_bars(sym, "1h", "15d")
@@ -531,7 +536,7 @@ def run_cycle(state: dict) -> None:
         hi_p = float(curr["high"])
         lo_p = float(curr["low"])
         ema50_p = float(curr["ema50"])
-        latest_prices[sym] = cur_p
+        LATEST_PRICES[sym] = cur_p
 
         new_h1_bar = state["last_seen_h1_pos"].get(sym, -1) != last_h1_idx
         if new_h1_bar:
@@ -540,7 +545,6 @@ def run_cycle(state: dict) -> None:
         pos = state["positions"].get(sym)
         white_flag = is_white(sym)
 
-        # 1) MEVCUT POZİSYON TAKİBİ
         if pos is not None:
             is_long = pos["direction"] == "LONG"
             closed = False
@@ -587,7 +591,6 @@ def run_cycle(state: dict) -> None:
                     del state["positions"][sym]
                     closed = True
 
-            # Ekleme (+50K) YALNIZCA WHITE LIST'te, 5m EMA50 temasında
             if not closed and white_flag and (not pos.get("added_2nd", False)):
                 hit_2nd = (lo_p <= ema50_p) if is_long else (hi_p >= ema50_p)
                 if hit_2nd:
@@ -622,7 +625,6 @@ def run_cycle(state: dict) -> None:
 
             continue
 
-        # 2) YENİ KOŞAN AT SİNYALİ (17:00 sonrası hiç işlem yok)
         if not can_enter_now(sym, now_t):
             continue
 
@@ -684,17 +686,45 @@ def run_cycle(state: dict) -> None:
     save_state(state)
 
 
-def main() -> None:
-    logger.info("Koşan At Nihai Canlı Asistan başlatıldı.")
-    state = load_state()
+def bot_worker_loop() -> None:
+    logger.info("Koşan At Nihai Canlı Asistan arka plan döngüsü başladı.")
+    with STATE_LOCK:
+        state = load_state()
+
     while True:
         try:
-            run_cycle(state)
-            latest_p = {s: p["avg_cost"] for s, p in state["positions"].items()}
-            poll_telegram(state, latest_p)
+            with STATE_LOCK:
+                run_cycle(state)
+                latest_p = {s: p["avg_cost"] for s, p in state["positions"].items()}
+                latest_p.update(LATEST_PRICES)
+                poll_telegram(state, latest_p)
+                save_state(state)
         except Exception as e:
-            logger.exception(f"Döngü hatası: {e}")
+            logger.exception(f"Bot döngüsü hatası: {e}")
         time.sleep(POLL_SECONDS)
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"OK - Kosan At Canli Asistan Aktif")
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_web_server() -> None:
+    server = ThreadingHTTPServer(("0.0.0.0", WEB_PORT), HealthHandler)
+    logger.info(f"Render HTTP sağlık sunucusu 0.0.0.0:{WEB_PORT} üzerinde dinliyor.")
+    server.serve_forever()
+
+
+def main() -> None:
+    worker = threading.Thread(target=bot_worker_loop, daemon=True)
+    worker.start()
+    start_web_server()
 
 
 if __name__ == "__main__":
