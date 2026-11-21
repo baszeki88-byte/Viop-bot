@@ -616,3 +616,136 @@ async def cmd_pozlar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         cur_p = LATEST_PRICES.get(sym, pos["avg_cost"])
         is_long = pos["direction"] == "LONG"
         pnl_pct = ((cur_p - pos["avg_cost"]) / pos["avg_cost"]) * 100.0 * (1.0 if is_long else -1.0)
+        icon = "🟢" if pnl_pct >= 0 else "🔴"
+        lines.append(
+            f"{icon} <b>{sym}</b> ({badge(sym)}) | <b>{pos['direction']}</b>\n"
+            f"   • Ort. Maliyet: <code>{pos['avg_cost']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>\n"
+            f"   • Tutar: <code>{pos['allocated_tl']:,.0f} TL</code> | SL: <code>{pos['sl']:.2f}</code> | TP: <code>%{pos['tp_pct']:.1f}</code> ({pos['tp']:.2f})"
+        )
+    await update.message.reply_text("\n\n".join(lines), parse_mode="HTML")
+
+async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id not in CHAT_IDS:
+        return
+    if is_scanning:
+        await update.message.reply_text("⏳ Şu an arka planda bir tarama devam ediyor. Lütfen bitmesini bekleyin...")
+        return
+    await update.message.reply_text("🔄 Manuel tarama başlatıldı...")
+    async def run_manual_scan():
+        await tick(force=True)
+        await send_all("✅ Tarama tamamlandı. Sinyal koşulu oluştuysa mesajınız gelmiştir.")
+    task = asyncio.create_task(run_manual_scan())
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
+
+# ==========================================
+# TARAMA VE ZAMANLAYICI
+# ==========================================
+async def tick(force=False):
+    global is_scanning
+    if not force and not is_market_open():
+        return
+    if is_scanning:
+        return
+    is_scanning = True
+    logger.info(f"🔄 Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
+
+    try:
+        xu_trend = 0
+        df_xu = await fetch_ohlc_async("XU030", "1h", limit=100)
+        if df_xu is not None and len(df_xu) > 50:
+            xu_ema50 = df_xu['close'].ewm(span=50, adjust=False).mean().iloc[-1]
+            xu_trend = 1 if df_xu['close'].iloc[-1] > xu_ema50 else -1
+
+        sem = asyncio.Semaphore(10)
+        async def work(sym):
+            async with sem:
+                try:
+                    df_1h = await fetch_ohlc_async(sym, "1h", limit=150)
+                    await check_kosan_at(sym, xu_trend, df_1h)
+                    return True
+                except Exception as e:
+                    logger.error(f"Tarama hatası ({sym}): {e}")
+                    return False
+
+        await asyncio.gather(*[work(s) for s in ALL_SYMBOLS])
+    finally:
+        is_scanning = False
+
+async def clear_daily_state():
+    async with STATE_LOCK:
+        KOSAN_AT_TRADES.clear()
+        KOSAN_LAST_SIGNAL.clear()
+        DATA_CACHE.clear()
+        save_trades()
+    await send_all("🧹 <b>Gün Sonu Temizliği</b>\nSaat 18:30 oldu. Tüm açık işlemler ve takipler sıfırlandı. Yarın yeni sinyallerle devam edilecek.")
+
+async def weekly_summary_and_cleanup():
+    # Cuma günü 18:15'te haftalık özet, 18:30'da temizlik
+    pass
+
+async def market_open_scan():
+    if not is_market_open():
+        return
+    await send_all("🟢 Seans açıldı, tarama ve takip başladı.")
+    await send_all("Sistem her zaman senin için çalışıyor, kazanmak istiyorsan sadece sistemle kal... MZB 😉")
+    await tick(force=True)
+
+# ==========================================
+# BOT BAŞLATMA
+# ==========================================
+bot_app = Application.builder().token(BOT_TOKEN).build()
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error(f"🚨 Telegram Hatası: {context.error}")
+    if update and update.effective_chat:
+        try:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Beklenmeyen bir hata oluştu, lütfen tekrar deneyin.")
+        except Exception:
+            pass
+
+bot_app.add_error_handler(error_handler)
+
+auth_filter = filters.User(user_id=CHAT_IDS)
+bot_app.add_handler(CommandHandler("start", cmd_start, filters=auth_filter))
+bot_app.add_handler(CommandHandler(["help", "yardim", "durum"], cmd_help, filters=auth_filter))
+bot_app.add_handler(CommandHandler("tara", cmd_tara, filters=auth_filter))
+bot_app.add_handler(CommandHandler("pozlar", cmd_pozlar, filters=auth_filter))
+bot_app.add_handler(CommandHandler("ozet", cmd_ozet, filters=auth_filter))
+bot_app.add_handler(MessageHandler(filters.TEXT & auth_filter, analyze_symbol))
+
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Alive")
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+    def log_message(self, format, *args):
+        return
+
+def run_dummy_server():
+    HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8080))), DummyHandler).serve_forever()
+
+async def main():
+    load_trades()
+    threading.Thread(target=run_dummy_server, daemon=True).start()
+    await bot_app.initialize()
+    await bot_app.start()
+    await bot_app.updater.start_polling(drop_pending_updates=True)
+
+    sched = AsyncIOScheduler(timezone=TIMEZONE, job_defaults={'coalesce': True, 'max_instances': 1, 'misfire_grace_time': 60})
+
+    sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=50, timezone=TIMEZONE))
+    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="1-59/5", timezone=TIMEZONE))
+    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour=18, minute=10, timezone=TIMEZONE), kwargs={'force': True})
+
+    sched.add_job(clear_daily_state, CronTrigger(day_of_week="mon-fri", hour=18, minute=30, timezone=TIMEZONE))
+    sched.start()
+    logger.info("✅ Bot çalışıyor. Koşan At entegre edildi. 17:00 sonrası işlem yok.")
+    while True:
+        await asyncio.sleep(3600)
+
+if __name__ == "__main__":
+    asyncio.run(main())
