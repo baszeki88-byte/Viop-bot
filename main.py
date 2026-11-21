@@ -40,9 +40,9 @@ logger = logging.getLogger("KosanAtNihaiAsistan")
 
 TZ = pytz.timezone("Europe/Istanbul")
 STATE_FILE = "kosan_at_nihai_state.json"
-POLL_SECONDS = 15  # Telegram komutlarına hızlı yanıt için 15 saniyeye düşürüldü
+POLL_SECONDS = 15  # Telegram komutlarına hızlı yanıt için 15 saniye
 
-# --- ORTAM DEĞİŞKENLERİ (BOT_TOKEN ve CHAT_IDS olarak düzeltildi) ---
+# --- ORTAM DEĞİŞKENLERİ ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 CHAT_IDS_STR = os.environ.get("CHAT_IDS", "5066109900,8776376951,8634151585")
 
@@ -177,16 +177,19 @@ def save_state(state: dict) -> None:
     except Exception as e:
         logger.error(f"State yazma hatası: {e}")
 
-# Çoklu CHAT_ID'ye gönderim yapan fonksiyon
-def send_tg(text: str, reply_ids: dict = None) -> dict:
-    if not BOT_TOKEN or not CHAT_IDS:
-        logger.info(f"[TELEGRAM LOG - TOKEN/CHAT_ID YOK]\n{text}")
+# --- GÜNCELLENDİ: target_chat_id Eklendi ---
+def send_tg(text: str, reply_ids: dict = None, target_chat_id: int = None) -> dict:
+    if not BOT_TOKEN:
+        logger.info(f"[TELEGRAM LOG - TOKEN YOK]\n{text}")
         return {}
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     sent_ids = {}
     
-    for cid in CHAT_IDS:
+    # Eğer target_chat_id belirtilmişse SADECE o kişiye gönder, yoksa herkese gönder
+    targets = [target_chat_id] if target_chat_id else CHAT_IDS
+
+    for cid in targets:
         kw = {}
         if reply_ids and str(cid) in reply_ids:
             kw = {"reply_to_message_id": reply_ids[str(cid)], "allow_sending_without_reply": True}
@@ -405,7 +408,53 @@ def format_weekly(state: dict) -> str:
         f"• SL Sayısı: <b>{st['sl']}</b>"
     )
 
-# --- TELEGRAM KOMUT DİNLEYİCİSİ (GÜNCELLENDİ) ---
+# --- YENİ: Hisse Analizi Fonksiyonu ---
+def analyze_symbol_text(symbol: str) -> str:
+    df1 = fetch_bars(symbol, "1h", "15d")
+    df5 = fetch_bars(symbol, "5m", "5d")
+    
+    if df1.empty:
+        return f"❌ <b>{symbol}</b> için veri çekilemedi veya geçersiz sembol."
+        
+    df1["rsi8"] = get_rsi(df1["close"], 8)
+    df1["rsi14"] = get_rsi(df1["close"], 14)
+    df1["ema50"] = df1["close"].ewm(span=50, adjust=False).mean()
+    df1["ema200"] = df1["close"].ewm(span=200, adjust=False).mean()
+    
+    cur_p = float(df1['close'].iloc[-1])
+    rsi8 = float(df1['rsi8'].iloc[-1])
+    rsi14 = float(df1['rsi14'].iloc[-1])
+    ema50 = float(df1['ema50'].iloc[-1])
+    ema200 = float(df1['ema200'].iloc[-1]) if not pd.isna(df1['ema200'].iloc[-1]) else cur_p
+    
+    trend_1h = "🟢 Yukarı" if cur_p > ema200 else "🔴 Aşağı"
+    
+    msg = (
+        f"🤖 <b>{symbol} — Kapsamlı Analiz</b>\n\n"
+        f"📊 <b>1 Saatlik (1H)</b>\n"
+        f"• Fiyat: <code>{cur_p:.2f}</code>\n"
+        f"• RSI(8): <code>{rsi8:.1f}</code>\n"
+        f"• RSI(14): <code>{rsi14:.1f}</code>\n"
+        f"• Trend: {trend_1h} (EMA 200)\n"
+        f"• EMA 50: <code>{ema50:.2f}</code>\n"
+    )
+    
+    if not df5.empty:
+        df5["rsi5"] = get_rsi(df5["close"], 8)
+        df5["ema50"] = df5["close"].ewm(span=50, adjust=False).mean()
+        cur_5m = float(df5['close'].iloc[-1])
+        rsi5 = float(df5['rsi5'].iloc[-1])
+        ema50_5m = float(df5['ema50'].iloc[-1])
+        trend_5m = "🟢 EMA50 Üstü" if cur_5m > ema50_5m else "🔴 EMA50 Altı"
+        msg += (
+            f"\n⚓ <b>5 Dakikalık (5M)</b>\n"
+            f"• RSI(8): <code>{rsi5:.1f}</code>\n"
+            f"• Trend: {trend_5m} (EMA 50: <code>{ema50_5m:.2f}</code>)\n"
+        )
+        
+    return msg
+
+# --- GÜNCELLENDİ: Sadece Komut Verene Yanıt Verme Mantığı ---
 def poll_telegram(state: dict, latest_prices: dict[str, float]) -> None:
     if not BOT_TOKEN or not CHAT_IDS:
         return
@@ -418,33 +467,41 @@ def poll_telegram(state: dict, latest_prices: dict[str, float]) -> None:
         for upd in resp.json().get("result", []):
             state["tg_offset"] = upd["update_id"]
             msg = upd.get("message") or {}
-            txt = (msg.get("text") or "").strip().lower()
+            txt = (msg.get("text") or "").strip()
             chat_id = int((msg.get("chat") or {}).get("id", 0))
             
             if chat_id not in CHAT_IDS:
                 continue
                 
             reply_id = {str(chat_id): msg.get("message_id")}
+            # Komut ismini ayıkla (/asels@bot -> ASELS)
+            cmd_text = txt.upper().replace("/", "").split("@")[0].strip()
 
-            if txt.startswith("/start"):
-                send_tg("✅ Sistem çalışıyor. Analiz için /ASELS gibi komut yazabilirsiniz. Manuel tarama için /tara yazın.", reply_ids=reply_id)
+            if cmd_text == "START":
+                send_tg("✅ Sistem çalışıyor. Analiz için <code>/ASELS</code> gibi komut yazabilirsiniz. Manuel tarama için <code>/tara</code> yazın.", reply_ids=reply_id, target_chat_id=chat_id)
                 
-            elif txt.startswith("/yardim"):
+            elif cmd_text in ["YARDIM", "HELP"]:
                 help_msg = (
                     "🤖 <b>Yardım Menüsü</b>\n\n"
+                    "• Hisse analizi: <code>/ASELS</code> veya <code>ASELS</code>\n"
                     "• Anında tarama: <code>/tara</code>\n"
                     "• Açık pozisyonlar: <code>/poz</code>\n\n"
                     "Sistem arka planda Koşan At sinyallerini tarar."
                 )
-                send_tg(help_msg, reply_ids=reply_id)
+                send_tg(help_msg, reply_ids=reply_id, target_chat_id=chat_id)
                 
-            elif txt.startswith("/poz"):
-                send_tg(format_pozlar(state["positions"], latest_prices), reply_ids=reply_id)
+            elif cmd_text in ["POZ", "POZLAR"]:
+                send_tg(format_pozlar(state["positions"], latest_prices), reply_ids=reply_id, target_chat_id=chat_id)
                 
-            elif txt.startswith("/tara"):
-                send_tg("🔄 Manuel tarama başlatıldı, lütfen bekleyin...", reply_ids=reply_id)
-                run_cycle(state) # Anında tarama başlat
-                send_tg("✅ Tarama tamamlandı. Sinyal varsa mesajınız gelmiştir.", reply_ids=reply_id)
+            elif cmd_text == "TARA":
+                send_tg("🔄 Manuel tarama başlatıldı, lütfen bekleyin...", reply_ids=reply_id, target_chat_id=chat_id)
+                run_cycle(state) # Tarama yap, buradaki send_tg'ler hedefsiz olduğu için herkese gider.
+                send_tg("✅ Tarama tamamlandı. Sinyal varsa mesajınız gelmiştir.", reply_ids=reply_id, target_chat_id=chat_id)
+                
+            elif cmd_text in BIST_SYMBOLS or cmd_text == GOLD_SYMBOL or cmd_text == INDEX_SYMBOL:
+                send_tg(f"🔍 {cmd_text} analiz ediliyor, lütfen bekleyin...", reply_ids=reply_id, target_chat_id=chat_id)
+                analysis = analyze_symbol_text(cmd_text)
+                send_tg(analysis, reply_ids=reply_id, target_chat_id=chat_id)
                 
     except Exception as e:
         logger.debug(f"Telegram polling hatası: {e}")
@@ -472,32 +529,32 @@ def sync_schedules(state: dict, now_dt: datetime) -> None:
 
     if now_dt.weekday() <= 4:
         if now_t >= MARKET_OPEN_MSG_TIME and not state["sent_flags"]["open_msg"]:
-            send_tg("🔔 <b>Borsa Açıldı</b> (09:50)\nKoşan At canlı asistanı aktif.")
+            send_tg("🔔 <b>Borsa Açıldı</b> (09:50)\nKoşan At canlı asistanı aktif.") # Herkese gider
             state["sent_flags"]["open_msg"] = True
 
         prime_now = is_prime(now_t)
         prev_prime = state["sent_flags"]["prime_active"]
         if prime_now and not prev_prime:
-            send_tg("⚡ <b>En Verimli Saatler Başladı (11:00)</b>\nWhite List 100K / Red List 50K kademeleri aktif.")
+            send_tg("⚡ <b>En Verimli Saatler Başladı (11:00)</b>\nWhite List 100K / Red List 50K kademeleri aktif.") # Herkese gider
             state["sent_flags"]["prime_active"] = True
         elif (not prime_now) and prev_prime:
-            send_tg("💤 <b>En Verimli Saatler Bitti (17:00)</b>\n17:00 sonrası yeni işlem kapalı; yalnızca mevcut pozisyonlar takip ediliyor.")
+            send_tg("💤 <b>En Verimli Saatler Bitti (17:00)</b>\n17:00 sonrası yeni işlem kapalı; yalnızca mevcut pozisyonlar takip ediliyor.") # Herkese gider
             state["sent_flags"]["prime_active"] = False
 
         if now_t >= DAILY_SUMMARY_TIME and not state["sent_flags"]["daily_summary"]:
-            send_tg(format_daily(state))
+            send_tg(format_daily(state)) # Herkese gider
             state["sent_flags"]["daily_summary"] = True
 
         if now_dt.weekday() == 4:
             if now_t >= WEEKLY_SUMMARY_TIME and not state["sent_flags"]["weekly_summary"]:
-                send_tg(format_weekly(state))
+                send_tg(format_weekly(state)) # Herkese gider
                 state["sent_flags"]["weekly_summary"] = True
 
             if now_t >= WEEKLY_CLEANUP_TIME and not state["sent_flags"]["weekly_cleanup"]:
                 cleaned = len(state["positions"])
                 state["positions"] = {}
                 state["sent_flags"]["weekly_cleanup"] = True
-                send_tg(f"🧹 <b>Haftalık Temizlik Tamamlandı (Cuma 18:30)</b>\nTemizlenen açık pozisyon kaydı: <b>{cleaned}</b>")
+                send_tg(f"🧹 <b>Haftalık Temizlik Tamamlandı (Cuma 18:30)</b>\nTemizlenen açık pozisyon kaydı: <b>{cleaned}</b>") # Herkese gider
 
 def run_cycle(state: dict) -> None:
     now_dt = datetime.now(TZ)
@@ -561,7 +618,7 @@ def run_cycle(state: dict) -> None:
                         f"{badge(sym)} | <b>{sym}</b> ({pos['direction']})\n"
                         f"Kapanış: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>"
                     )
-                    send_tg(msg, reply_ids=pos.get("msg_ids"))
+                    send_tg(msg, reply_ids=pos.get("msg_ids")) # Sinyal kapanışı herkese gider
                     record_exit(state, "ZB_EXIT", pos["tp_pct"])
                     del state["positions"][sym]
                     closed = True
@@ -577,7 +634,7 @@ def run_cycle(state: dict) -> None:
                             f"{badge(sym)} | <b>{sym}</b> ({pos['direction']})\n"
                             f"Ort. Maliyet: <code>{pos['avg_cost']:.2f}</code> | Yeni TP: <code>{new_tp:.2f}</code>"
                         )
-                        send_tg(msg, reply_ids=pos.get("msg_ids"))
+                        send_tg(msg, reply_ids=pos.get("msg_ids")) # Güncelleme herkese gider
 
             if not closed:
                 sl_hit = (lo_p <= pos["sl"]) if is_long else (hi_p >= pos["sl"])
@@ -587,7 +644,7 @@ def run_cycle(state: dict) -> None:
                         f"❌ <b>STOP-LOSS (SL)</b> — <b>{sym}</b> ({pos['direction']})\n"
                         f"{badge(sym)} | SL: <code>{pos['sl']:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>"
                     )
-                    send_tg(msg, reply_ids=pos.get("msg_ids"))
+                    send_tg(msg, reply_ids=pos.get("msg_ids")) # SL herkese gider
                     record_exit(state, "SL", pos["tp_pct"])
                     del state["positions"][sym]
                     closed = True
@@ -610,7 +667,7 @@ def run_cycle(state: dict) -> None:
                         f"Güncel Ort. Maliyet: <code>{pos['avg_cost']:.2f}</code>\n"
                         f"Güncel SL: <code>{new_sl:.2f}</code> | Güncel TP (%{pos['tp_pct']:.1f}): <code>{new_tp:.2f}</code>"
                     )
-                    send_tg(msg, reply_ids=pos.get("msg_ids"))
+                    send_tg(msg, reply_ids=pos.get("msg_ids")) # Ekleme herkese gider
 
             if not closed:
                 tp_hit = (hi_p >= pos["tp"]) if is_long else (lo_p <= pos["tp"])
@@ -619,7 +676,7 @@ def run_cycle(state: dict) -> None:
                         f"✅ <b>TAKE-PROFIT (TP %{pos['tp_pct']:.1f})</b> — <b>{sym}</b> ({pos['direction']})\n"
                         f"{badge(sym)} | TP: <code>{pos['tp']:.2f}</code>"
                     )
-                    send_tg(msg, reply_ids=pos.get("msg_ids"))
+                    send_tg(msg, reply_ids=pos.get("msg_ids")) # TP herkese gider
                     record_exit(state, "TP", pos["tp_pct"])
                     del state["positions"][sym]
                     closed = True
@@ -666,7 +723,7 @@ def run_cycle(state: dict) -> None:
             f"• Baz TP (%{tp_pct:.1f}): <code>{tp_val:.2f}</code> <i>(ZB onayında %{zb_target_tp:.1f})</i>"
         )
         
-        # Mesaj 3 farklı kişiye gider, ID'leri sözlük olarak kaydederiz
+        # Sinyal mesajı target_chat_id belirtilmeden çağrıldığı için HERKESE gider
         msg_ids = send_tg(sig_text)
 
         state["positions"][sym] = {
@@ -680,7 +737,7 @@ def run_cycle(state: dict) -> None:
             "tp": tp_val,
             "tp_pct": tp_pct,
             "added_2nd": False,
-            "msg_ids": msg_ids, # Sözlük olarak kaydedildi (birden fazla chat id içerir)
+            "msg_ids": msg_ids, # Sözlük olarak kaydedilir
             "opened_at": now_dt.isoformat(),
         }
         state["daily_stats"]["kosan_signals"] += 1
