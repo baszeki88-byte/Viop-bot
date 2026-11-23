@@ -590,7 +590,7 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
     text = update.message.text.upper().replace("/", "").strip()
     if not text.isalnum() or len(text) < 2 or len(text) > 10: return
-    if text in ["START", "HELP", "YARDIM", "TARA", "OZET", "POZLAR"]: return
+    if text in ["START", "HELP", "YARDIM", "TARA", "OZET", "POZLAR", "POZ"]: return # POZ eklendi
     if text not in ALL_SYMBOLS: await update.message.reply_text(f"❌ '{text}' tarama listesinde bulunamadı."); return
     await update.message.reply_text(f"🔍 {text} analiz ediliyor, lütfen bekleyin...")
     try:
@@ -616,30 +616,57 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, parse_mode="HTML")
     except Exception as e: logger.error(f"Analiz hatası: {e}"); await update.message.reply_text(f"❌ Analiz hatası: {e}")
 
+# ==========================================
+# KOMUTLAR (GÜNCELLENDİ)
+# ==========================================
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
-    await update.message.reply_text("✅ Sistem çalışıyor. Analiz için /ASELS gibi komut yazabilirsiniz. Manuel tarama için /tara yazın.")
+    msg = (
+        "✅ <b>Sistem çalışıyor.</b>\n\n"
+        "📌 <b>Kullanılabilir Komutlar:</b>\n"
+        "• Analiz: <code>/ASELS</code> (veya hisse adı)\n"
+        "• Anında Tarama: <code>/tara</code>\n"
+        "• Açık Pozisyonlar: <code>/pozlar</code> veya <code>/poz</code>\n"
+        "• Piyasa Özeti: <code>/ozet</code>"
+    )
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
-    msg = ("🤖 <b>Yardım Menüsü</b>\n\n• Hisse analizi: <code>/ASELS</code>\n• Anında tarama: <code>/tara</code>\n• Açık pozisyonlar: <code>/pozlar</code>\n\nSistem <b>Koşan At</b> ve <b>RSI EMA</b> sinyallerini takip eder (17:00 sonrası işlem yok).")
+    msg = ("🤖 <b>Yardım Menüsü</b>\n\n"
+           "• Hisse analizi: <code>/ASELS</code>\n"
+           "• Anında tarama: <code>/tara</code>\n"
+           "• Açık pozisyonlar: <code>/pozlar</code> veya <code>/poz</code>\n"
+           "• Piyasa Özeti: <code>/ozet</code>\n\n"
+           "Sistem <b>Koşan At</b> ve <b>RSI EMA</b> sinyallerini takip eder (17:00 sonrası işlem yok).")
     await update.message.reply_text(msg, parse_mode="HTML")
 
 async def cmd_pozlar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
-    if not KOSAN_AT_TRADES and not RSI_EMA_TRADES: await update.message.reply_text("📭 Açık pozisyon bulunmuyor."); return
-    lines = ["📋 <b>AÇIK POZİSYONLAR</b>\n"]
-    for sym, pos in list(KOSAN_AT_TRADES.items()):
-        cur_p = LATEST_PRICES.get(sym, pos["avg_cost"]); is_long = pos["direction"] == "LONG"
-        pnl_pct = ((cur_p - pos["avg_cost"]) / pos["avg_cost"]) * 100.0 * (1.0 if is_long else -1.0)
-        icon = "🟢" if pnl_pct >= 0 else "🔴"
-        lines.append(f"{icon} <b>{sym}</b> ({badge(sym)}) | <b>{pos['direction']}</b> [KOŞAN AT]\n   • Ort. Maliyet: <code>{pos['avg_cost']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>\n   • Tutar: <code>{pos['allocated_tl']:,.0f} TL</code> | SL: <code>{pos['sl']:.2f}</code> | TP: <code>%{pos['tp_pct']:.1f}</code> ({pos['tp']:.2f})")
-    for sym, pos in list(RSI_EMA_TRADES.items()):
-        cur_p = LATEST_PRICES.get(sym, pos["entry"]); is_long = pos["direction"] == "LONG"
-        pnl_pct = ((cur_p - pos["entry"]) / pos["entry"]) * 100.0 * (1.0 if is_long else -1.0)
-        icon = "🟢" if pnl_pct >= 0 else "🔴"
-        lines.append(f"{icon} <b>{sym}</b> ({badge(sym)}) | <b>{pos['direction']}</b> [RSI EMA]\n   • Giriş: <code>{pos['entry']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>\n   • SL: <code>{pos['sl']:.2f}</code>")
-    await update.message.reply_text("\n\n".join(lines), parse_mode="HTML")
+    if not KOSAN_AT_TRADES and not RSI_EMA_TRADES: 
+        await update.message.reply_text("📭 Açık pozisyon bulunmuyor.")
+        return
+    
+    try:
+        lines = ["📋 <b>AÇIK POZİSYONLAR</b>\n"]
+        # Hata almamak için list() ile anlık kopya üzerinden dönüyoruz
+        for sym, pos in list(KOSAN_AT_TRADES.items()):
+            cur_p = LATEST_PRICES.get(sym, pos["avg_cost"]); is_long = pos["direction"] == "LONG"
+            pnl_pct = ((cur_p - pos["avg_cost"]) / pos["avg_cost"]) * 100.0 * (1.0 if is_long else -1.0)
+            icon = "🟢" if pnl_pct >= 0 else "🔴"
+            lines.append(f"{icon} <b>{sym}</b> ({badge(sym)}) | <b>{pos['direction']}</b> [KOŞAN AT]\n   • Ort. Maliyet: <code>{pos['avg_cost']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>\n   • Tutar: <code>{pos['allocated_tl']:,.0f} TL</code> | SL: <code>{pos['sl']:.2f}</code> | TP: <code>%{pos['tp_pct']:.1f}</code> ({pos['tp']:.2f})")
+            
+        for sym, pos in list(RSI_EMA_TRADES.items()):
+            cur_p = LATEST_PRICES.get(sym, pos["entry"]); is_long = pos["direction"] == "LONG"
+            pnl_pct = ((cur_p - pos["entry"]) / pos["entry"]) * 100.0 * (1.0 if is_long else -1.0)
+            icon = "🟢" if pnl_pct >= 0 else "🔴"
+            lines.append(f"{icon} <b>{sym}</b> ({badge(sym)}) | <b>{pos['direction']}</b> [RSI EMA]\n   • Giriş: <code>{pos['entry']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>\n   • SL: <code>{pos['sl']:.2f}</code>")
+            
+        await update.message.reply_text("\n\n".join(lines), parse_mode="HTML")
+    except Exception as e:
+        # Eşzamanlılık hatası yakalanır ve kullanıcıya bildirilir
+        logger.error(f"Pozlar çekilirken eşzamanlılık hatası: {e}")
+        await update.message.reply_text("⚠️ Pozisyonlar listelenirken anlık bir yoğunluk oluştu, lütfen tekrar deneyin.")
 
 async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
@@ -750,7 +777,8 @@ auth_filter = filters.User(user_id=CHAT_IDS)
 bot_app.add_handler(CommandHandler("start", cmd_start, filters=auth_filter))
 bot_app.add_handler(CommandHandler(["help", "yardim", "durum"], cmd_help, filters=auth_filter))
 bot_app.add_handler(CommandHandler("tara", cmd_tara, filters=auth_filter))
-bot_app.add_handler(CommandHandler("pozlar", cmd_pozlar, filters=auth_filter))
+# POZ ve POZLAR komutları aynı fonksiyona bağlandı
+bot_app.add_handler(CommandHandler(["pozlar", "poz"], cmd_pozlar, filters=auth_filter))
 bot_app.add_handler(CommandHandler("ozet", cmd_ozet, filters=auth_filter))
 bot_app.add_handler(MessageHandler(filters.TEXT & auth_filter, analyze_symbol))
 
@@ -765,18 +793,14 @@ async def main():
     await bot_app.initialize(); await bot_app.start(); await bot_app.updater.start_polling(drop_pending_updates=True)
     sched = AsyncIOScheduler(timezone=TIMEZONE, job_defaults={'coalesce': True, 'max_instances': 1, 'misfire_grace_time': 60})
     
-    # 09:50 mesajları ve 09:56'da başlayan ilk tarama
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=50, timezone=TIMEZONE))
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour=9, minute=56, timezone=TIMEZONE))
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="1-59/5", timezone=TIMEZONE))
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour=18, minute=10, timezone=TIMEZONE), kwargs={'force': True})
     
-    # Gün sonu temizlik (Açık pozisyonları silmez, özet atar)
     sched.add_job(clear_daily_state, CronTrigger(day_of_week="mon-fri", hour=18, minute=30, timezone=TIMEZONE))
-    # Haftalık genel temizlik (Cuma günü her şeyi siler)
     sched.add_job(weekly_summary_and_cleanup, CronTrigger(day_of_week="fri", hour=18, minute=40, timezone=TIMEZONE))
     
-    # Piyasa Özetleri
     sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=15, timezone=TIMEZONE))
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
     
