@@ -308,7 +308,7 @@ async def track_kosan(sym, df5, df_1h):
             if (long and lo <= ema) or ((not long) and hi >= ema):
                 trade["entry2"] = ema
                 prev_alloc = trade["allocated_tl"]
-                add_alloc = prev_alloc / 2  # İlk girişin yarısı kadar ekleme
+                add_alloc = prev_alloc / 2
                 new_alloc = prev_alloc + add_alloc
                 new_avg = ((trade["avg_cost"] * prev_alloc) + (ema * add_alloc)) / new_alloc
                 
@@ -340,7 +340,6 @@ async def track_kosan(sym, df5, df_1h):
         if df_1h_closed is not None and len(df_1h_closed) > 20:
             rsi_series = get_rsi(df_1h_closed['close'], 8); last_idx = len(df_1h_closed) - 1
             
-            # ZEKİ BEY TEYİDİ (Aynı yönlü kırılım)
             if not trade.get("zb_teyit_sent", False):
                 if check_zeki_bey_series(rsi_series, last_idx, trade["direction"], ZB_LOOKBACK, ZB_ORDER):
                     trade["zb_teyit_sent"] = True
@@ -348,7 +347,6 @@ async def track_kosan(sym, df5, df_1h):
                     await send_all(msg, ids)
                     save_trades()
                     
-            # ZEKİ BEY ERKEN ÇIKIŞ (Ters yönlü kırılım)
             if not trade.get("zb_exit_sent", False):
                 opp_dir = "SHORT" if long else "LONG"
                 if check_zeki_bey_series(rsi_series, last_idx, opp_dir, ZB_LOOKBACK, ZB_ORDER):
@@ -504,7 +502,6 @@ async def track_rsi_ema_trades(df_1h_cache):
             if df_1h is not None and df_1h_closed is not None and len(df_1h_closed) > 20:
                 rsi_series = get_rsi(df_1h_closed['close'], 8); last_idx = len(df_1h_closed) - 1
                 
-                # ZEKİ BEY TEYİDİ
                 if not trade.get("zb_teyit_sent", False):
                     if check_zeki_bey_series(rsi_series, last_idx, trade["direction"], ZB_LOOKBACK, ZB_ORDER):
                         trade["zb_teyit_sent"] = True
@@ -512,7 +509,6 @@ async def track_rsi_ema_trades(df_1h_cache):
                         await send_all(msg, ids)
                         save_trades()
                         
-                # ZEKİ BEY ERKEN ÇIKIŞ
                 if not trade.get("zeki_sent", False):
                     opp_dir = "SHORT" if trade["direction"] == "LONG" else "LONG"
                     if check_zeki_bey_series(rsi_series, last_idx, opp_dir, ZB_LOOKBACK, ZB_ORDER):
@@ -586,6 +582,22 @@ async def generate_market_summary(session_name):
         await send_all(msg)
     except Exception as e: logger.error(f"Özet fonksiyonu hatası: {e}")
 
+def build_positions_text():
+    if not KOSAN_AT_TRADES and not RSI_EMA_TRADES:
+        return "📭 Açık pozisyon bulunmuyor."
+    lines = ["📋 <b>AÇIK POZİSYONLAR</b>\n"]
+    for sym, pos in list(KOSAN_AT_TRADES.items()):
+        cur_p = LATEST_PRICES.get(sym, pos["avg_cost"]); is_long = pos["direction"] == "LONG"
+        pnl_pct = ((cur_p - pos["avg_cost"]) / pos["avg_cost"]) * 100.0 * (1.0 if is_long else -1.0)
+        icon = "🟢" if pnl_pct >= 0 else "🔴"
+        lines.append(f"{icon} <b>{sym}</b> ({badge(sym)}) | <b>{pos['direction']}</b> [KOŞAN AT]\n   • Ort. Maliyet: <code>{pos['avg_cost']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>\n   • Tutar: <code>{pos['allocated_tl']:,.0f} TL</code> | SL: <code>{pos['sl']:.2f}</code> | TP: <code>%{pos['tp_pct']:.1f}</code> ({pos['tp']:.2f})")
+    for sym, pos in list(RSI_EMA_TRADES.items()):
+        cur_p = LATEST_PRICES.get(sym, pos["entry"]); is_long = pos["direction"] == "LONG"
+        pnl_pct = ((cur_p - pos["entry"]) / pos["entry"]) * 100.0 * (1.0 if is_long else -1.0)
+        icon = "🟢" if pnl_pct >= 0 else "🔴"
+        lines.append(f"{icon} <b>{sym}</b> ({badge(sym)}) | <b>{pos['direction']}</b> [RSI EMA]\n   • Giriş: <code>{pos['entry']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>\n   • SL: <code>{pos['sl']:.2f}</code>")
+    return "\n\n".join(lines)
+
 async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
     text = update.message.text.upper().replace("/", "").strip()
@@ -622,7 +634,6 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
     
-    # Tıklanabilir Butonlar
     keyboard = [
         [InlineKeyboardButton("🔄 Anında Tarama", callback_data="btn_tara")],
         [InlineKeyboardButton("📋 Açık Pozisyonlar", callback_data="btn_pozlar"), InlineKeyboardButton("📊 Piyasa Özeti", callback_data="btn_ozet")]
@@ -652,25 +663,12 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_pozlar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
-    if not KOSAN_AT_TRADES and not RSI_EMA_TRADES: 
+    if not KOSAN_AT_TRADES and not RSI_EMA_TRADES:
         await update.message.reply_text("📭 Açık pozisyon bulunmuyor.")
         return
-    
     try:
-        lines = ["📋 <b>AÇIK POZİSYONLAR</b>\n"]
-        for sym, pos in list(KOSAN_AT_TRADES.items()):
-            cur_p = LATEST_PRICES.get(sym, pos["avg_cost"]); is_long = pos["direction"] == "LONG"
-            pnl_pct = ((cur_p - pos["avg_cost"]) / pos["avg_cost"]) * 100.0 * (1.0 if is_long else -1.0)
-            icon = "🟢" if pnl_pct >= 0 else "🔴"
-            lines.append(f"{icon} <b>{sym}</b> ({badge(sym)}) | <b>{pos['direction']}</b> [KOŞAN AT]\n   • Ort. Maliyet: <code>{pos['avg_cost']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>\n   • Tutar: <code>{pos['allocated_tl']:,.0f} TL</code> | SL: <code>{pos['sl']:.2f}</code> | TP: <code>%{pos['tp_pct']:.1f}</code> ({pos['tp']:.2f})")
-            
-        for sym, pos in list(RSI_EMA_TRADES.items()):
-            cur_p = LATEST_PRICES.get(sym, pos["entry"]); is_long = pos["direction"] == "LONG"
-            pnl_pct = ((cur_p - pos["entry"]) / pos["entry"]) * 100.0 * (1.0 if is_long else -1.0)
-            icon = "🟢" if pnl_pct >= 0 else "🔴"
-            lines.append(f"{icon} <b>{sym}</b> ({badge(sym)}) | <b>{pos['direction']}</b> [RSI EMA]\n   • Giriş: <code>{pos['entry']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>\n   • SL: <code>{pos['sl']:.2f}</code>")
-            
-        await update.message.reply_text("\n\n".join(lines), parse_mode="HTML")
+        text = build_positions_text()
+        await update.message.reply_text(text, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Pozlar çekilirken eşzamanlılık hatası: {e}")
         await update.message.reply_text("⚠️ Pozisyonlar listelenirken anlık bir yoğunluk oluştu, lütfen tekrar deneyin.")
@@ -691,6 +689,7 @@ async def cmd_ozet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # --- CALLBACK BUTON YÖNETİCİSİ ---
 async def button_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if not query or not query.message: return
     if query.message.chat.id not in CHAT_IDS: return
     await query.answer()
     
@@ -702,9 +701,12 @@ async def button_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         async def run_manual_scan(): await tick(force=True); await send_all("✅ Tarama tamamlandı. Sinyal koşulu oluştuysa mesajınız gelmiştir.")
         task = asyncio.create_task(run_manual_scan()); background_tasks.add(task); task.add_done_callback(background_tasks.discard)
     elif query.data == "btn_pozlar":
-        # Doğrudan cmd_pozlar fonksiyonunu çağırmak için sahte bir update oluşturmaya gerek yok, direkt içeriği yazabiliriz veya fonksiyonu çağırabiliriz.
-        # Basitlik için cmd_pozlar'ı çağıralım (update'in message attribute'unu kullanıyor)
-        await cmd_pozlar(update, ctx)
+        try:
+            text = build_positions_text()
+            await query.message.reply_text(text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Buton pozlar hatası: {e}")
+            await query.message.reply_text("⚠️ Pozisyonlar listelenirken anlık bir yoğunluk oluştu, lütfen tekrar deneyin.")
     elif query.data == "btn_ozet":
         await query.message.reply_text("⏳ Piyasa özeti hazırlanıyor...")
         now = datetime.now(TIMEZONE); session_name = "Sabah" if now.time() < dt_time(14, 0) else "Öğleden Sonra"
