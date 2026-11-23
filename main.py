@@ -12,7 +12,7 @@ import borsapy as bp
 import pytz
 import holidays
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -590,7 +590,7 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
     text = update.message.text.upper().replace("/", "").strip()
     if not text.isalnum() or len(text) < 2 or len(text) > 10: return
-    if text in ["START", "HELP", "YARDIM", "TARA", "OZET", "POZLAR", "POZ"]: return # POZ eklendi
+    if text in ["START", "HELP", "YARDIM", "TARA", "OZET", "POZLAR", "POZ"]: return
     if text not in ALL_SYMBOLS: await update.message.reply_text(f"❌ '{text}' tarama listesinde bulunamadı."); return
     await update.message.reply_text(f"🔍 {text} analiz ediliyor, lütfen bekleyin...")
     try:
@@ -617,19 +617,28 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e: logger.error(f"Analiz hatası: {e}"); await update.message.reply_text(f"❌ Analiz hatası: {e}")
 
 # ==========================================
-# KOMUTLAR (GÜNCELLENDİ)
+# KOMUTLAR
 # ==========================================
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
+    
+    # Tıklanabilir Butonlar
+    keyboard = [
+        [InlineKeyboardButton("🔄 Anında Tarama", callback_data="btn_tara")],
+        [InlineKeyboardButton("📋 Açık Pozisyonlar", callback_data="btn_pozlar"), InlineKeyboardButton("📊 Piyasa Özeti", callback_data="btn_ozet")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     msg = (
         "✅ <b>Sistem çalışıyor.</b>\n\n"
         "📌 <b>Kullanılabilir Komutlar:</b>\n"
         "• Analiz: <code>/ASELS</code> (veya hisse adı)\n"
         "• Anında Tarama: <code>/tara</code>\n"
         "• Açık Pozisyonlar: <code>/pozlar</code> veya <code>/poz</code>\n"
-        "• Piyasa Özeti: <code>/ozet</code>"
+        "• Piyasa Özeti: <code>/ozet</code>\n\n"
+        "👇 <i>Aşağıdaki butonları kullanarak da işlem yapabilirsiniz.</i>"
     )
-    await update.message.reply_text(msg, parse_mode="HTML")
+    await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="HTML")
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
@@ -649,7 +658,6 @@ async def cmd_pozlar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     try:
         lines = ["📋 <b>AÇIK POZİSYONLAR</b>\n"]
-        # Hata almamak için list() ile anlık kopya üzerinden dönüyoruz
         for sym, pos in list(KOSAN_AT_TRADES.items()):
             cur_p = LATEST_PRICES.get(sym, pos["avg_cost"]); is_long = pos["direction"] == "LONG"
             pnl_pct = ((cur_p - pos["avg_cost"]) / pos["avg_cost"]) * 100.0 * (1.0 if is_long else -1.0)
@@ -664,7 +672,6 @@ async def cmd_pozlar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             
         await update.message.reply_text("\n\n".join(lines), parse_mode="HTML")
     except Exception as e:
-        # Eşzamanlılık hatası yakalanır ve kullanıcıya bildirilir
         logger.error(f"Pozlar çekilirken eşzamanlılık hatası: {e}")
         await update.message.reply_text("⚠️ Pozisyonlar listelenirken anlık bir yoğunluk oluştu, lütfen tekrar deneyin.")
 
@@ -680,6 +687,28 @@ async def cmd_ozet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Piyasa özeti hazırlanıyor, lütfen bekleyin...")
     now = datetime.now(TIMEZONE); session_name = "Sabah" if now.time() < dt_time(14, 0) else "Öğleden Sonra"
     await generate_market_summary(session_name)
+
+# --- CALLBACK BUTON YÖNETİCİSİ ---
+async def button_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.message.chat.id not in CHAT_IDS: return
+    await query.answer()
+    
+    if query.data == "btn_tara":
+        if is_scanning: 
+            await query.message.reply_text("⏳ Şu an arka planda bir tarama devam ediyor.")
+            return
+        await query.message.reply_text("🔄 Manuel tarama başlatıldı...")
+        async def run_manual_scan(): await tick(force=True); await send_all("✅ Tarama tamamlandı. Sinyal koşulu oluştuysa mesajınız gelmiştir.")
+        task = asyncio.create_task(run_manual_scan()); background_tasks.add(task); task.add_done_callback(background_tasks.discard)
+    elif query.data == "btn_pozlar":
+        # Doğrudan cmd_pozlar fonksiyonunu çağırmak için sahte bir update oluşturmaya gerek yok, direkt içeriği yazabiliriz veya fonksiyonu çağırabiliriz.
+        # Basitlik için cmd_pozlar'ı çağıralım (update'in message attribute'unu kullanıyor)
+        await cmd_pozlar(update, ctx)
+    elif query.data == "btn_ozet":
+        await query.message.reply_text("⏳ Piyasa özeti hazırlanıyor...")
+        now = datetime.now(TIMEZONE); session_name = "Sabah" if now.time() < dt_time(14, 0) else "Öğleden Sonra"
+        await generate_market_summary(session_name)
 
 async def weekly_summary_and_cleanup():
     msg = (f"🗓️ <b>HAFTALIK İŞLEM ÖZETİ</b>\n• Koşan At Tetiklenen Sinyal: <b>{KOSAN_WEEKLY_STATS['signals']}</b>\n• %4 TP Sayısı: <b>{KOSAN_WEEKLY_STATS['tp_4']}</b>\n• %3 TP Sayısı: <b>{KOSAN_WEEKLY_STATS['tp_3']}</b>\n• %2.5 TP Sayısı: <b>{KOSAN_WEEKLY_STATS['tp_2_5']}</b>\n• %1.5 TP Sayısı: <b>{KOSAN_WEEKLY_STATS['tp_1_5']}</b>\n• SL Sayısı: <b>{KOSAN_WEEKLY_STATS['sl']}</b>")
@@ -756,7 +785,6 @@ async def clear_daily_state():
         DATA_CACHE.clear(); LATEST_PRICES.clear()
         KOSAN_DAILY_STATS.update({"signals": 0, "tp_4": 0, "tp_3": 0, "tp_2_5": 0, "tp_1_5": 0, "sl": 0, "zb_exit": 0})
         save_trades()
-        # Açık pozisyonlar (KOSAN_AT_TRADES ve RSI_EMA_TRADES) BİLEREK SİLİNMİYOR. Ertesi gün devam edecek.
     await send_all("🧹 <b>Gün Sonu Temizliği</b>\nSaat 18:30 oldu. Günlük istatistikler sıfırlandı. <b>Açık pozisyonlar korunuyor ve yarın takip edilecek.</b>")
 
 async def market_open_scan():
@@ -766,20 +794,35 @@ async def market_open_scan():
 async def task_morning_summary(): await generate_market_summary("Sabah")
 async def task_afternoon_summary(): await generate_market_summary("Öğleden Sonra")
 
-bot_app = Application.builder().token(BOT_TOKEN).build()
+# BOT KOMUT MENÜSÜNÜ AYARLAMA
+async def post_init(application: Application) -> None:
+    commands = [
+        BotCommand("start", "Sistemi başlat ve menüyü göster"),
+        BotCommand("tara", "Anında tarama yap"),
+        BotCommand("pozlar", "Açık pozisyonları göster"),
+        BotCommand("ozet", "Piyasa özetini göster")
+    ]
+    await application.bot.set_my_commands(commands)
+
+# Bot başlatılırken post_init eklendi
+bot_app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(f"🚨 Telegram Hatası: {context.error}")
     if update and update.effective_chat:
         try: await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Beklenmeyen bir hata oluştu, lütfen tekrar deneyin.")
         except Exception: pass
+
 bot_app.add_error_handler(error_handler)
 auth_filter = filters.User(user_id=CHAT_IDS)
 bot_app.add_handler(CommandHandler("start", cmd_start, filters=auth_filter))
 bot_app.add_handler(CommandHandler(["help", "yardim", "durum"], cmd_help, filters=auth_filter))
 bot_app.add_handler(CommandHandler("tara", cmd_tara, filters=auth_filter))
-# POZ ve POZLAR komutları aynı fonksiyona bağlandı
 bot_app.add_handler(CommandHandler(["pozlar", "poz"], cmd_pozlar, filters=auth_filter))
 bot_app.add_handler(CommandHandler("ozet", cmd_ozet, filters=auth_filter))
+# Callback (Buton) yöneticisi eklendi
+from telegram.ext import CallbackQueryHandler
+bot_app.add_handler(CallbackQueryHandler(button_callback))
 bot_app.add_handler(MessageHandler(filters.TEXT & auth_filter, analyze_symbol))
 
 class DummyHandler(BaseHTTPRequestHandler):
