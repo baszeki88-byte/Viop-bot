@@ -24,11 +24,11 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 TV_SESSION = os.environ.get("TV_SESSION")
 TV_SESSION_SIGN = os.environ.get("TV_SESSION_SIGN")
 
-CHAT_IDS_STR = os.environ.get("CHAT_IDS", "5066109900,8776376951,8634151585")
+CHAT_IDS_STR = os.environ.get("CHAT_IDS", "5066109900,8776376951")
 try:
     CHAT_IDS = [int(cid.strip()) for cid in CHAT_IDS_STR.split(",")]
 except ValueError:
-    CHAT_IDS = [5066109900, 8776376951, 8634151585]
+    CHAT_IDS = [5066109900, 8776376951]
 
 ADMIN_ID = CHAT_IDS[0] if CHAT_IDS else None
 
@@ -82,7 +82,7 @@ WHITE_ZB_TP_PCT = 4.0; RED_ZB_TP_PCT = 3.0; ZB_LOOKBACK = 18; ZB_ORDER = 2; MAX_
 RSI_X_PERIOD = 8; RSI_X_EMA_SPAN = 13; RSI_X_LOW = 20; RSI_X_HIGH = 85
 RSI_X_POST_BARS = 5; RSI_X_MAX_STOP_PCT = 2.5
 
-WHITE_PRIME_ALLOC = 100_000.0; WHITE_EARLY_ALLOC = 50_000.0; WHITE_OFF_ALLOC = 75_000.0; WHITE_ADD_ALLOC = 50_000.0
+WHITE_PRIME_ALLOC = 100_000.0; WHITE_EARLY_ALLOC = 50_000.0; WHITE_OFF_ALLOC = 75_000.0
 RED_PRIME_ALLOC = 50_000.0; RED_EARLY_ALLOC = 25_000.0; RED_OFF_ALLOC = 30_000.0
 
 MARKET_OPEN_MSG_TIME = dt_time(9, 50); EARLY_WINDOW_START = dt_time(10, 0); EARLY_WINDOW_END = dt_time(11, 0); PRIME_START = dt_time(11, 0); PRIME_END = dt_time(17, 0); NO_NEW_ENTRY_AFTER = dt_time(17, 0)
@@ -293,6 +293,7 @@ def compute_rsi_ema_stop(df, signal_bar_time, entry_price, direction):
 async def track_kosan(sym, df5, df_1h):
     trade = KOSAN_AT_TRADES[sym]; long = trade["direction"] == "LONG"; ids = trade.get("msg_ids")
     new = df5[df5.index > trade["last_bar"]]; closed = False; changed = False
+    
     for ts, bar in new.iterrows():
         hi, lo, op = float(bar['high']), float(bar['low']), float(bar['open']); trade["last_bar"] = ts; changed = True
         sl_hit = lo <= trade["sl"] if long else hi >= trade["sl"]
@@ -301,36 +302,60 @@ async def track_kosan(sym, df5, df_1h):
             pnl = (exit_p - trade["avg_cost"]) / trade["avg_cost"] * 100 * (1 if long else -1)
             gap_txt = " (gap ile açılıştan)" if exit_p != trade["sl"] else ""
             reason = f"🛑 <b>STOP OLDU</b> ({exit_p:,.2f}){gap_txt}"; closed = True; break
+            
         if trade["status"] == "WAITING_2ND":
             ema = float(bar['ema50'])
             if (long and lo <= ema) or ((not long) and hi >= ema):
-                trade["entry2"] = ema; trade["avg_cost"] = (trade["entry1"] + ema) / 2
+                trade["entry2"] = ema
+                prev_alloc = trade["allocated_tl"]
+                add_alloc = prev_alloc / 2  # İlk girişin yarısı kadar ekleme
+                new_alloc = prev_alloc + add_alloc
+                new_avg = ((trade["avg_cost"] * prev_alloc) + (ema * add_alloc)) / new_alloc
+                
+                trade["avg_cost"] = round(new_avg, 4)
+                trade["allocated_tl"] = new_alloc
                 trade["sl"], trade["tp"] = calc_sl_tp(trade["avg_cost"], trade["direction"], trade["tp_pct"])
-                trade["status"] = "FULLY_ENTERED"; trade["allocated_tl"] = WHITE_PRIME_ALLOC if is_white(sym) else RED_PRIME_ALLOC; save_trades()
-                msg = (f"🔄 <b>{sym} - 2. GİRİŞ TETİKLENDİ ({trade['allocated_tl']:,.0f} TL)</b> 🔄\n"
+                trade["status"] = "FULLY_ENTERED"
+                save_trades()
+                msg = (f"🔄 <b>{sym} - 2. GİRİŞ TETİKLENDİ ({add_alloc:,.0f} TL Eklendi)</b> 🔄\n"
                        f"Fiyat 5M EMA 50'ye ({ema:,.2f}) değdi.\n\n"
                        f"💰 <b>Toplam Tutar:</b> {trade['allocated_tl']:,.0f} TL\n"
                        f"💰 <b>Yeni Ortalama Maliyet:</b> {trade['avg_cost']:,.2f}\n"
                        f"🛑 <b>Yeni Stop (SL %{SL_PCT}):</b> {trade['sl']:,.2f}\n"
                        f"🎯 <b>Yeni TP (%{trade['tp_pct']}):</b> {trade['tp']:,.2f}")
                 await send_all(msg, ids); continue
+                
         tp_hit = hi >= trade["tp"] if long else lo <= trade["tp"]
         if tp_hit:
             pnl = (trade["tp"] - trade["avg_cost"]) / trade["avg_cost"] * 100 * (1 if long else -1)
             reason = f"🎯 <b>TP VURULDU (TAM KÂR)</b> ({trade['tp']:,.2f})"; closed = True; break
+            
     if closed:
         msg = (f"🚨 <b>{sym} İŞLEM KAPANDI</b> 🚨\n{reason}\n📊 <b>K/Z (ort. maliyete göre):</b> %{pnl:+.2f}\nYeni sinyaller aranıyor.")
         await send_all(msg, ids); del KOSAN_AT_TRADES[sym]; save_trades()
         record_exit("TP" if "TP" in reason else "SL", trade["tp_pct"] if "TP" in reason else 0); return
-    if not trade.get("zb_exit_sent", False) and df_1h is not None:
+        
+    if df_1h is not None:
         df_1h_closed = closed_only(df_1h, "1h")
         if df_1h_closed is not None and len(df_1h_closed) > 20:
             rsi_series = get_rsi(df_1h_closed['close'], 8); last_idx = len(df_1h_closed) - 1
-            zb_exit = check_zeki_bey_series(rsi_series, last_idx, "SHORT" if long else "LONG", ZB_LOOKBACK, ZB_ORDER)
-            if zb_exit:
-                trade["zb_exit_sent"] = True
-                msg = f"🛑 <b>ZEKİ BEY ÇIKIŞ SİNYALİ - {sym}</b>\n1H RSI ters yöne kırıldı, pozisyon kapatılıyor."
-                await send_all(msg, ids); del KOSAN_AT_TRADES[sym]; save_trades(); record_exit("ZB_EXIT", trade["tp_pct"]); return
+            
+            # ZEKİ BEY TEYİDİ (Aynı yönlü kırılım)
+            if not trade.get("zb_teyit_sent", False):
+                if check_zeki_bey_series(rsi_series, last_idx, trade["direction"], ZB_LOOKBACK, ZB_ORDER):
+                    trade["zb_teyit_sent"] = True
+                    msg = f"🕵️‍♂️ <b>ZEKİ BEY TEYİDİ - {sym}</b>\n1H RSI {trade['direction']} yönlü tepe/dip kırılımı gerçekleşti. İşlem teyit edildi."
+                    await send_all(msg, ids)
+                    save_trades()
+                    
+            # ZEKİ BEY ERKEN ÇIKIŞ (Ters yönlü kırılım)
+            if not trade.get("zb_exit_sent", False):
+                opp_dir = "SHORT" if long else "LONG"
+                if check_zeki_bey_series(rsi_series, last_idx, opp_dir, ZB_LOOKBACK, ZB_ORDER):
+                    trade["zb_exit_sent"] = True
+                    msg = f"🛑 <b>ZEKİ BEY ERKEN ÇIKIŞ - {sym}</b>\n1H RSI ters yöne kırıldı, pozisyon kapatılıyor."
+                    await send_all(msg, ids); del KOSAN_AT_TRADES[sym]; save_trades(); record_exit("ZB_EXIT", trade["tp_pct"]); return
+                    
     if changed: save_trades()
 
 async def check_kosan_at(sym, xu_trend, df_1h_raw):
@@ -345,12 +370,8 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
             await track_kosan(sym, df_5m, df_1h_raw); return
             
         if df_1h_raw is None or len(df_1h_raw) < 20: return
+        df_1h = df_1h_raw.copy(); df_1h['rsi_1h'] = get_rsi(df_1h['close'], 14)
         
-        # --- 1H KAPANIŞ ŞARTI İPTAL EDİLDİ (İLK KODDAKİ GİBİ ANLIK 1H RSI) ---
-        df_1h = df_1h_raw.copy()
-        df_1h['rsi_1h'] = get_rsi(df_1h['close'], 14)
-        
-        # --- RED LIST İÇİN 15M RSI FİLTRESİ (YENİ EKLENDİ) ---
         df_15m = None
         if not is_white(sym):
             df_15m_raw = await fetch_ohlc_async(sym, "15m", limit=150)
@@ -359,7 +380,6 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
                 df_15m['rsi15_8'] = get_rsi(df_15m['close'], 8)
         
         df = pd.merge_asof(df_5m[['open', 'high', 'low', 'close', 'rsi', 'ema50']].sort_index(), df_1h[['rsi_1h']].sort_index(), left_index=True, right_index=True, direction='backward')
-        
         if df_15m is not None:
             df = pd.merge_asof(df.sort_index(), df_15m[['rsi15_8']].sort_index(), left_index=True, right_index=True, direction='backward')
         
@@ -376,7 +396,6 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
         long_cond = (prev['rsi'] <= KOSAN_LONG_LEVEL and curr['rsi'] > KOSAN_LONG_LEVEL and curr['close'] > curr['ema50'] and curr['rsi_1h'] > 50 and xu_trend == 1)
         short_cond = (prev['rsi'] >= KOSAN_SHORT_LEVEL and curr['rsi'] < KOSAN_SHORT_LEVEL and curr['close'] < curr['ema50'] and curr['rsi_1h'] < 50 and xu_trend == -1)
         
-        # --- HİBRİT FİLTRE UYGULAMASI (SADECE RED LIST) ---
         if not is_white(sym):
             long_cond = long_cond and (curr.get('rsi15_8', 0) > 60)
             short_cond = short_cond and (curr.get('rsi15_8', 100) < 40)
@@ -409,7 +428,7 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
                 msg += (f"\n\n🕵️‍♂️ <b>Zeki Bey Özel Sinyali!</b>\n1H RSI tepe/dip kırılımı gerçekleşti."); zeki_sent = True
         ids = await send_all(msg)
         KOSAN_LAST_SIGNAL[sym] = bar_time
-        KOSAN_AT_TRADES[sym] = {"symbol": sym, "direction": direction, "entry1": entry, "entry2": None, "avg_cost": entry, "sl": sl, "tp": tp, "tp_pct": tp_pct, "status": "WAITING_2ND", "zeki_sent": zeki_sent, "entry_time": datetime.now(TIMEZONE), "last_bar": bar_time, "msg_ids": ids, "allocated_tl": alloc_tl}
+        KOSAN_AT_TRADES[sym] = {"symbol": sym, "direction": direction, "entry1": entry, "entry2": None, "avg_cost": entry, "sl": sl, "tp": tp, "tp_pct": tp_pct, "status": "WAITING_2ND", "zeki_sent": zeki_sent, "zb_teyit_sent": False, "zb_exit_sent": False, "entry_time": datetime.now(TIMEZONE), "last_bar": bar_time, "msg_ids": ids, "allocated_tl": alloc_tl}
         save_trades(); KOSAN_DAILY_STATS["signals"] += 1; KOSAN_WEEKLY_STATS["signals"] += 1
     except Exception as e: logger.error(f"Koşan At hatası ({sym}): {e}")
 
@@ -455,7 +474,7 @@ async def check_rsi_ema_crossover(symbol, df_1h_raw):
            f"{emoji} <b>Giriş Onayı:</b> {direction} yönlü işlemler düşünülebilir.\n"
            f"⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag)} {lag} dk")
     ids = await send_all(msg)
-    RSI_EMA_TRADES[symbol] = {"symbol": symbol, "direction": direction, "entry": price, "sl": stop, "signal_bar_time": bar_time, "entry_time": now, "type": "RSI EMA", "zeki_sent": False, "msg_ids": ids}
+    RSI_EMA_TRADES[symbol] = {"symbol": symbol, "direction": direction, "entry": price, "sl": stop, "signal_bar_time": bar_time, "entry_time": now, "type": "RSI EMA", "zeki_sent": False, "zb_teyit_sent": False, "msg_ids": ids}
     save_trades()
 
 async def track_rsi_ema_trades(df_1h_cache):
@@ -481,14 +500,24 @@ async def track_rsi_ema_trades(df_1h_cache):
                     if sl_hit:
                         del RSI_EMA_TRADES[sym]; save_trades()
                         await send_all(f"🛑 <b>{sym} - RSI EMA STOP OLDU</b>\nFiyat {trade['sl']:,.2f} seviyesine değdi.\nİşlem kapatıldı.", ids); continue
-            if not trade.get("zeki_sent", False) and df_1h is not None:
-                df_1h_closed = closed_only(df_1h, "1h")
-                if df_1h_closed is not None and len(df_1h_closed) > 20:
-                    rsi_series = get_rsi(df_1h_closed['close'], 8); last_idx = len(df_1h_closed) - 1
-                    zb_exit = check_zeki_bey_series(rsi_series, last_idx, "SHORT" if trade["direction"] == "LONG" else "LONG", ZB_LOOKBACK, ZB_ORDER)
-                    if zb_exit:
+            
+            if df_1h is not None and df_1h_closed is not None and len(df_1h_closed) > 20:
+                rsi_series = get_rsi(df_1h_closed['close'], 8); last_idx = len(df_1h_closed) - 1
+                
+                # ZEKİ BEY TEYİDİ
+                if not trade.get("zb_teyit_sent", False):
+                    if check_zeki_bey_series(rsi_series, last_idx, trade["direction"], ZB_LOOKBACK, ZB_ORDER):
+                        trade["zb_teyit_sent"] = True
+                        msg = f"🕵️‍♂️ <b>ZEKİ BEY TEYİDİ - {sym}</b>\n1H RSI {trade['direction']} yönlü tepe/dip kırılımı gerçekleşti. İşlem teyit edildi."
+                        await send_all(msg, ids)
+                        save_trades()
+                        
+                # ZEKİ BEY ERKEN ÇIKIŞ
+                if not trade.get("zeki_sent", False):
+                    opp_dir = "SHORT" if trade["direction"] == "LONG" else "LONG"
+                    if check_zeki_bey_series(rsi_series, last_idx, opp_dir, ZB_LOOKBACK, ZB_ORDER):
                         trade["zeki_sent"] = True; save_trades()
-                        z_msg = (f"🕵️‍♂️ <b>ZEKİ BEY ÇIKIŞ SİNYALİ!</b>\n\n{sym} {trade['direction']} işlemi devam ederken:\n1H RSI ters yöne kırıldı.")
+                        z_msg = (f"🕵️‍♂️ <b>ZEKİ BEY ERKEN ÇIKIŞ!</b>\n\n{sym} {trade['direction']} işlemi devam ederken:\n1H RSI ters yöne kırıldı.")
                         await send_all(z_msg, ids)
         except Exception as e: logger.error(f"RSI EMA Track hatası ({sym}): {e}")
 
@@ -604,12 +633,12 @@ async def cmd_pozlar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         cur_p = LATEST_PRICES.get(sym, pos["avg_cost"]); is_long = pos["direction"] == "LONG"
         pnl_pct = ((cur_p - pos["avg_cost"]) / pos["avg_cost"]) * 100.0 * (1.0 if is_long else -1.0)
         icon = "🟢" if pnl_pct >= 0 else "🔴"
-        lines.append(f"{icon} <b>{sym}</b> ({badge(sym)}) | <b>{pos['direction']}</b>\n   • Ort. Maliyet: <code>{pos['avg_cost']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>\n   • Tutar: <code>{pos['allocated_tl']:,.0f} TL</code> | SL: <code>{pos['sl']:.2f}</code> | TP: <code>%{pos['tp_pct']:.1f}</code> ({pos['tp']:.2f})")
+        lines.append(f"{icon} <b>{sym}</b> ({badge(sym)}) | <b>{pos['direction']}</b> [KOŞAN AT]\n   • Ort. Maliyet: <code>{pos['avg_cost']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>\n   • Tutar: <code>{pos['allocated_tl']:,.0f} TL</code> | SL: <code>{pos['sl']:.2f}</code> | TP: <code>%{pos['tp_pct']:.1f}</code> ({pos['tp']:.2f})")
     for sym, pos in list(RSI_EMA_TRADES.items()):
         cur_p = LATEST_PRICES.get(sym, pos["entry"]); is_long = pos["direction"] == "LONG"
         pnl_pct = ((cur_p - pos["entry"]) / pos["entry"]) * 100.0 * (1.0 if is_long else -1.0)
         icon = "🟢" if pnl_pct >= 0 else "🔴"
-        lines.append(f"{icon} <b>{sym}</b> ({badge(sym)}) | <b>{pos['direction']}</b>\n   • Giriş: <code>{pos['entry']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>\n   • SL: <code>{pos['sl']:.2f}</code>")
+        lines.append(f"{icon} <b>{sym}</b> ({badge(sym)}) | <b>{pos['direction']}</b> [RSI EMA]\n   • Giriş: <code>{pos['entry']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>\n   • SL: <code>{pos['sl']:.2f}</code>")
     await update.message.reply_text("\n\n".join(lines), parse_mode="HTML")
 
 async def cmd_tara(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -687,18 +716,28 @@ async def tick(force=False):
 
 async def clear_daily_state():
     async with STATE_LOCK:
+        summary_msg = (f"📊 <b>GÜNLÜK İŞLEM ÖZETİ</b>\n"
+                       f"• Koşan At Sinyal: <b>{KOSAN_DAILY_STATS['signals']}</b>\n"
+                       f"• %4 TP: <b>{KOSAN_DAILY_STATS['tp_4']}</b>\n"
+                       f"• %3 TP: <b>{KOSAN_DAILY_STATS['tp_3']}</b>\n"
+                       f"• %2.5 TP: <b>{KOSAN_DAILY_STATS['tp_2_5']}</b>\n"
+                       f"• %1.5 TP: <b>{KOSAN_DAILY_STATS['tp_1_5']}</b>\n"
+                       f"• SL: <b>{KOSAN_DAILY_STATS['sl']}</b>\n"
+                       f"• ZB Çıkış: <b>{KOSAN_DAILY_STATS['zb_exit']}</b>")
+        await send_all(summary_msg)
+        
         DATA_CACHE.clear(); LATEST_PRICES.clear()
         KOSAN_DAILY_STATS.update({"signals": 0, "tp_4": 0, "tp_3": 0, "tp_2_5": 0, "tp_1_5": 0, "sl": 0, "zb_exit": 0})
         save_trades()
-    await send_all("🧹 <b>Gün Sonu Temizliği</b>\nSaat 18:30 oldu. Günlük istatistikler sıfırlandı. Açık pozisyonlar korunuyor.")
+        # Açık pozisyonlar (KOSAN_AT_TRADES ve RSI_EMA_TRADES) BİLEREK SİLİNMİYOR. Ertesi gün devam edecek.
+    await send_all("🧹 <b>Gün Sonu Temizliği</b>\nSaat 18:30 oldu. Günlük istatistikler sıfırlandı. <b>Açık pozisyonlar korunuyor ve yarın takip edilecek.</b>")
 
 async def market_open_scan():
-    now = datetime.now(TIMEZONE)
-    if not is_trading_day(now.date()): return
-    await send_all("🟢 Seans açıldı, tarama ve takip başladı.")
+    await send_all("🟢 09:50 - Çalışmaya hazır, borsanın açılması bekleniyor...")
     await send_all("Sistem her zaman senin için çalışıyor, kazanmak istiyorsan sadece sistemle kal... MZB 😉")
-    if is_market_open(now):
-        await tick(force=True)
+
+async def task_morning_summary(): await generate_market_summary("Sabah")
+async def task_afternoon_summary(): await generate_market_summary("Öğleden Sonra")
 
 bot_app = Application.builder().token(BOT_TOKEN).build()
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -725,13 +764,24 @@ async def main():
     load_trades(); threading.Thread(target=run_dummy_server, daemon=True).start()
     await bot_app.initialize(); await bot_app.start(); await bot_app.updater.start_polling(drop_pending_updates=True)
     sched = AsyncIOScheduler(timezone=TIMEZONE, job_defaults={'coalesce': True, 'max_instances': 1, 'misfire_grace_time': 60})
+    
+    # 09:50 mesajları ve 09:56'da başlayan ilk tarama
     sched.add_job(market_open_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=50, timezone=TIMEZONE))
+    sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour=9, minute=56, timezone=TIMEZONE))
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour="10-17", minute="1-59/5", timezone=TIMEZONE))
     sched.add_job(tick, CronTrigger(day_of_week="mon-fri", hour=18, minute=10, timezone=TIMEZONE), kwargs={'force': True})
+    
+    # Gün sonu temizlik (Açık pozisyonları silmez, özet atar)
     sched.add_job(clear_daily_state, CronTrigger(day_of_week="mon-fri", hour=18, minute=30, timezone=TIMEZONE))
-    sched.add_job(weekly_summary_and_cleanup, CronTrigger(day_of_week="fri", hour=18, minute=15, timezone=TIMEZONE))
+    # Haftalık genel temizlik (Cuma günü her şeyi siler)
+    sched.add_job(weekly_summary_and_cleanup, CronTrigger(day_of_week="fri", hour=18, minute=40, timezone=TIMEZONE))
+    
+    # Piyasa Özetleri
+    sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=15, timezone=TIMEZONE))
+    sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
+    
     sched.start()
-    logger.info("✅ Bot çalışıyor. Hibrit filtre (Sadece Red List'e 15m RSI) entegre edildi.")
+    logger.info("✅ Bot çalışıyor. Gerekli düzeltmeler uygulandı.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
