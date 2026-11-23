@@ -345,8 +345,25 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
             await track_kosan(sym, df_5m, df_1h_raw); return
             
         if df_1h_raw is None or len(df_1h_raw) < 20: return
-        df_1h = df_1h_raw.copy(); df_1h['rsi_1h'] = get_rsi(df_1h['close'], 14)
-        df = pd.merge_asof(df_5m[['open', 'high', 'low', 'close', 'rsi', 'ema50']].sort_index(), df_1h[['rsi_1h']].sort_index(), left_index=True, right_index=True, direction='backward').dropna()
+        
+        # --- 1H KAPANIŞ ŞARTI İPTAL EDİLDİ (İLK KODDAKİ GİBİ ANLIK 1H RSI) ---
+        df_1h = df_1h_raw.copy()
+        df_1h['rsi_1h'] = get_rsi(df_1h['close'], 14)
+        
+        # --- RED LIST İÇİN 15M RSI FİLTRESİ (YENİ EKLENDİ) ---
+        df_15m = None
+        if not is_white(sym):
+            df_15m_raw = await fetch_ohlc_async(sym, "15m", limit=150)
+            if df_15m_raw is not None and not df_15m_raw.empty:
+                df_15m = df_15m_raw.copy()
+                df_15m['rsi15_8'] = get_rsi(df_15m['close'], 8)
+        
+        df = pd.merge_asof(df_5m[['open', 'high', 'low', 'close', 'rsi', 'ema50']].sort_index(), df_1h[['rsi_1h']].sort_index(), left_index=True, right_index=True, direction='backward')
+        
+        if df_15m is not None:
+            df = pd.merge_asof(df.sort_index(), df_15m[['rsi15_8']].sort_index(), left_index=True, right_index=True, direction='backward')
+        
+        df = df.dropna()
         if len(df) < 2: return
         bar_time = df.index[-1]
         if KOSAN_LAST_SIGNAL.get(sym) == bar_time: return
@@ -355,25 +372,35 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
         now_t = datetime.now(TIMEZONE).time()
         if not can_enter_now(now_t): return
         curr, prev = df.iloc[-1], df.iloc[-2]
+        
         long_cond = (prev['rsi'] <= KOSAN_LONG_LEVEL and curr['rsi'] > KOSAN_LONG_LEVEL and curr['close'] > curr['ema50'] and curr['rsi_1h'] > 50 and xu_trend == 1)
         short_cond = (prev['rsi'] >= KOSAN_SHORT_LEVEL and curr['rsi'] < KOSAN_SHORT_LEVEL and curr['close'] < curr['ema50'] and curr['rsi_1h'] < 50 and xu_trend == -1)
+        
+        # --- HİBRİT FİLTRE UYGULAMASI (SADECE RED LIST) ---
+        if not is_white(sym):
+            long_cond = long_cond and (curr.get('rsi15_8', 0) > 60)
+            short_cond = short_cond and (curr.get('rsi15_8', 100) < 40)
+            
         if not (long_cond or short_cond): return
         direction = "LONG" if long_cond else "SHORT"; entry = float(curr['close'])
         LATEST_PRICES[sym] = entry
         tp_pct = WHITE_BASE_TP_PCT if is_white(sym) else RED_BASE_TP_PCT
         alloc_tl, saat_etiket = get_alloc_and_label(sym, now_t); sl, tp = calc_sl_tp(entry, direction, tp_pct)
         xu_text = "📈 <b>Yukarı</b>" if xu_trend == 1 else "📉 <b>Aşağı</b>"; dir_emoji = "📈" if long_cond else "📉"
+        
         msg = (f"🐎 <b>KOŞAN AT SİNYALİ ({direction}) - {sym} [5M]</b> 🐎\n"
                f"{badge(sym)} | <i>{saat_etiket}</i>\n"
                f"✅ <b>1. Giriş: {alloc_tl:,.0f} TL</b>\n\n"
                f"{dir_emoji} <b>Yön:</b> {direction}\n"
                f"📊 <b>1H RSI(14):</b> {curr['rsi_1h']:.1f} | <b>5M RSI(8):</b> {curr['rsi']:.1f}\n"
-               f"🌍 <b>Endeks (XU30):</b> {xu_text}\n\n"
+               + (f"⏱ <b>15M RSI(8):</b> {curr['rsi15_8']:.1f} (Red List Filtresi)\n" if not is_white(sym) else "")
+               + f"🌍 <b>Endeks (XU30):</b> {xu_text}\n\n"
                f"💰 <b>1. Giriş (Sinyal):</b> {entry:,.2f}\n"
                f"⏳ <b>2. Giriş Bekleniyor:</b> 5M EMA 50 ({curr['ema50']:,.2f})\n"
                f"🛑 <b>İlk Stop (SL %{SL_PCT}):</b> {sl:,.2f}\n"
                f"🎯 <b>TP (%{tp_pct}):</b> {tp:,.2f}\n\n"
                f"⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag_dk)} {lag_dk} dk")
+        
         zeki_sent = False; df_1h_closed = closed_only(df_1h_raw, "1h")
         if df_1h_closed is not None and len(df_1h_closed) > 20:
             rsi_series = get_rsi(df_1h_closed['close'], 8); last_idx = len(df_1h_closed) - 1
@@ -702,7 +729,7 @@ async def main():
     sched.add_job(clear_daily_state, CronTrigger(day_of_week="mon-fri", hour=18, minute=30, timezone=TIMEZONE))
     sched.add_job(weekly_summary_and_cleanup, CronTrigger(day_of_week="fri", hour=18, minute=15, timezone=TIMEZONE))
     sched.start()
-    logger.info("✅ Bot çalışıyor. Koşan At ve RSI EMA entegre edildi.")
+    logger.info("✅ Bot çalışıyor. Hibrit filtre (Sadece Red List'e 15m RSI) entegre edildi.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
