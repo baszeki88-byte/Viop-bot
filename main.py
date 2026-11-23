@@ -693,10 +693,12 @@ async def clear_daily_state():
     await send_all("🧹 <b>Gün Sonu Temizliği</b>\nSaat 18:30 oldu. Günlük istatistikler sıfırlandı. Açık pozisyonlar korunuyor.")
 
 async def market_open_scan():
-    if not is_market_open(): return
+    now = datetime.now(TIMEZONE)
+    if not is_trading_day(now.date()): return
     await send_all("🟢 Seans açıldı, tarama ve takip başladı.")
     await send_all("Sistem her zaman senin için çalışıyor, kazanmak istiyorsan sadece sistemle kal... MZB 😉")
-    await tick(force=True)
+    if is_market_open(now):
+        await tick(force=True)
 
 bot_app = Application.builder().token(BOT_TOKEN).build()
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
