@@ -112,6 +112,10 @@ def get_lag_emoji(minutes):
     if minutes <= 5: return "🟢"
     elif minutes <= 15: return "🟡"
     return "🔴"
+def elapsed_text(entry_time):
+    try: mins = int((datetime.now(TIMEZONE) - entry_time).total_seconds() // 60)
+    except Exception: return "?"
+    return f"{mins} dk" if mins < 60 else f"{mins // 60} sa {mins % 60} dk"
 def closed_only(df, tf):
     if df is None or df.empty: return df
     now = datetime.now(TIMEZONE); close_t = df.index + pd.Timedelta(minutes=TF_MINUTES[tf]); mask = close_t <= now
@@ -351,8 +355,11 @@ async def track_kosan(sym, df5, df_1h):
                 opp_dir = "SHORT" if long else "LONG"
                 if check_zeki_bey_series(rsi_series, last_idx, opp_dir, ZB_LOOKBACK, ZB_ORDER):
                     trade["zb_exit_sent"] = True
-                    msg = f"🛑 <b>ZEKİ BEY ERKEN ÇIKIŞ - {sym}</b>\n1H RSI ters yöne kırıldı, pozisyon kapatılıyor."
-                    await send_all(msg, ids); del KOSAN_AT_TRADES[sym]; save_trades(); record_exit("ZB_EXIT", trade["tp_pct"]); return
+                    msg = (f"⚠️ <b>DİKKAT - {sym} İŞLEMİNİ KONTROL ET</b>\n"
+                           f"1H RSI ters yöne kırıldı ({trade['direction']} işlem açık).\n"
+                           f"⏱ <b>İlk girişten bu yana:</b> {elapsed_text(trade['entry_time'])}\n"
+                           f"Pozisyon kapatılmadı, SL/TP takibi sürüyor.")
+                    await send_all(msg, ids); save_trades()
                     
     if changed: save_trades()
 
@@ -513,7 +520,9 @@ async def track_rsi_ema_trades(df_1h_cache):
                     opp_dir = "SHORT" if trade["direction"] == "LONG" else "LONG"
                     if check_zeki_bey_series(rsi_series, last_idx, opp_dir, ZB_LOOKBACK, ZB_ORDER):
                         trade["zeki_sent"] = True; save_trades()
-                        z_msg = (f"🕵️‍♂️ <b>ZEKİ BEY ERKEN ÇIKIŞ!</b>\n\n{sym} {trade['direction']} işlemi devam ederken:\n1H RSI ters yöne kırıldı.")
+                        z_msg = (f"⚠️ <b>DİKKAT - {sym} İŞLEMİNİ KONTROL ET</b>\n"
+                                 f"{trade['direction']} işlemi açıkken 1H RSI ters yöne kırıldı.\n"
+                                 f"⏱ <b>İlk girişten bu yana:</b> {elapsed_text(trade['entry_time'])}")
                         await send_all(z_msg, ids)
         except Exception as e: logger.error(f"RSI EMA Track hatası ({sym}): {e}")
 
