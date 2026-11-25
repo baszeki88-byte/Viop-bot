@@ -64,8 +64,8 @@ TR_HOLIDAYS = holidays.Turkey(years=range(2024, 2031))
 # ==========================================
 # WHITE / RED LIST
 # ==========================================
-WHITE_LIST = ["EKGYO", "MGROS", "TRALT", "THYAO", "TRMET", "PGSUS", "KRDMD", "ODAS", "ALARK", "VESTL", "AKSEN", "TOASO", "ARCLK", "TTKOM", "SISE", "FROTO", "TKFEN", "HALKB", "GUBRF", "ASELS", "ASTOR", "PETKM", "KCHOL", "ISCTR"]
-RED_LIST = ["EREGL", "SASA", "SAHOL", "AEFES", "AKBNK", "TAVHL", "GARAN", "SOKM", "ULKER", "BIMAS", "DOHOL", "TUPRS", "ENKAI", "XU030", "OYAKC", "BRSAN", "CIMSA", "VAKBN", "ENJSA", "TCELL", "YKBNK", "DOAS"]
+WHITE_LIST = ["EKGYO1!", "MGROS1!", "TRALT1!", "THYAO1!", "TRMET1!", "PGSUS1!", "KRDMD1!", "ODAS1!", "ALARK1!", "VESTL1!", "AKSEN1!", "TOASO1!", "ARCLK1!", "TTKOM1!", "SISE1!", "FROTO1!", "TKFEN1!", "HALKB1!", "GUBRF1!", "ASELS1!", "ASTOR1!", "PETKM1!", "KCHOL1!", "ISCTR1!"]
+RED_LIST = ["EREGL1!", "SASA1!", "SAHOL1!", "AEFES1!", "AKBNK1!", "TAVHL1!", "GARAN1!", "SOKM1!", "ULKER1!", "BIMAS1!", "DOHOL1!", "TUPRS1!", "ENKAI1!", "XU030", "OYAKC1!", "BRSAN1!", "CIMSA1!", "VAKBN1!", "ENJSA1!", "TCELL1!", "YKBNK1!", "DOAS1!"]
 ALL_SYMBOLS = WHITE_LIST + RED_LIST
 BIST_STOCKS = [s for s in ALL_SYMBOLS if not s.startswith("XU")]
 
