@@ -3,7 +3,7 @@ import asyncio
 import threading
 import logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 import time as time_module
 from concurrent.futures import ThreadPoolExecutor
 
@@ -93,6 +93,8 @@ KOSAN_DAILY_STATS = {"date": "", "signals": 0, "tp_4": 0, "tp_3": 0, "tp_2_5": 0
 KOSAN_WEEKLY_STATS = {"week_key": "", "signals": 0, "tp_4": 0, "tp_3": 0, "tp_2_5": 0, "tp_1_5": 0, "sl": 0, "zb_exit": 0}
 STATE_LOCK = asyncio.Lock(); is_scanning = False; background_tasks = set()
 DATA_CACHE = {}; CACHE_TTL = 60; EXECUTOR = ThreadPoolExecutor(max_workers=20); FETCH_SEM = asyncio.Semaphore(4)
+
+SPOT_TRACKERS = {} # YENİ: Spot Teyit Takip Sözlüğü
 
 # ==========================================
 # YARDIMCI FONKSİYONLAR
@@ -412,6 +414,8 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
         alloc_tl, saat_etiket = get_alloc_and_label(sym, now_t); sl, tp = calc_sl_tp(entry, direction, tp_pct)
         xu_text = "📈 <b>Yukarı</b>" if xu_trend == 1 else "📉 <b>Aşağı</b>"; dir_emoji = "📈" if long_cond else "📉"
         
+        scan_time_str = datetime.now(TIMEZONE).strftime('%H:%M')
+        
         msg = (f"🐎 <b>KOŞAN AT SİNYALİ ({direction}) - {sym} [5M]</b> 🐎\n"
                f"{badge(sym)} | <i>{saat_etiket}</i>\n"
                f"✅ <b>1. Giriş: {alloc_tl:,.0f} TL</b>\n\n"
@@ -423,7 +427,8 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
                f"⏳ <b>2. Giriş Bekleniyor:</b> 5M EMA 50 ({curr['ema50']:,.2f})\n"
                f"🛑 <b>İlk Stop (SL %{SL_PCT}):</b> {sl:,.2f}\n"
                f"🎯 <b>TP (%{tp_pct}):</b> {tp:,.2f}\n\n"
-               f"⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag_dk)} {lag_dk} dk")
+               f"⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag_dk)} {lag_dk} dk\n"
+               f"🕒 <b>Bu sinyal {scan_time_str} taramasında oluştu.</b>")
         
         zeki_sent = False; df_1h_closed = closed_only(df_1h_raw, "1h")
         if df_1h_closed is not None and len(df_1h_closed) > 20:
@@ -435,7 +440,72 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
         KOSAN_LAST_SIGNAL[sym] = bar_time
         KOSAN_AT_TRADES[sym] = {"symbol": sym, "direction": direction, "entry1": entry, "entry2": None, "avg_cost": entry, "sl": sl, "tp": tp, "tp_pct": tp_pct, "status": "WAITING_2ND", "zeki_sent": zeki_sent, "zb_teyit_sent": False, "zb_exit_sent": False, "entry_time": datetime.now(TIMEZONE), "last_bar": bar_time, "msg_ids": ids, "allocated_tl": alloc_tl}
         save_trades(); KOSAN_DAILY_STATS["signals"] += 1; KOSAN_WEEKLY_STATS["signals"] += 1
+        
+        # --- YENİ: SPOT TEYİT TAKİBİ BAŞLAT ---
+        if sym.endswith("1!"):
+            spot_sym = sym.replace("1!", "")
+            expire_time = datetime.now(TIMEZONE) + timedelta(minutes=15)
+            SPOT_TRACKERS[spot_sym] = {
+                "direction": direction,
+                "msg_ids": ids,
+                "expire_time": expire_time
+            }
+            logger.info(f"⏳ {spot_sym} için 15 dakikalık Spot Teyit takibi başlatıldı.")
+            
     except Exception as e: logger.error(f"Koşan At hatası ({sym}): {e}")
+
+# --- YENİ: SPOT TEYİT DÖNGÜSÜ ---
+async def check_spot_trackers(xu_trend):
+    if not SPOT_TRACKERS: return
+    now = datetime.now(TIMEZONE)
+    
+    for spot_sym, tracker in list(SPOT_TRACKERS.items()):
+        direction = tracker["direction"]
+        msg_ids = tracker["msg_ids"]
+        
+        if now >= tracker["expire_time"]:
+            msg = f"⚠️ <b>SPOT TEYİDİ ALINAMADI - {spot_sym}</b>\n15 dakika geçti ancak Spot piyasada sinyal oluşmadı."
+            await send_all(msg, msg_ids)
+            del SPOT_TRACKERS[spot_sym]
+            continue
+            
+        df_5m = await fetch_ohlc_async(spot_sym, "5m", limit=150); df_5m = closed_only(df_5m, "5m")
+        df_1h_raw = await fetch_ohlc_async(spot_sym, "1h", limit=150)
+        if df_5m is None or df_1h_raw is None or len(df_5m) < 60 or len(df_1h_raw) < 20: continue
+        
+        df_5m = df_5m.copy(); df_5m['rsi'] = get_rsi(df_5m['close'], KOSAN_RSI_PERIOD); df_5m['ema50'] = df_5m['close'].ewm(span=50, adjust=False).mean()
+        df_1h = df_1h_raw.copy(); df_1h['rsi_1h'] = get_rsi(df_1h['close'], 14)
+        
+        df_15m = None
+        if spot_sym not in WHITE_LIST and (spot_sym+"1!") not in WHITE_LIST:
+            df_15m_raw = await fetch_ohlc_async(spot_sym, "15m", limit=150)
+            if df_15m_raw is not None and not df_15m_raw.empty:
+                df_15m = df_15m_raw.copy(); df_15m['rsi15_8'] = get_rsi(df_15m['close'], 8)
+                
+        df = pd.merge_asof(df_5m[['open', 'high', 'low', 'close', 'rsi', 'ema50']].sort_index(), df_1h[['rsi_1h']].sort_index(), left_index=True, right_index=True, direction='backward')
+        if df_15m is not None:
+            df = pd.merge_asof(df.sort_index(), df_15m[['rsi15_8']].sort_index(), left_index=True, right_index=True, direction='backward')
+            
+        df = df.dropna()
+        if len(df) < 2: continue
+        curr, prev = df.iloc[-1], df.iloc[-2]
+        
+        long_cond = (prev['rsi'] <= KOSAN_LONG_LEVEL and curr['rsi'] > KOSAN_LONG_LEVEL and curr['close'] > curr['ema50'] and curr['rsi_1h'] > 50 and xu_trend == 1)
+        short_cond = (prev['rsi'] >= KOSAN_SHORT_LEVEL and curr['rsi'] < KOSAN_SHORT_LEVEL and curr['close'] < curr['ema50'] and curr['rsi_1h'] < 50 and xu_trend == -1)
+        
+        is_white_spot = spot_sym in WHITE_LIST or (spot_sym+"1!") in WHITE_LIST
+        if not is_white_spot:
+            long_cond = long_cond and (curr.get('rsi15_8', 0) > 60)
+            short_cond = short_cond and (curr.get('rsi15_8', 100) < 40)
+            
+        success = False
+        if direction == "LONG" and long_cond: success = True
+        elif direction == "SHORT" and short_cond: success = True
+        
+        if success:
+            msg = f"✅ <b>SPOT TEYİDİ ALINDI - {spot_sym}</b>\nSpot piyasada da aynı yönlü ({direction}) sinyal onaylandı."
+            await send_all(msg, msg_ids)
+            del SPOT_TRACKERS[spot_sym]
 
 async def check_rsi_ema_crossover(symbol, df_1h_raw):
     if symbol in RSI_EMA_TRADES: return
@@ -468,6 +538,8 @@ async def check_rsi_ema_crossover(symbol, df_1h_raw):
     risk_pct = abs(price - stop) / price * 100
     if direction == "LONG": emoji = "🟢"; stop_txt = f"Sinyal mumu + sonraki {RSI_X_POST_BARS} mum (max %{RSI_X_MAX_STOP_PCT} tavan)"
     else: emoji = "🔴"; stop_txt = f"Sinyal mumu + sonraki {RSI_X_POST_BARS} mum (max %{RSI_X_MAX_STOP_PCT} tavan)"
+    
+    scan_time_str = datetime.now(TIMEZONE).strftime('%H:%M')
     msg = (f"⚡ <b>RSI EMA KESİŞİMİ ({direction}) - {symbol} [1H]</b> ⚡\n\n"
            f"RSI({RSI_X_PERIOD}) ve EMA({RSI_X_EMA_SPAN}) <b>{direction}</b> yönlü kesişti!\n"
            f"<i>(Önceki aşırı bölge: {RSI_X_LOW if direction == 'LONG' else RSI_X_HIGH} altı/üstü)</i>\n\n"
@@ -477,7 +549,8 @@ async def check_rsi_ema_crossover(symbol, df_1h_raw):
            f"🛑 <b>Stop:</b> {stop:,.2f} (%{risk_pct:.2f} uzaklık)\n"
            f"<i>{stop_txt}</i>\n\n"
            f"{emoji} <b>Giriş Onayı:</b> {direction} yönlü işlemler düşünülebilir.\n"
-           f"⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag)} {lag} dk")
+           f"⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag)} {lag} dk\n"
+           f"🕒 <b>Bu sinyal {scan_time_str} taramasında oluştu.</b>")
     ids = await send_all(msg)
     RSI_EMA_TRADES[symbol] = {"symbol": symbol, "direction": direction, "entry": price, "sl": stop, "signal_bar_time": bar_time, "entry_time": now, "type": "RSI EMA", "zeki_sent": False, "zb_teyit_sent": False, "msg_ids": ids}
     save_trades()
@@ -776,7 +849,10 @@ async def tick(force=False):
                         await check_kosan_at(sym, xu_trend, df_1h); return True
                     except Exception as e: logger.error(f"Koşan At tarama hatası ({sym}): {e}"); return False
             return await asyncio.gather(*[work_kosan(s) for s in ALL_SYMBOLS])
-        rsi_res, kosan_res = await asyncio.gather(run_rsi_ema_branch(), run_kosan_branch())
+        
+        # YENİ: Spot Teyit Döngüsünü de aynı anda çalıştır
+        rsi_res, kosan_res, _ = await asyncio.gather(run_rsi_ema_branch(), run_kosan_branch(), check_spot_trackers(xu_trend))
+        
         failed = max(rsi_res.count(False), kosan_res.count(False))
         if failed >= 15: await send_admin_alert(f"⚠️ <b>Tarama Sorunu</b>\n{failed}/{len(ALL_SYMBOLS)} hisse için veri alınamadı.", "scan_fail")
     finally: is_scanning = False
