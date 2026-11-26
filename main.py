@@ -3,9 +3,13 @@ import asyncio
 import threading
 import logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from datetime import datetime, time as dt_time, timedelta
+from datetime import datetime, time as dt_time, timedelta, timezone
 import time as time_module
 from concurrent.futures import ThreadPoolExecutor
+import re, html, hashlib
+import urllib.request, urllib.parse
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 
 import pandas as pd
 import borsapy as bp
@@ -64,8 +68,8 @@ TR_HOLIDAYS = holidays.Turkey(years=range(2024, 2031))
 # ==========================================
 # WHITE / RED LIST
 # ==========================================
-WHITE_LIST = ["EKGYO1!", "MGROS1!", "TRALT1!", "THYAO1!", "TRMET1!", "PGSUS1!", "KRDMD1!", "ODAS1!", "ALARK1!", "VESTL1!", "AKSEN1!", "TOASO1!", "ARCLK1!", "TTKOM1!", "SISE1!", "FROTO1!", "TKFEN1!", "HALKB1!", "GUBRF1!", "ASELS1!", "ASTOR1!", "PETKM1!", "KCHOL1!", "ISCTR1!"]
-RED_LIST = ["EREGL1!", "SASA1!", "SAHOL1!", "AEFES1!", "AKBNK1!", "TAVHL1!", "GARAN1!", "SOKM1!", "ULKER1!", "BIMAS1!", "DOHOL1!", "TUPRS1!", "ENKAI1!", "XU030", "OYAKC1!", "BRSAN1!", "CIMSA1!", "VAKBN1!", "ENJSA1!", "TCELL1!", "YKBNK1!", "DOAS1!"]
+WHITE_LIST = ["EKGYO", "MGROS", "TRALT", "THYAO", "TRMET", "PGSUS", "KRDMD", "ODAS", "ALARK", "VESTL", "AKSEN", "TOASO", "ARCLK", "TTKOM", "SISE", "FROTO", "TKFEN", "HALKB", "GUBRF", "ASELS", "ASTOR", "PETKM", "KCHOL", "ISCTR"]
+RED_LIST = ["EREGL", "SASA", "SAHOL", "AEFES", "AKBNK", "TAVHL", "GARAN", "SOKM", "ULKER", "BIMAS", "DOHOL", "TUPRS", "ENKAI", "XU030", "OYAKC", "BRSAN", "CIMSA", "VAKBN", "ENJSA", "TCELL", "YKBNK", "DOAS"]
 ALL_SYMBOLS = WHITE_LIST + RED_LIST
 BIST_STOCKS = [s for s in ALL_SYMBOLS if not s.startswith("XU")]
 
@@ -94,8 +98,6 @@ KOSAN_WEEKLY_STATS = {"week_key": "", "signals": 0, "tp_4": 0, "tp_3": 0, "tp_2_
 STATE_LOCK = asyncio.Lock(); is_scanning = False; background_tasks = set()
 DATA_CACHE = {}; CACHE_TTL = 60; EXECUTOR = ThreadPoolExecutor(max_workers=20); FETCH_SEM = asyncio.Semaphore(4)
 
-SPOT_TRACKERS = {} # YENİ: Spot Teyit Takip Sözlüğü
-
 # ==========================================
 # YARDIMCI FONKSİYONLAR
 # ==========================================
@@ -118,6 +120,12 @@ def elapsed_text(entry_time):
     try: mins = int((datetime.now(TIMEZONE) - entry_time).total_seconds() // 60)
     except Exception: return "?"
     return f"{mins} dk" if mins < 60 else f"{mins // 60} sa {mins % 60} dk"
+SCAN_TIME = None
+def scan_txt():
+    return (SCAN_TIME or datetime.now(TIMEZONE)).strftime("%H:%M")
+def bar_txt(bar_time, tf):
+    try: return f"{bar_time.strftime('%H:%M')}→{(bar_time + pd.Timedelta(minutes=TF_MINUTES[tf])).strftime('%H:%M')}"
+    except Exception: return "?"
 def closed_only(df, tf):
     if df is None or df.empty: return df
     now = datetime.now(TIMEZONE); close_t = df.index + pd.Timedelta(minutes=TF_MINUTES[tf]); mask = close_t <= now
@@ -337,7 +345,7 @@ async def track_kosan(sym, df5, df_1h):
             reason = f"🎯 <b>TP VURULDU (TAM KÂR)</b> ({trade['tp']:,.2f})"; closed = True; break
             
     if closed:
-        msg = (f"🚨 <b>{sym} İŞLEM KAPANDI</b> 🚨\n{reason}\n📊 <b>K/Z (ort. maliyete göre):</b> %{pnl:+.2f}\nYeni sinyaller aranıyor.")
+        msg = (f"🚨 <b>{sym} İŞLEM KAPANDI</b> 🚨\n{reason}\n📊 <b>K/Z (ort. maliyete göre):</b> %{pnl:+.2f}\n🔎 <b>Tarama:</b> {scan_txt()} | <b>Tetikleyen 5M mum:</b> {bar_txt(ts, '5m')}\nYeni sinyaller aranıyor.")
         await send_all(msg, ids); del KOSAN_AT_TRADES[sym]; save_trades()
         record_exit("TP" if "TP" in reason else "SL", trade["tp_pct"] if "TP" in reason else 0); return
         
@@ -414,8 +422,6 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
         alloc_tl, saat_etiket = get_alloc_and_label(sym, now_t); sl, tp = calc_sl_tp(entry, direction, tp_pct)
         xu_text = "📈 <b>Yukarı</b>" if xu_trend == 1 else "📉 <b>Aşağı</b>"; dir_emoji = "📈" if long_cond else "📉"
         
-        scan_time_str = datetime.now(TIMEZONE).strftime('%H:%M')
-        
         msg = (f"🐎 <b>KOŞAN AT SİNYALİ ({direction}) - {sym} [5M]</b> 🐎\n"
                f"{badge(sym)} | <i>{saat_etiket}</i>\n"
                f"✅ <b>1. Giriş: {alloc_tl:,.0f} TL</b>\n\n"
@@ -428,7 +434,7 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
                f"🛑 <b>İlk Stop (SL %{SL_PCT}):</b> {sl:,.2f}\n"
                f"🎯 <b>TP (%{tp_pct}):</b> {tp:,.2f}\n\n"
                f"⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag_dk)} {lag_dk} dk\n"
-               f"🕒 <b>Bu sinyal {scan_time_str} taramasında oluştu.</b>")
+               f"🔎 <b>Tarama:</b> {scan_txt()} | <b>Sinyal mumu (5M):</b> {bar_txt(bar_time, '5m')}")
         
         zeki_sent = False; df_1h_closed = closed_only(df_1h_raw, "1h")
         if df_1h_closed is not None and len(df_1h_closed) > 20:
@@ -440,72 +446,7 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
         KOSAN_LAST_SIGNAL[sym] = bar_time
         KOSAN_AT_TRADES[sym] = {"symbol": sym, "direction": direction, "entry1": entry, "entry2": None, "avg_cost": entry, "sl": sl, "tp": tp, "tp_pct": tp_pct, "status": "WAITING_2ND", "zeki_sent": zeki_sent, "zb_teyit_sent": False, "zb_exit_sent": False, "entry_time": datetime.now(TIMEZONE), "last_bar": bar_time, "msg_ids": ids, "allocated_tl": alloc_tl}
         save_trades(); KOSAN_DAILY_STATS["signals"] += 1; KOSAN_WEEKLY_STATS["signals"] += 1
-        
-        # --- YENİ: SPOT TEYİT TAKİBİ BAŞLAT ---
-        if sym.endswith("1!"):
-            spot_sym = sym.replace("1!", "")
-            expire_time = datetime.now(TIMEZONE) + timedelta(minutes=15)
-            SPOT_TRACKERS[spot_sym] = {
-                "direction": direction,
-                "msg_ids": ids,
-                "expire_time": expire_time
-            }
-            logger.info(f"⏳ {spot_sym} için 15 dakikalık Spot Teyit takibi başlatıldı.")
-            
     except Exception as e: logger.error(f"Koşan At hatası ({sym}): {e}")
-
-# --- YENİ: SPOT TEYİT DÖNGÜSÜ ---
-async def check_spot_trackers(xu_trend):
-    if not SPOT_TRACKERS: return
-    now = datetime.now(TIMEZONE)
-    
-    for spot_sym, tracker in list(SPOT_TRACKERS.items()):
-        direction = tracker["direction"]
-        msg_ids = tracker["msg_ids"]
-        
-        if now >= tracker["expire_time"]:
-            msg = f"⚠️ <b>SPOT TEYİDİ ALINAMADI - {spot_sym}</b>\n15 dakika geçti ancak Spot piyasada sinyal oluşmadı."
-            await send_all(msg, msg_ids)
-            del SPOT_TRACKERS[spot_sym]
-            continue
-            
-        df_5m = await fetch_ohlc_async(spot_sym, "5m", limit=150); df_5m = closed_only(df_5m, "5m")
-        df_1h_raw = await fetch_ohlc_async(spot_sym, "1h", limit=150)
-        if df_5m is None or df_1h_raw is None or len(df_5m) < 60 or len(df_1h_raw) < 20: continue
-        
-        df_5m = df_5m.copy(); df_5m['rsi'] = get_rsi(df_5m['close'], KOSAN_RSI_PERIOD); df_5m['ema50'] = df_5m['close'].ewm(span=50, adjust=False).mean()
-        df_1h = df_1h_raw.copy(); df_1h['rsi_1h'] = get_rsi(df_1h['close'], 14)
-        
-        df_15m = None
-        if spot_sym not in WHITE_LIST and (spot_sym+"1!") not in WHITE_LIST:
-            df_15m_raw = await fetch_ohlc_async(spot_sym, "15m", limit=150)
-            if df_15m_raw is not None and not df_15m_raw.empty:
-                df_15m = df_15m_raw.copy(); df_15m['rsi15_8'] = get_rsi(df_15m['close'], 8)
-                
-        df = pd.merge_asof(df_5m[['open', 'high', 'low', 'close', 'rsi', 'ema50']].sort_index(), df_1h[['rsi_1h']].sort_index(), left_index=True, right_index=True, direction='backward')
-        if df_15m is not None:
-            df = pd.merge_asof(df.sort_index(), df_15m[['rsi15_8']].sort_index(), left_index=True, right_index=True, direction='backward')
-            
-        df = df.dropna()
-        if len(df) < 2: continue
-        curr, prev = df.iloc[-1], df.iloc[-2]
-        
-        long_cond = (prev['rsi'] <= KOSAN_LONG_LEVEL and curr['rsi'] > KOSAN_LONG_LEVEL and curr['close'] > curr['ema50'] and curr['rsi_1h'] > 50 and xu_trend == 1)
-        short_cond = (prev['rsi'] >= KOSAN_SHORT_LEVEL and curr['rsi'] < KOSAN_SHORT_LEVEL and curr['close'] < curr['ema50'] and curr['rsi_1h'] < 50 and xu_trend == -1)
-        
-        is_white_spot = spot_sym in WHITE_LIST or (spot_sym+"1!") in WHITE_LIST
-        if not is_white_spot:
-            long_cond = long_cond and (curr.get('rsi15_8', 0) > 60)
-            short_cond = short_cond and (curr.get('rsi15_8', 100) < 40)
-            
-        success = False
-        if direction == "LONG" and long_cond: success = True
-        elif direction == "SHORT" and short_cond: success = True
-        
-        if success:
-            msg = f"✅ <b>SPOT TEYİDİ ALINDI - {spot_sym}</b>\nSpot piyasada da aynı yönlü ({direction}) sinyal onaylandı."
-            await send_all(msg, msg_ids)
-            del SPOT_TRACKERS[spot_sym]
 
 async def check_rsi_ema_crossover(symbol, df_1h_raw):
     if symbol in RSI_EMA_TRADES: return
@@ -538,8 +479,6 @@ async def check_rsi_ema_crossover(symbol, df_1h_raw):
     risk_pct = abs(price - stop) / price * 100
     if direction == "LONG": emoji = "🟢"; stop_txt = f"Sinyal mumu + sonraki {RSI_X_POST_BARS} mum (max %{RSI_X_MAX_STOP_PCT} tavan)"
     else: emoji = "🔴"; stop_txt = f"Sinyal mumu + sonraki {RSI_X_POST_BARS} mum (max %{RSI_X_MAX_STOP_PCT} tavan)"
-    
-    scan_time_str = datetime.now(TIMEZONE).strftime('%H:%M')
     msg = (f"⚡ <b>RSI EMA KESİŞİMİ ({direction}) - {symbol} [1H]</b> ⚡\n\n"
            f"RSI({RSI_X_PERIOD}) ve EMA({RSI_X_EMA_SPAN}) <b>{direction}</b> yönlü kesişti!\n"
            f"<i>(Önceki aşırı bölge: {RSI_X_LOW if direction == 'LONG' else RSI_X_HIGH} altı/üstü)</i>\n\n"
@@ -550,7 +489,7 @@ async def check_rsi_ema_crossover(symbol, df_1h_raw):
            f"<i>{stop_txt}</i>\n\n"
            f"{emoji} <b>Giriş Onayı:</b> {direction} yönlü işlemler düşünülebilir.\n"
            f"⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag)} {lag} dk\n"
-           f"🕒 <b>Bu sinyal {scan_time_str} taramasında oluştu.</b>")
+           f"🔎 <b>Tarama:</b> {scan_txt()} | <b>Sinyal mumu (1H):</b> {bar_txt(bar_time, '1h')}")
     ids = await send_all(msg)
     RSI_EMA_TRADES[symbol] = {"symbol": symbol, "direction": direction, "entry": price, "sl": stop, "signal_bar_time": bar_time, "entry_time": now, "type": "RSI EMA", "zeki_sent": False, "zb_teyit_sent": False, "msg_ids": ids}
     save_trades()
@@ -577,7 +516,7 @@ async def track_rsi_ema_trades(df_1h_cache):
                     elif trade["direction"] == "SHORT" and high_after >= trade["sl"]: sl_hit = True
                     if sl_hit:
                         del RSI_EMA_TRADES[sym]; save_trades()
-                        await send_all(f"🛑 <b>{sym} - RSI EMA STOP OLDU</b>\nFiyat {trade['sl']:,.2f} seviyesine değdi.\nİşlem kapatıldı.", ids); continue
+                        await send_all(f"🛑 <b>{sym} - RSI EMA STOP OLDU</b>\nFiyat {trade['sl']:,.2f} seviyesine değdi.\nİşlem kapatıldı.\n🔎 <b>Tarama:</b> {scan_txt()}", ids); continue
             
             if df_1h is not None and df_1h_closed is not None and len(df_1h_closed) > 20:
                 rsi_series = get_rsi(df_1h_closed['close'], 8); last_idx = len(df_1h_closed) - 1
@@ -805,10 +744,11 @@ async def weekly_summary_and_cleanup():
     await send_all("🧹 <b>Haftalık Genel Temizlik Yapıldı</b>\nTüm pozisyonlar ve istatistikler sıfırlandı. Pazartesi yeni sinyallerle başlanacak.")
 
 async def tick(force=False):
-    global is_scanning
+    global is_scanning, SCAN_TIME
     if not force and not is_market_open(): return
     if is_scanning: return
     is_scanning = True
+    SCAN_TIME = datetime.now(TIMEZONE)
     logger.info(f"🔄 Tarama başladı. (Zaman: {datetime.now(TIMEZONE).strftime('%H:%M')})")
     df_1h_cache = {}
     try:
@@ -849,10 +789,7 @@ async def tick(force=False):
                         await check_kosan_at(sym, xu_trend, df_1h); return True
                     except Exception as e: logger.error(f"Koşan At tarama hatası ({sym}): {e}"); return False
             return await asyncio.gather(*[work_kosan(s) for s in ALL_SYMBOLS])
-        
-        # YENİ: Spot Teyit Döngüsünü de aynı anda çalıştır
-        rsi_res, kosan_res, _ = await asyncio.gather(run_rsi_ema_branch(), run_kosan_branch(), check_spot_trackers(xu_trend))
-        
+        rsi_res, kosan_res = await asyncio.gather(run_rsi_ema_branch(), run_kosan_branch())
         failed = max(rsi_res.count(False), kosan_res.count(False))
         if failed >= 15: await send_admin_alert(f"⚠️ <b>Tarama Sorunu</b>\n{failed}/{len(ALL_SYMBOLS)} hisse için veri alınamadı.", "scan_fail")
     finally: is_scanning = False
@@ -878,8 +815,206 @@ async def market_open_scan():
     await send_all("🟢 09:50 - Çalışmaya hazır, borsanın açılması bekleniyor...")
     await send_all("Sistem her zaman senin için çalışıyor, kazanmak istiyorsan sadece sistemle kal... MZB 😉")
 
+# ==========================================
+# HABER MODÜLÜ (RSS taraması + anahtar kelime eşleştirme)
+# Bir haber: (ilgili kişi/kurum) VE (borsa kelimesi) birlikte geçerse gönderilir.
+# ==========================================
+# ==========================================
+# AYARLAR (buradan düzenleyin)
+# ==========================================
+SEEN_FILE = os.path.join(DATA_DIR, "haber_seen.json")
+
+MAX_PER_RUN = 5          # bir taramada en fazla kaç haber gönderilsin
+MAX_AGE_HOURS = 6        # bundan eski haberler gönderilmez
+SUMMARY_SENTENCES = 3    # özet en fazla kaç cümle
+SUMMARY_MAX_CHARS = 320
+SEEN_KEEP = 3000
+
+# Doğrudan yayıncı RSS'leri (özet metni içerir). Tarayıcıda açıp çalıştığını kontrol edin.
+FEEDS = [
+    ("AA Güncel",  "https://www.aa.com.tr/tr/rss/default?cat=guncel"),
+    ("AA Ekonomi", "https://www.aa.com.tr/tr/rss/default?cat=ekonomi"),
+]
+
+# Google Haberler arama RSS'i (daha geniş kapsam; sadece başlık+kaynak verir, özet yoktur)
+USE_GOOGLE_NEWS = True
+GOOGLE_QUERIES = [
+    "Erdoğan borsa OR faiz OR piyasa OR yatırımcı",
+    "Mehmet Şimşek faiz OR borsa OR piyasa OR para politikası",
+    "SPK Başkanı borsa OR hisse OR fon",
+    "CHP OR AK Parti dava borsa OR piyasa",
+]
+
+# 1) İlgili kişi / kurum kalıpları (küçük harf, Türkçe)
+ENTITIES = [
+    ("Erdoğan",       r"erdoğan|cumhurbaşkanı(?! yardımcısı)"),
+    ("Şimşek",        r"mehmet şimşek|bakan şimşek|hazine ve maliye bakanı"),
+    ("SPK Başkanı",   r"spk başkan\w*|sermaye piyasası kurulu başkan\w*"),
+    ("Merkez Bankası", r"merkez bankası başkan\w*|tcmb başkan\w*"),
+    ("Devlet yetkilisi", r"\bbakan\b|\bbakanı\b|cumhurbaşkanı yardımcısı|\bbakanlığı\b"),
+    ("Parti davası",  r"(chp|ak parti|mhp|dem parti|iyi parti|siyasi parti)\w*.{0,60}dava|dava.{0,60}(chp|ak parti|mhp|dem parti|iyi parti|siyasi parti)|mutlak butlan|kapatma davası|kurultay davası"),
+]
+
+# 2) Borsa kelimeleri (küçük harf, Türkçe). Ekleyip çıkarabilirsiniz.
+KEYWORDS = [
+    ("SPK",            r"\bspk\b"),
+    ("borsa",          r"\bborsa\w{0,6}"),
+    ("BIST",           r"\bbist\b"),
+    ("para politikası", r"para politika\w*"),
+    ("faiz",           r"\bfaiz\w{0,5}"),
+    ("yatırımcı",      r"\byatırımc\w{0,6}"),
+    ("piyasa",         r"\bpiyasa\w{0,6}"),
+    ("hisse",          r"\bhisse\w{0,6}"),
+    ("fon",            r"\bfon(?:u|lar\w*|un\w*)?\b"),
+    ("sermaye piyasası", r"sermaye piyasası"),
+]
+
+# ==========================================
+# YARDIMCILAR
+# ==========================================
+def tr_lower(s: str) -> str:
+    return s.replace("İ", "i").replace("I", "ı").lower()
+
+def _http_get(url: str, timeout: int = 12) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; BorsaBot/1.0)"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+def _strip_html(s: str) -> str:
+    s = html.unescape(s or "")
+    s = re.sub(r"<[^>]+>", " ", s)
+    s = html.unescape(s)
+    return re.sub(r"\s+", " ", s).strip()
+
+def _summary(text: str, title: str) -> str:
+    text = _strip_html(text)
+    if not text: return ""
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    out, total = [], 0
+    for sent in sentences:
+        sent = sent.strip()
+        if not sent or sent.lower() == title.strip().lower(): continue
+        if total + len(sent) > SUMMARY_MAX_CHARS and out: break
+        out.append(sent); total += len(sent)
+        if len(out) >= SUMMARY_SENTENCES: break
+    res = " ".join(out)
+    return res[:SUMMARY_MAX_CHARS - 1] + "…" if len(res) > SUMMARY_MAX_CHARS else res
+
+def _parse_rss(xml_bytes: bytes, label: str, is_google: bool = False):
+    root = ET.fromstring(xml_bytes)
+    items = []
+    for it in root.iter("item"):
+        title = _strip_html(it.findtext("title") or "")
+        link = (it.findtext("link") or "").strip()
+        if not title or not link: continue
+        src = label
+        src_el = it.find("source")
+        if is_google and src_el is not None and (src_el.text or "").strip():
+            src = src_el.text.strip()
+            title = re.sub(r"\s+-\s+" + re.escape(src) + r"\s*$", "", title)
+        pub = None
+        pd_txt = it.findtext("pubDate")
+        if pd_txt:
+            try:
+                pub = parsedate_to_datetime(pd_txt)
+                if pub.tzinfo is None: pub = pub.replace(tzinfo=timezone.utc)
+            except Exception: pub = None
+        desc = "" if is_google else (it.findtext("description") or "")
+        items.append({"title": title, "link": link, "desc": desc, "pub": pub, "source": src, "is_google": is_google})
+    return items
+
+def _fetch_feed(label: str, url: str, is_google: bool = False):
+    try:
+        return _parse_rss(_http_get(url), label, is_google)
+    except Exception as e:
+        logger.warning(f"Haber kaynağı okunamadı ({label}): {e}")
+        return []
+
+def match_item(item):
+    """(eşleşen kişi/kurumlar, eşleşen borsa kelimeleri) döndürür. İkisi de doluysa haber uygundur."""
+    text = tr_lower(item["title"] + " " + _strip_html(item["desc"]))
+    ents = [name for name, pat in ENTITIES if re.search(pat, text)]
+    kws = [name for name, pat in KEYWORDS if re.search(pat, text)]
+    return ents, kws
+
+def _norm_title_hash(title: str) -> str:
+    t = re.sub(r"[^\w]+", " ", tr_lower(title)).strip()
+    return "t:" + hashlib.md5(t.encode("utf-8")).hexdigest()
+
+def _load_seen():
+    if not os.path.exists(SEEN_FILE): return None
+    try:
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+            return list(json.load(f).get("seen", []))
+    except Exception: return []
+
+def _save_seen(seen_list):
+    try:
+        with open(SEEN_FILE + ".tmp", "w", encoding="utf-8") as f:
+            json.dump({"seen": seen_list[-SEEN_KEEP:]}, f, ensure_ascii=False)
+        os.replace(SEEN_FILE + ".tmp", SEEN_FILE)
+    except Exception as e:
+        logger.error(f"Haber kayıt hatası: {e}")
+
+def build_message(item, ents, kws):
+    esc = lambda s: html.escape(s, quote=False)
+    summ = _summary(item["desc"], item["title"])
+    lines = [f"📰 <b>HABER</b> | {esc(item['source'])}", f"<b>{esc(item['title'])}</b>"]
+    if summ: lines.append(esc(summ))
+    lines.append(f"🏷 {esc(', '.join(ents))} • {esc(', '.join(kws))}")
+    lines.append(f"🔗 <a href=\"{html.escape(item['link'], quote=True)}\">Habere git</a>")
+    return "\n".join(lines)
+
+# ==========================================
+# ANA FONKSİYON (scheduler bunu çağırır)
+# ==========================================
+async def haber_tara(send_fn):
+    """send_fn: bot.py'deki send_all(text) fonksiyonu."""
+    try:
+        sources = [(l, u, False) for l, u in FEEDS]
+        if USE_GOOGLE_NEWS:
+            for q in GOOGLE_QUERIES:
+                url = "https://news.google.com/rss/search?q=" + urllib.parse.quote_plus(q + " when:1d") + "&hl=tr&gl=TR&ceid=TR:tr"
+                sources.append(("Google Haberler", url, True))
+        results = await asyncio.gather(*[asyncio.to_thread(_fetch_feed, l, u, g) for l, u, g in sources])
+
+        seen_list = _load_seen()
+        first_run = seen_list is None
+        seen_list = seen_list or []
+        seen = set(seen_list)
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=MAX_AGE_HOURS)
+        all_items = [i for r in results for i in r]
+        all_items.sort(key=lambda i: i["pub"] or datetime.now(timezone.utc), reverse=True)
+
+        sent = 0; new_marks = []
+        for it in all_items:
+            keys = [it["link"], _norm_title_hash(it["title"])]
+            if any(k in seen for k in keys): continue
+            if first_run:                                   # ilk çalıştırma: mevcut haberleri sessizce işaretle
+                new_marks += keys; seen.update(keys); continue
+            if it["pub"] and it["pub"] < cutoff:            # eski haber
+                new_marks += keys; seen.update(keys); continue
+            ents, kws = match_item(it)
+            if not (ents and kws):                          # ilgisiz haber
+                new_marks += keys; seen.update(keys); continue
+            if sent >= MAX_PER_RUN:                         # sınır aşıldı: bir sonraki taramada gönderilsin
+                continue
+            await send_fn(build_message(it, ents, kws))
+            sent += 1; new_marks += keys; seen.update(keys)
+
+        if new_marks or first_run:
+            _save_seen(seen_list + new_marks)
+        if first_run:
+            logger.info(f"📰 Haber modülü ilk çalıştırma: {len(new_marks)//2} mevcut haber sessizce işaretlendi.")
+        elif sent:
+            logger.info(f"📰 {sent} haber gönderildi.")
+    except Exception as e:
+        logger.error(f"Haber tarama hatası: {e}")
+
 async def task_morning_summary(): await generate_market_summary("Sabah")
 async def task_afternoon_summary(): await generate_market_summary("Öğleden Sonra")
+async def task_haber(): await haber_tara(send_all)
 
 # BOT KOMUT MENÜSÜNÜ AYARLAMA
 async def post_init(application: Application) -> None:
@@ -933,6 +1068,8 @@ async def main():
     
     sched.add_job(task_morning_summary, CronTrigger(day_of_week="mon-fri", hour=14, minute=15, timezone=TIMEZONE))
     sched.add_job(task_afternoon_summary, CronTrigger(day_of_week="mon-fri", hour=18, minute=15, timezone=TIMEZONE))
+    
+    sched.add_job(task_haber, CronTrigger(hour="8-23", minute="*/10", timezone=TIMEZONE))
     
     sched.start()
     logger.info("✅ Bot çalışıyor. Gerekli düzeltmeler uygulandı.")
