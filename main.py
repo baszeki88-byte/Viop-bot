@@ -93,7 +93,7 @@ RED_PRIME_ALLOC = 50_000.0; RED_EARLY_ALLOC = 25_000.0; RED_OFF_ALLOC = 30_000.0
 MARKET_OPEN_MSG_TIME = dt_time(9, 50); EARLY_WINDOW_START = dt_time(10, 0); EARLY_WINDOW_END = dt_time(11, 0); PRIME_START = dt_time(11, 0); PRIME_END = dt_time(17, 0); NO_NEW_ENTRY_AFTER = dt_time(17, 0)
 
 KOSAN_AT_TRADES = {}; RSI_EMA_TRADES = {}; KOSAN_LAST_SIGNAL = {}; rsi_ema_cross_states = {}; rsi_ema_armed_states = {}
-TREND_TRACKERS = {} # YENİ: Trend Takip Hafızası
+TREND_TRACKERS = {}
 LATEST_PRICES = {}
 KOSAN_DAILY_STATS = {"date": "", "signals": 0, "tp_4": 0, "tp_3": 0, "tp_2_5": 0, "tp_1_5": 0, "sl": 0, "zb_exit": 0}
 KOSAN_WEEKLY_STATS = {"week_key": "", "signals": 0, "tp_4": 0, "tp_3": 0, "tp_2_5": 0, "tp_1_5": 0, "sl": 0, "zb_exit": 0}
@@ -135,7 +135,6 @@ def closed_only(df, tf):
 
 def save_trades():
     try:
-        # Koşan At
         out_kosan = {}
         for k, v in KOSAN_AT_TRADES.items():
             t = v.copy()
@@ -145,7 +144,6 @@ def save_trades():
         with open(KOSAN_AT_FILE + ".tmp", "w", encoding="utf-8") as f: json.dump(out_kosan, f, ensure_ascii=False, indent=2)
         os.replace(KOSAN_AT_FILE + ".tmp", KOSAN_AT_FILE)
         
-        # RSI EMA
         out_rsi = {}
         for k, v in RSI_EMA_TRADES.items():
             t = v.copy()
@@ -155,7 +153,6 @@ def save_trades():
         with open(RSI_EMA_FILE + ".tmp", "w", encoding="utf-8") as f: json.dump(out_rsi, f, ensure_ascii=False, indent=2)
         os.replace(RSI_EMA_FILE + ".tmp", RSI_EMA_FILE)
 
-        # Trend Trackers
         out_trend = {}
         for k, v in TREND_TRACKERS.items():
             t = v.copy()
@@ -372,9 +369,9 @@ async def track_kosan(sym, df5, df_1h):
         record_exit("TP" if "TP" in reason else "SL", trade["tp_pct"] if "TP" in reason else 0); return
         
     if df_1h is not None:
-        df_1h_closed = closed_only(df_1h, "1h")
-        if df_1h_closed is not None and len(df_1h_closed) > 20:
-            rsi_series = get_rsi(df_1h_closed['close'], 8); last_idx = len(df_1h_closed) - 1
+        # YENİ: 1H Aktif Mum Kullanımı (closed_only kaldırıldı)
+        if len(df_1h) > 20:
+            rsi_series = get_rsi(df_1h['close'], 8); last_idx = len(df_1h) - 1
             
             if not trade.get("zb_teyit_sent", False):
                 if check_zeki_bey_series(rsi_series, last_idx, trade["direction"], ZB_LOOKBACK, ZB_ORDER):
@@ -398,7 +395,8 @@ async def track_kosan(sym, df5, df_1h):
 async def check_kosan_at(sym, xu_trend, df_1h_raw):
     try:
         has_trade = sym in KOSAN_AT_TRADES
-        df_5m = await fetch_ohlc_async(sym, "5m", limit=500 if has_trade else 150); df_5m = closed_only(df_5m, "5m")
+        df_5m = await fetch_ohlc_async(sym, "5m", limit=500 if has_trade else 150)
+        df_5m = closed_only(df_5m, "5m") # Sadece 5M mum kapanmış olacak
         if df_5m is None or len(df_5m) < 60: return
         df_5m = df_5m.copy(); df_5m['rsi'] = get_rsi(df_5m['close'], KOSAN_RSI_PERIOD); df_5m['ema50'] = df_5m['close'].ewm(span=50, adjust=False).mean()
         
@@ -407,13 +405,13 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
             await track_kosan(sym, df_5m, df_1h_raw); return
             
         if df_1h_raw is None or len(df_1h_raw) < 20: return
-        df_1h = df_1h_raw.copy(); df_1h['rsi_1h'] = get_rsi(df_1h['close'], 14)
+        df_1h = df_1h_raw.copy(); df_1h['rsi_1h'] = get_rsi(df_1h['close'], 14) # 1H Aktif mum
         
         df_15m = None
         if not is_white(sym):
             df_15m_raw = await fetch_ohlc_async(sym, "15m", limit=150)
             if df_15m_raw is not None and not df_15m_raw.empty:
-                df_15m = df_15m_raw.copy()
+                df_15m = df_15m_raw.copy() # 15M Aktif mum
                 df_15m['rsi15_8'] = get_rsi(df_15m['close'], 8)
         
         df = pd.merge_asof(df_5m[['open', 'high', 'low', 'close', 'rsi', 'ema50']].sort_index(), df_1h[['rsi_1h']].sort_index(), left_index=True, right_index=True, direction='backward')
@@ -458,9 +456,10 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
                f"⏱ <b>Veri Gecikmesi:</b> {get_lag_emoji(lag_dk)} {lag_dk} dk\n"
                f"🔎 <b>Tarama:</b> {scan_txt()} | <b>Sinyal mumu (5M):</b> {bar_txt(bar_time, '5m')}")
         
-        zeki_sent = False; df_1h_closed = closed_only(df_1h_raw, "1h")
-        if df_1h_closed is not None and len(df_1h_closed) > 20:
-            rsi_series = get_rsi(df_1h_closed['close'], 8); last_idx = len(df_1h_closed) - 1
+        zeki_sent = False
+        # YENİ: Aktif 1H mumuna göre ZB kontrolü
+        if df_1h_raw is not None and len(df_1h_raw) > 20:
+            rsi_series = get_rsi(df_1h_raw['close'], 8); last_idx = len(df_1h_raw) - 1
             zb_signal = check_zeki_bey_series(rsi_series, last_idx, direction, ZB_LOOKBACK, ZB_ORDER)
             if zb_signal:
                 msg += (f"\n\n🕵️‍♂️ <b>Zeki Bey Özel Sinyali!</b>\n1H RSI tepe/dip kırılımı gerçekleşti."); zeki_sent = True
@@ -560,8 +559,8 @@ async def track_rsi_ema_trades(df_1h_cache):
                         del RSI_EMA_TRADES[sym]; save_trades()
                         await send_all(f"🛑 <b>{sym} - RSI EMA STOP OLDU</b>\nFiyat {trade['sl']:,.2f} seviyesine değdi.\nİşlem kapatıldı.\n🔎 <b>Tarama:</b> {scan_txt()}", ids); continue
             
-            if df_1h is not None and df_1h_closed is not None and len(df_1h_closed) > 20:
-                rsi_series = get_rsi(df_1h_closed['close'], 8); last_idx = len(df_1h_closed) - 1
+            if df_1h is not None and len(df_1h) > 20:
+                rsi_series = get_rsi(df_1h['close'], 8); last_idx = len(df_1h) - 1 # AKTİF MUM KULLANIMI
                 
                 if not trade.get("zb_teyit_sent", False):
                     if check_zeki_bey_series(rsi_series, last_idx, trade["direction"], ZB_LOOKBACK, ZB_ORDER):
@@ -875,7 +874,7 @@ async def clear_daily_state():
         DATA_CACHE.clear(); LATEST_PRICES.clear()
         KOSAN_DAILY_STATS.update({"signals": 0, "tp_4": 0, "tp_3": 0, "tp_2_5": 0, "tp_1_5": 0, "sl": 0, "zb_exit": 0})
         save_trades()
-        # TREND_TRACKERS Günlük Temizlikte SİLİNMEZ! Ertesi gün devam eder.
+        # TREND_TRACKERS Günlük Temizlikte SİLİNMEZ!
     await send_all("🧹 <b>Gün Sonu Temizliği</b>\nSaat 18:30 oldu. Günlük istatistikler sıfırlandı. <b>Açık pozisyonlar (Trend Takip Dahil) korunuyor ve yarın takip edilecek.</b>")
 
 async def market_open_scan():
@@ -1062,7 +1061,7 @@ async def main():
     sched.add_job(task_haber, CronTrigger(hour="8-23", minute="*/10", timezone=TIMEZONE))
     
     sched.start()
-    logger.info("✅ Bot çalışıyor. Vadeli + Trend Takip + Haber modülü entegre edildi.")
+    logger.info("✅ Bot çalışıyor. Vadeli + Trend Takip + Haber modülü entegre edildi. (5M kapalı, 1H ve 15M aktif mum)")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
