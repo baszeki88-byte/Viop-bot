@@ -17,7 +17,7 @@ import pytz
 import holidays
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 DATA_DIR = os.getenv("DATA_DIR", "/tmp")
 KOSAN_AT_FILE = os.path.join(DATA_DIR, "kosan_at_trades.json")
 RSI_EMA_FILE = os.path.join(DATA_DIR, "rsi_ema_trades.json")
+TREND_TRACK_FILE = os.path.join(DATA_DIR, "trend_trackers.json")
 
 last_error_time = {}
 async def send_admin_alert(error_msg, error_key="general"):
@@ -66,10 +67,10 @@ TIMEZONE = pytz.timezone("Europe/Istanbul")
 TR_HOLIDAYS = holidays.Turkey(years=range(2024, 2031))
 
 # ==========================================
-# WHITE / RED LIST
+# WHITE / RED LIST (VADELİ 1! OLARAK AYARLANDI)
 # ==========================================
-WHITE_LIST = ["EKGYO", "MGROS", "TRALT", "THYAO", "TRMET", "PGSUS", "KRDMD", "ODAS", "ALARK", "VESTL", "AKSEN", "TOASO", "ARCLK", "TTKOM", "SISE", "FROTO", "TKFEN", "HALKB", "GUBRF", "ASELS", "ASTOR", "PETKM", "KCHOL", "ISCTR"]
-RED_LIST = ["EREGL", "SASA", "SAHOL", "AEFES", "AKBNK", "TAVHL", "GARAN", "SOKM", "ULKER", "BIMAS", "DOHOL", "TUPRS", "ENKAI", "XU030", "OYAKC", "BRSAN", "CIMSA", "VAKBN", "ENJSA", "TCELL", "YKBNK", "DOAS"]
+WHITE_LIST = ["EKGYO1!", "MGROS1!", "TRALT1!", "THYAO1!", "TRMET1!", "PGSUS1!", "KRDMD1!", "ODAS1!", "ALARK1!", "VESTL1!", "AKSEN1!", "TOASO1!", "ARCLK1!", "TTKOM1!", "SISE1!", "FROTO1!", "TKFEN1!", "HALKB1!", "GUBRF1!", "ASELS1!", "ASTOR1!", "PETKM1!", "KCHOL1!", "ISCTR1!"]
+RED_LIST = ["EREGL1!", "SASA1!", "SAHOL1!", "AEFES1!", "AKBNK1!", "TAVHL1!", "GARAN1!", "SOKM1!", "ULKER1!", "BIMAS1!", "DOHOL1!", "TUPRS1!", "ENKAI1!", "XU030", "OYAKC1!", "BRSAN1!", "CIMSA1!", "VAKBN1!", "ENJSA1!", "TCELL1!", "YKBNK1!", "DOAS1!"]
 ALL_SYMBOLS = WHITE_LIST + RED_LIST
 BIST_STOCKS = [s for s in ALL_SYMBOLS if not s.startswith("XU")]
 
@@ -92,6 +93,7 @@ RED_PRIME_ALLOC = 50_000.0; RED_EARLY_ALLOC = 25_000.0; RED_OFF_ALLOC = 30_000.0
 MARKET_OPEN_MSG_TIME = dt_time(9, 50); EARLY_WINDOW_START = dt_time(10, 0); EARLY_WINDOW_END = dt_time(11, 0); PRIME_START = dt_time(11, 0); PRIME_END = dt_time(17, 0); NO_NEW_ENTRY_AFTER = dt_time(17, 0)
 
 KOSAN_AT_TRADES = {}; RSI_EMA_TRADES = {}; KOSAN_LAST_SIGNAL = {}; rsi_ema_cross_states = {}; rsi_ema_armed_states = {}
+TREND_TRACKERS = {} # YENİ: Trend Takip Hafızası
 LATEST_PRICES = {}
 KOSAN_DAILY_STATS = {"date": "", "signals": 0, "tp_4": 0, "tp_3": 0, "tp_2_5": 0, "tp_1_5": 0, "sl": 0, "zb_exit": 0}
 KOSAN_WEEKLY_STATS = {"week_key": "", "signals": 0, "tp_4": 0, "tp_3": 0, "tp_2_5": 0, "tp_1_5": 0, "sl": 0, "zb_exit": 0}
@@ -133,6 +135,7 @@ def closed_only(df, tf):
 
 def save_trades():
     try:
+        # Koşan At
         out_kosan = {}
         for k, v in KOSAN_AT_TRADES.items():
             t = v.copy()
@@ -142,6 +145,7 @@ def save_trades():
         with open(KOSAN_AT_FILE + ".tmp", "w", encoding="utf-8") as f: json.dump(out_kosan, f, ensure_ascii=False, indent=2)
         os.replace(KOSAN_AT_FILE + ".tmp", KOSAN_AT_FILE)
         
+        # RSI EMA
         out_rsi = {}
         for k, v in RSI_EMA_TRADES.items():
             t = v.copy()
@@ -150,13 +154,22 @@ def save_trades():
             out_rsi[k] = t
         with open(RSI_EMA_FILE + ".tmp", "w", encoding="utf-8") as f: json.dump(out_rsi, f, ensure_ascii=False, indent=2)
         os.replace(RSI_EMA_FILE + ".tmp", RSI_EMA_FILE)
+
+        # Trend Trackers
+        out_trend = {}
+        for k, v in TREND_TRACKERS.items():
+            t = v.copy()
+            if isinstance(t.get("time"), (datetime, pd.Timestamp)): t["time"] = t["time"].isoformat()
+            out_trend[k] = t
+        with open(TREND_TRACK_FILE + ".tmp", "w", encoding="utf-8") as f: json.dump(out_trend, f, ensure_ascii=False, indent=2)
+        os.replace(TREND_TRACK_FILE + ".tmp", TREND_TRACK_FILE)
     except Exception as e: logger.error(f"Trade kayıt hatası: {e}")
 
 def _parse_dt(s):
     dt = datetime.fromisoformat(s); return TIMEZONE.localize(dt) if dt.tzinfo is None else dt
 
 def load_trades():
-    global KOSAN_AT_TRADES, RSI_EMA_TRADES
+    global KOSAN_AT_TRADES, RSI_EMA_TRADES, TREND_TRACKERS
     if os.path.exists(KOSAN_AT_FILE):
         try:
             with open(KOSAN_AT_FILE, "r", encoding="utf-8") as f: loaded = json.load(f)
@@ -177,6 +190,15 @@ def load_trades():
                 RSI_EMA_TRADES[k] = v
             logger.info(f"✅ {len(RSI_EMA_TRADES)} aktif RSI EMA işlemi yüklendi.")
         except Exception as e: logger.error(f"RSI EMA yükleme hatası: {e}")
+
+    if os.path.exists(TREND_TRACK_FILE):
+        try:
+            with open(TREND_TRACK_FILE, "r", encoding="utf-8") as f: loaded = json.load(f)
+            for k, v in loaded.items():
+                if isinstance(v.get("time"), str): v["time"] = _parse_dt(v["time"])
+                TREND_TRACKERS[k] = v
+            logger.info(f"✅ {len(TREND_TRACKERS)} aktif Trend Takip işlemi yüklendi.")
+        except Exception as e: logger.error(f"Trend yükleme hatası: {e}")
 
 async def send_all(text, reply_ids=None):
     ids = {}
@@ -442,6 +464,26 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
             zb_signal = check_zeki_bey_series(rsi_series, last_idx, direction, ZB_LOOKBACK, ZB_ORDER)
             if zb_signal:
                 msg += (f"\n\n🕵️‍♂️ <b>Zeki Bey Özel Sinyali!</b>\n1H RSI tepe/dip kırılımı gerçekleşti."); zeki_sent = True
+                
+        # --- TREND TAKİP SİNYAL MANTIĞI ---
+        trend_msg = ""
+        if sym not in TREND_TRACKERS:
+            TREND_TRACKERS[sym] = {"direction": direction, "count": 1, "entry": entry, "time": datetime.now(TIMEZONE)}
+            trend_msg = f"\n\n📈 <b>YENİ TREND POZİSYONU AÇILDI ({direction} #1)</b>\n• Ters sinyal gelene kadar takip edilebilir."
+        else:
+            trk = TREND_TRACKERS[sym]
+            if trk["direction"] == direction:
+                trk["count"] += 1
+                pnl_trk = ((entry - trk["entry"]) / trk["entry"]) * 100 * (1 if direction == "LONG" else -1)
+                trend_msg = f"\n\n➕ <b>TREND EKLEMESİ ({direction} #{trk['count']})</b>\n• İlk Giriş: {trk['entry']:,.2f} | Şu An: {entry:,.2f}\n• Kümülatif Kâr: %{pnl_trk:+.2f}"
+            else:
+                pnl_trk = ((entry - trk["entry"]) / trk["entry"]) * 100 * (1 if trk["direction"] == "LONG" else -1)
+                old_dir = trk["direction"]
+                trend_msg = f"\n\n🔄 <b>TREND DÖNÜŞÜ ({old_dir} -> {direction} #1)</b>\n• {old_dir} Kârı: %{pnl_trk:+.2f} (Giriş: {trk['entry']:,.2f} | Çıkış: {entry:,.2f})\n• Yeni {direction} Giriş: {entry:,.2f}"
+                TREND_TRACKERS[sym] = {"direction": direction, "count": 1, "entry": entry, "time": datetime.now(TIMEZONE)}
+        
+        msg += trend_msg
+                
         ids = await send_all(msg)
         KOSAN_LAST_SIGNAL[sym] = bar_time
         KOSAN_AT_TRADES[sym] = {"symbol": sym, "direction": direction, "entry1": entry, "entry2": None, "avg_cost": entry, "sl": sl, "tp": tp, "tp_pct": tp_pct, "status": "WAITING_2ND", "zeki_sent": zeki_sent, "zb_teyit_sent": False, "zb_exit_sent": False, "entry_time": datetime.now(TIMEZONE), "last_bar": bar_time, "msg_ids": ids, "allocated_tl": alloc_tl}
@@ -604,20 +646,38 @@ async def generate_market_summary(session_name):
     except Exception as e: logger.error(f"Özet fonksiyonu hatası: {e}")
 
 def build_positions_text():
-    if not KOSAN_AT_TRADES and not RSI_EMA_TRADES:
+    if not KOSAN_AT_TRADES and not RSI_EMA_TRADES and not TREND_TRACKERS:
         return "📭 Açık pozisyon bulunmuyor."
+    
     lines = ["📋 <b>AÇIK POZİSYONLAR</b>\n"]
-    for sym, pos in list(KOSAN_AT_TRADES.items()):
-        cur_p = LATEST_PRICES.get(sym, pos["avg_cost"]); is_long = pos["direction"] == "LONG"
-        pnl_pct = ((cur_p - pos["avg_cost"]) / pos["avg_cost"]) * 100.0 * (1.0 if is_long else -1.0)
-        icon = "🟢" if pnl_pct >= 0 else "🔴"
-        lines.append(f"{icon} <b>{sym}</b> ({badge(sym)}) | <b>{pos['direction']}</b> [KOŞAN AT]\n   • Ort. Maliyet: <code>{pos['avg_cost']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>\n   • Tutar: <code>{pos['allocated_tl']:,.0f} TL</code> | SL: <code>{pos['sl']:.2f}</code> | TP: <code>%{pos['tp_pct']:.1f}</code> ({pos['tp']:.2f})")
-    for sym, pos in list(RSI_EMA_TRADES.items()):
-        cur_p = LATEST_PRICES.get(sym, pos["entry"]); is_long = pos["direction"] == "LONG"
-        pnl_pct = ((cur_p - pos["entry"]) / pos["entry"]) * 100.0 * (1.0 if is_long else -1.0)
-        icon = "🟢" if pnl_pct >= 0 else "🔴"
-        lines.append(f"{icon} <b>{sym}</b> ({badge(sym)}) | <b>{pos['direction']}</b> [RSI EMA]\n   • Giriş: <code>{pos['entry']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>\n   • SL: <code>{pos['sl']:.2f}</code>")
-    return "\n\n".join(lines)
+    
+    if KOSAN_AT_TRADES:
+        lines.append("🐎 <b>Koşan At (TP/SL'li):</b>")
+        for sym, pos in list(KOSAN_AT_TRADES.items()):
+            cur_p = LATEST_PRICES.get(sym, pos["avg_cost"]); is_long = pos["direction"] == "LONG"
+            pnl_pct = ((cur_p - pos["avg_cost"]) / pos["avg_cost"]) * 100.0 * (1.0 if is_long else -1.0)
+            icon = "🟢" if pnl_pct >= 0 else "🔴"
+            lines.append(f"{icon} <b>{sym}</b> | <b>{pos['direction']}</b>\n   • Maliyet: <code>{pos['avg_cost']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>\n   • SL: <code>{pos['sl']:.2f}</code> | TP: <code>%{pos['tp_pct']:.1f}</code> ({pos['tp']:.2f})")
+        lines.append("")
+        
+    if RSI_EMA_TRADES:
+        lines.append("⚡ <b>RSI EMA (1H):</b>")
+        for sym, pos in list(RSI_EMA_TRADES.items()):
+            cur_p = LATEST_PRICES.get(sym, pos["entry"]); is_long = pos["direction"] == "LONG"
+            pnl_pct = ((cur_p - pos["entry"]) / pos["entry"]) * 100.0 * (1.0 if is_long else -1.0)
+            icon = "🟢" if pnl_pct >= 0 else "🔴"
+            lines.append(f"{icon} <b>{sym}</b> | <b>{pos['direction']}</b>\n   • Giriş: <code>{pos['entry']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | K/Z: <b>%{pnl_pct:+.2f}</b>\n   • SL: <code>{pos['sl']:.2f}</code>")
+        lines.append("")
+        
+    if TREND_TRACKERS:
+        lines.append("📈 <b>Trend Takip (Ters Sinyale Kadar):</b>")
+        for sym, trk in list(TREND_TRACKERS.items()):
+            cur_p = LATEST_PRICES.get(sym, trk["entry"]); is_long = trk["direction"] == "LONG"
+            pnl_pct = ((cur_p - trk["entry"]) / trk["entry"]) * 100.0 * (1.0 if is_long else -1.0)
+            icon = "🟢" if pnl_pct >= 0 else "🔴"
+            lines.append(f"{icon} <b>{sym}</b> | <b>{trk['direction']} #{trk['count']}</b>\n   • İlk Giriş: <code>{trk['entry']:.2f}</code> | Aktif: <code>{cur_p:.2f}</code> | Toplam Kâr: <b>%{pnl_pct:+.2f}</b>")
+            
+    return "\n\n".join(lines).strip()
 
 async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
@@ -646,6 +706,11 @@ async def analyze_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if text in RSI_EMA_TRADES:
             t = RSI_EMA_TRADES[text]
             msg += (f"\n⚡ <b>Açık RSI EMA ({t['direction']})</b>\n• Giriş: {t['entry']:,.2f}\n• SL: {t['sl']:,.2f}\n")
+        if text in TREND_TRACKERS:
+            t = TREND_TRACKERS[text]
+            cur_p = LATEST_PRICES.get(text, t["entry"]); is_long = t["direction"] == "LONG"
+            pnl = ((cur_p - t["entry"])/t["entry"])*100 * (1 if is_long else -1)
+            msg += (f"\n📈 <b>Açık Trend Takip ({t['direction']} #{t['count']})</b>\n• İlk Giriş: {t['entry']:,.2f}\n• Toplam K/Z: %{pnl:+.2f}\n")
         await update.message.reply_text(msg, parse_mode="HTML")
     except Exception as e: logger.error(f"Analiz hatası: {e}"); await update.message.reply_text(f"❌ Analiz hatası: {e}")
 
@@ -662,9 +727,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     msg = (
-        "✅ <b>Sistem çalışıyor.</b>\n\n"
+        "✅ <b>Sistem çalışıyor (Vadeli 1!).</b>\n\n"
         "📌 <b>Kullanılabilir Komutlar:</b>\n"
-        "• Analiz: <code>/ASELS</code> (veya hisse adı)\n"
+        "• Analiz: <code>/ASELS1!</code> (veya hisse adı)\n"
         "• Anında Tarama: <code>/tara</code>\n"
         "• Açık Pozisyonlar: <code>/pozlar</code> veya <code>/poz</code>\n"
         "• Piyasa Özeti: <code>/ozet</code>\n\n"
@@ -675,16 +740,16 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
     msg = ("🤖 <b>Yardım Menüsü</b>\n\n"
-           "• Hisse analizi: <code>/ASELS</code>\n"
+           "• Hisse analizi: <code>/ASELS1!</code>\n"
            "• Anında tarama: <code>/tara</code>\n"
            "• Açık pozisyonlar: <code>/pozlar</code> veya <code>/poz</code>\n"
            "• Piyasa Özeti: <code>/ozet</code>\n\n"
-           "Sistem <b>Koşan At</b> ve <b>RSI EMA</b> sinyallerini takip eder (17:00 sonrası işlem yok).")
+           "Sistem <b>Koşan At</b>, <b>RSI EMA</b> ve <b>Trend Takip</b> sinyallerini takip eder (17:00 sonrası işlem yok).")
     await update.message.reply_text(msg, parse_mode="HTML")
 
 async def cmd_pozlar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in CHAT_IDS: return
-    if not KOSAN_AT_TRADES and not RSI_EMA_TRADES:
+    if not KOSAN_AT_TRADES and not RSI_EMA_TRADES and not TREND_TRACKERS:
         await update.message.reply_text("📭 Açık pozisyon bulunmuyor.")
         return
     try:
@@ -738,10 +803,11 @@ async def weekly_summary_and_cleanup():
     await send_all(msg)
     async with STATE_LOCK:
         KOSAN_AT_TRADES.clear(); RSI_EMA_TRADES.clear(); KOSAN_LAST_SIGNAL.clear(); DATA_CACHE.clear()
+        TREND_TRACKERS.clear() # Haftalıkta trend takip sıfırlanır
         KOSAN_DAILY_STATS.update({"signals": 0, "tp_4": 0, "tp_3": 0, "tp_2_5": 0, "tp_1_5": 0, "sl": 0, "zb_exit": 0})
         KOSAN_WEEKLY_STATS.update({"signals": 0, "tp_4": 0, "tp_3": 0, "tp_2_5": 0, "tp_1_5": 0, "sl": 0, "zb_exit": 0})
         save_trades()
-    await send_all("🧹 <b>Haftalık Genel Temizlik Yapıldı</b>\nTüm pozisyonlar ve istatistikler sıfırlandı. Pazartesi yeni sinyallerle başlanacak.")
+    await send_all("🧹 <b>Haftalık Genel Temizlik Yapıldı</b>\nTüm pozisyonlar (Trend Takip Dahil) ve istatistikler sıfırlandı. Pazartesi yeni sinyallerle başlanacak.")
 
 async def tick(force=False):
     global is_scanning, SCAN_TIME
@@ -809,83 +875,47 @@ async def clear_daily_state():
         DATA_CACHE.clear(); LATEST_PRICES.clear()
         KOSAN_DAILY_STATS.update({"signals": 0, "tp_4": 0, "tp_3": 0, "tp_2_5": 0, "tp_1_5": 0, "sl": 0, "zb_exit": 0})
         save_trades()
-    await send_all("🧹 <b>Gün Sonu Temizliği</b>\nSaat 18:30 oldu. Günlük istatistikler sıfırlandı. <b>Açık pozisyonlar korunuyor ve yarın takip edilecek.</b>")
+        # TREND_TRACKERS Günlük Temizlikte SİLİNMEZ! Ertesi gün devam eder.
+    await send_all("🧹 <b>Gün Sonu Temizliği</b>\nSaat 18:30 oldu. Günlük istatistikler sıfırlandı. <b>Açık pozisyonlar (Trend Takip Dahil) korunuyor ve yarın takip edilecek.</b>")
 
 async def market_open_scan():
     await send_all("🟢 09:50 - Çalışmaya hazır, borsanın açılması bekleniyor...")
     await send_all("Sistem her zaman senin için çalışıyor, kazanmak istiyorsan sadece sistemle kal... MZB 😉")
 
 # ==========================================
-# HABER MODÜLÜ (RSS taraması + anahtar kelime eşleştirme)
-# Bir haber: (ilgili kişi/kurum) VE (borsa kelimesi) birlikte geçerse gönderilir.
-# ==========================================
-# ==========================================
-# AYARLAR (buradan düzenleyin)
+# HABER MODÜLÜ
 # ==========================================
 SEEN_FILE = os.path.join(DATA_DIR, "haber_seen.json")
+MAX_PER_RUN = 5; MAX_AGE_HOURS = 6; SUMMARY_SENTENCES = 3; SUMMARY_MAX_CHARS = 320; SEEN_KEEP = 3000
 
-MAX_PER_RUN = 5          # bir taramada en fazla kaç haber gönderilsin
-MAX_AGE_HOURS = 6        # bundan eski haberler gönderilmez
-SUMMARY_SENTENCES = 3    # özet en fazla kaç cümle
-SUMMARY_MAX_CHARS = 320
-SEEN_KEEP = 3000
-
-# Doğrudan yayıncı RSS'leri (özet metni içerir). Tarayıcıda açıp çalıştığını kontrol edin.
 FEEDS = [
     ("AA Güncel",  "https://www.aa.com.tr/tr/rss/default?cat=guncel"),
     ("AA Ekonomi", "https://www.aa.com.tr/tr/rss/default?cat=ekonomi"),
 ]
-
-# Google Haberler arama RSS'i (daha geniş kapsam; sadece başlık+kaynak verir, özet yoktur)
 USE_GOOGLE_NEWS = True
-GOOGLE_QUERIES = [
-    "Erdoğan borsa OR faiz OR piyasa OR yatırımcı",
-    "Mehmet Şimşek faiz OR borsa OR piyasa OR para politikası",
-    "SPK Başkanı borsa OR hisse OR fon",
-    "CHP OR AK Parti dava borsa OR piyasa",
-]
+GOOGLE_QUERIES = ["Erdoğan borsa OR faiz OR piyasa OR yatırımcı", "Mehmet Şimşek faiz OR borsa OR piyasa OR para politikası", "SPK Başkanı borsa OR hisse OR fon", "CHP OR AK Parti dava borsa OR piyasa"]
 
-# 1) İlgili kişi / kurum kalıpları (küçük harf, Türkçe)
 ENTITIES = [
-    ("Erdoğan",       r"erdoğan|cumhurbaşkanı(?! yardımcısı)"),
-    ("Şimşek",        r"mehmet şimşek|bakan şimşek|hazine ve maliye bakanı"),
-    ("SPK Başkanı",   r"spk başkan\w*|sermaye piyasası kurulu başkan\w*"),
+    ("Erdoğan", r"erdoğan|cumhurbaşkanı(?! yardımcısı)"),
+    ("Şimşek", r"mehmet şimşek|bakan şimşek|hazine ve maliye bakanı"),
+    ("SPK Başkanı", r"spk başkan\w*|sermaye piyasası kurulu başkan\w*"),
     ("Merkez Bankası", r"merkez bankası başkan\w*|tcmb başkan\w*"),
     ("Devlet yetkilisi", r"\bbakan\b|\bbakanı\b|cumhurbaşkanı yardımcısı|\bbakanlığı\b"),
-    ("Parti davası",  r"(chp|ak parti|mhp|dem parti|iyi parti|siyasi parti)\w*.{0,60}dava|dava.{0,60}(chp|ak parti|mhp|dem parti|iyi parti|siyasi parti)|mutlak butlan|kapatma davası|kurultay davası"),
+    ("Parti davası", r"(chp|ak parti|mhp|dem parti|iyi parti|siyasi parti)\w*.{0,60}dava|dava.{0,60}(chp|ak parti|mhp|dem parti|iyi parti|siyasi parti)|mutlak butlan|kapatma davası|kurultay davası"),
 ]
-
-# 2) Borsa kelimeleri (küçük harf, Türkçe). Ekleyip çıkarabilirsiniz.
 KEYWORDS = [
-    ("SPK",            r"\bspk\b"),
-    ("borsa",          r"\bborsa\w{0,6}"),
-    ("BIST",           r"\bbist\b"),
-    ("para politikası", r"para politika\w*"),
-    ("faiz",           r"\bfaiz\w{0,5}"),
-    ("yatırımcı",      r"\byatırımc\w{0,6}"),
-    ("piyasa",         r"\bpiyasa\w{0,6}"),
-    ("hisse",          r"\bhisse\w{0,6}"),
-    ("fon",            r"\bfon(?:u|lar\w*|un\w*)?\b"),
-    ("sermaye piyasası", r"sermaye piyasası"),
+    ("SPK", r"\bspk\b"), ("borsa", r"\bborsa\w{0,6}"), ("BIST", r"\bbist\b"), ("para politikası", r"para politika\w*"),
+    ("faiz", r"\bfaiz\w{0,5}"), ("yatırımcı", r"\byatırımc\w{0,6}"), ("piyasa", r"\bpiyasa\w{0,6}"),
+    ("hisse", r"\bhisse\w{0,6}"), ("fon", r"\bfon(?:u|lar\w*|un\w*)?\b"), ("sermaye piyasası", r"sermaye piyasası"),
 ]
 
-# ==========================================
-# YARDIMCILAR
-# ==========================================
-def tr_lower(s: str) -> str:
-    return s.replace("İ", "i").replace("I", "ı").lower()
-
+def tr_lower(s: str) -> str: return s.replace("İ", "i").replace("I", "ı").lower()
 def _http_get(url: str, timeout: int = 12) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; BorsaBot/1.0)"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
-
+    with urllib.request.urlopen(req, timeout=timeout) as r: return r.read()
 def _strip_html(s: str) -> str:
-    s = html.unescape(s or "")
-    s = re.sub(r"<[^>]+>", " ", s)
-    s = html.unescape(s)
+    s = html.unescape(s or ""); s = re.sub(r"<[^>]+>", " ", s); s = html.unescape(s)
     return re.sub(r"\s+", " ", s).strip()
-
 def _summary(text: str, title: str) -> str:
     text = _strip_html(text)
     if not text: return ""
@@ -899,21 +929,15 @@ def _summary(text: str, title: str) -> str:
         if len(out) >= SUMMARY_SENTENCES: break
     res = " ".join(out)
     return res[:SUMMARY_MAX_CHARS - 1] + "…" if len(res) > SUMMARY_MAX_CHARS else res
-
 def _parse_rss(xml_bytes: bytes, label: str, is_google: bool = False):
-    root = ET.fromstring(xml_bytes)
-    items = []
+    root = ET.fromstring(xml_bytes); items = []
     for it in root.iter("item"):
-        title = _strip_html(it.findtext("title") or "")
-        link = (it.findtext("link") or "").strip()
+        title = _strip_html(it.findtext("title") or ""); link = (it.findtext("link") or "").strip()
         if not title or not link: continue
-        src = label
-        src_el = it.find("source")
+        src = label; src_el = it.find("source")
         if is_google and src_el is not None and (src_el.text or "").strip():
-            src = src_el.text.strip()
-            title = re.sub(r"\s+-\s+" + re.escape(src) + r"\s*$", "", title)
-        pub = None
-        pd_txt = it.findtext("pubDate")
+            src = src_el.text.strip(); title = re.sub(r"\s+-\s+" + re.escape(src) + r"\s*$", "", title)
+        pub = None; pd_txt = it.findtext("pubDate")
         if pd_txt:
             try:
                 pub = parsedate_to_datetime(pd_txt)
@@ -922,40 +946,28 @@ def _parse_rss(xml_bytes: bytes, label: str, is_google: bool = False):
         desc = "" if is_google else (it.findtext("description") or "")
         items.append({"title": title, "link": link, "desc": desc, "pub": pub, "source": src, "is_google": is_google})
     return items
-
 def _fetch_feed(label: str, url: str, is_google: bool = False):
-    try:
-        return _parse_rss(_http_get(url), label, is_google)
+    try: return _parse_rss(_http_get(url), label, is_google)
     except Exception as e:
-        logger.warning(f"Haber kaynağı okunamadı ({label}): {e}")
-        return []
-
+        logger.warning(f"Haber kaynağı okunamadı ({label}): {e}"); return []
 def match_item(item):
-    """(eşleşen kişi/kurumlar, eşleşen borsa kelimeleri) döndürür. İkisi de doluysa haber uygundur."""
     text = tr_lower(item["title"] + " " + _strip_html(item["desc"]))
     ents = [name for name, pat in ENTITIES if re.search(pat, text)]
     kws = [name for name, pat in KEYWORDS if re.search(pat, text)]
     return ents, kws
-
 def _norm_title_hash(title: str) -> str:
     t = re.sub(r"[^\w]+", " ", tr_lower(title)).strip()
     return "t:" + hashlib.md5(t.encode("utf-8")).hexdigest()
-
 def _load_seen():
     if not os.path.exists(SEEN_FILE): return None
     try:
-        with open(SEEN_FILE, "r", encoding="utf-8") as f:
-            return list(json.load(f).get("seen", []))
+        with open(SEEN_FILE, "r", encoding="utf-8") as f: return list(json.load(f).get("seen", []))
     except Exception: return []
-
 def _save_seen(seen_list):
     try:
-        with open(SEEN_FILE + ".tmp", "w", encoding="utf-8") as f:
-            json.dump({"seen": seen_list[-SEEN_KEEP:]}, f, ensure_ascii=False)
+        with open(SEEN_FILE + ".tmp", "w", encoding="utf-8") as f: json.dump({"seen": seen_list[-SEEN_KEEP:]}, f, ensure_ascii=False)
         os.replace(SEEN_FILE + ".tmp", SEEN_FILE)
-    except Exception as e:
-        logger.error(f"Haber kayıt hatası: {e}")
-
+    except Exception as e: logger.error(f"Haber kayıt hatası: {e}")
 def build_message(item, ents, kws):
     esc = lambda s: html.escape(s, quote=False)
     summ = _summary(item["desc"], item["title"])
@@ -965,11 +977,7 @@ def build_message(item, ents, kws):
     lines.append(f"🔗 <a href=\"{html.escape(item['link'], quote=True)}\">Habere git</a>")
     return "\n".join(lines)
 
-# ==========================================
-# ANA FONKSİYON (scheduler bunu çağırır)
-# ==========================================
 async def haber_tara(send_fn):
-    """send_fn: bot.py'deki send_all(text) fonksiyonu."""
     try:
         sources = [(l, u, False) for l, u in FEEDS]
         if USE_GOOGLE_NEWS:
@@ -977,46 +985,31 @@ async def haber_tara(send_fn):
                 url = "https://news.google.com/rss/search?q=" + urllib.parse.quote_plus(q + " when:1d") + "&hl=tr&gl=TR&ceid=TR:tr"
                 sources.append(("Google Haberler", url, True))
         results = await asyncio.gather(*[asyncio.to_thread(_fetch_feed, l, u, g) for l, u, g in sources])
-
-        seen_list = _load_seen()
-        first_run = seen_list is None
-        seen_list = seen_list or []
-        seen = set(seen_list)
-
+        seen_list = _load_seen(); first_run = seen_list is None
+        seen_list = seen_list or []; seen = set(seen_list)
         cutoff = datetime.now(timezone.utc) - timedelta(hours=MAX_AGE_HOURS)
         all_items = [i for r in results for i in r]
         all_items.sort(key=lambda i: i["pub"] or datetime.now(timezone.utc), reverse=True)
-
         sent = 0; new_marks = []
         for it in all_items:
             keys = [it["link"], _norm_title_hash(it["title"])]
             if any(k in seen for k in keys): continue
-            if first_run:                                   # ilk çalıştırma: mevcut haberleri sessizce işaretle
-                new_marks += keys; seen.update(keys); continue
-            if it["pub"] and it["pub"] < cutoff:            # eski haber
-                new_marks += keys; seen.update(keys); continue
+            if first_run: new_marks += keys; seen.update(keys); continue
+            if it["pub"] and it["pub"] < cutoff: new_marks += keys; seen.update(keys); continue
             ents, kws = match_item(it)
-            if not (ents and kws):                          # ilgisiz haber
-                new_marks += keys; seen.update(keys); continue
-            if sent >= MAX_PER_RUN:                         # sınır aşıldı: bir sonraki taramada gönderilsin
-                continue
+            if not (ents and kws): new_marks += keys; seen.update(keys); continue
+            if sent >= MAX_PER_RUN: continue
             await send_fn(build_message(it, ents, kws))
             sent += 1; new_marks += keys; seen.update(keys)
-
-        if new_marks or first_run:
-            _save_seen(seen_list + new_marks)
-        if first_run:
-            logger.info(f"📰 Haber modülü ilk çalıştırma: {len(new_marks)//2} mevcut haber sessizce işaretlendi.")
-        elif sent:
-            logger.info(f"📰 {sent} haber gönderildi.")
-    except Exception as e:
-        logger.error(f"Haber tarama hatası: {e}")
+        if new_marks or first_run: _save_seen(seen_list + new_marks)
+        if first_run: logger.info(f"📰 Haber modülü ilk çalıştırma: {len(new_marks)//2} mevcut haber sessizce işaretlendi.")
+        elif sent: logger.info(f"📰 {sent} haber gönderildi.")
+    except Exception as e: logger.error(f"Haber tarama hatası: {e}")
 
 async def task_morning_summary(): await generate_market_summary("Sabah")
 async def task_afternoon_summary(): await generate_market_summary("Öğleden Sonra")
 async def task_haber(): await haber_tara(send_all)
 
-# BOT KOMUT MENÜSÜNÜ AYARLAMA
 async def post_init(application: Application) -> None:
     commands = [
         BotCommand("start", "Sistemi başlat ve menüyü göster"),
@@ -1026,7 +1019,6 @@ async def post_init(application: Application) -> None:
     ]
     await application.bot.set_my_commands(commands)
 
-# Bot başlatılırken post_init eklendi
 bot_app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1042,8 +1034,6 @@ bot_app.add_handler(CommandHandler(["help", "yardim", "durum"], cmd_help, filter
 bot_app.add_handler(CommandHandler("tara", cmd_tara, filters=auth_filter))
 bot_app.add_handler(CommandHandler(["pozlar", "poz"], cmd_pozlar, filters=auth_filter))
 bot_app.add_handler(CommandHandler("ozet", cmd_ozet, filters=auth_filter))
-# Callback (Buton) yöneticisi eklendi
-from telegram.ext import CallbackQueryHandler
 bot_app.add_handler(CallbackQueryHandler(button_callback))
 bot_app.add_handler(MessageHandler(filters.TEXT & auth_filter, analyze_symbol))
 
@@ -1072,7 +1062,7 @@ async def main():
     sched.add_job(task_haber, CronTrigger(hour="8-23", minute="*/10", timezone=TIMEZONE))
     
     sched.start()
-    logger.info("✅ Bot çalışıyor. Gerekli düzeltmeler uygulandı.")
+    logger.info("✅ Bot çalışıyor. Vadeli + Trend Takip + Haber modülü entegre edildi.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
