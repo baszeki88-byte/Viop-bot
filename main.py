@@ -79,7 +79,7 @@ SECTORS = {"🏦 Bankacılık": ["GARAN", "YKBNK", "AKBNK", "ISCTR", "VAKBN", "H
 # ==========================================
 # SİNYAL PARAMETRELERİ
 # ==========================================
-TF_MINUTES = {"5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
+TF_MINUTES = {"5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440, "1w": 10080}
 KOSAN_RSI_PERIOD = 8; KOSAN_LONG_LEVEL = 75; KOSAN_SHORT_LEVEL = 35
 SL_PCT = 1.5; WHITE_BASE_TP_PCT = 2.5; RED_BASE_TP_PCT = 1.5
 WHITE_ZB_TP_PCT = 4.0; RED_ZB_TP_PCT = 3.0; ZB_LOOKBACK = 18; ZB_ORDER = 2; MAX_SIGNAL_LAG_MIN = 30
@@ -132,6 +132,45 @@ def closed_only(df, tf):
     if df is None or df.empty: return df
     now = datetime.now(TIMEZONE); close_t = df.index + pd.Timedelta(minutes=TF_MINUTES[tf]); mask = close_t <= now
     after_close = (df.index.date == now.date()) & (now.time() >= dt_time(18, 5)); return df[mask | after_close]
+
+# --- YENİ: HAFTALIK FIBO SEVİYE HESABI ---
+async def get_nearest_weekly_fibo(sym, current_price, direction):
+    try:
+        # 1. Haftalık veriyi çek
+        df_w = await fetch_ohlc_async(sym, "1w", limit=10)
+        if df_w is None or len(df_w) < 2: return None
+        
+        # 2. Bir önceki kapanmış haftalık mumun HLC değerlerini al
+        prev_w = df_w.iloc[-2]
+        pp = (prev_w['high'] + prev_w['low'] + prev_w['close']) / 3
+        rng = prev_w['high'] - prev_w['low']
+        
+        # 3. Pine Script standartlarındaki Fibo seviyeleri
+        levels = [0.382, 0.5, 0.618, 1.0, 1.272, 1.618, 2.618]
+        fib_prices = []
+        for lvl in levels:
+            # Dirençler (PP üstü)
+            fib_prices.append({"name": f"PP {lvl}", "price": pp + (rng * lvl)})
+            # Destekler (PP altı)
+            fib_prices.append({"name": f"PP {lvl}", "price": pp - (rng * lvl)})
+            
+        if direction == "LONG":
+            # Fiyatın altındaki en yakın desteği bul
+            supports = [x for x in fib_prices if x["price"] < current_price]
+            if supports:
+                nearest = max(supports, key=lambda x: x["price"])
+                return f"{nearest['name']} ({nearest['price']:.2f})"
+        else:
+            # Fiyatın üstündeki en yakın direnci bul
+            resistances = [x for x in fib_prices if x["price"] > current_price]
+            if resistances:
+                nearest = min(resistances, key=lambda x: x["price"])
+                return f"{nearest['name']} ({nearest['price']:.2f})"
+        return None
+    except Exception as e:
+        logger.error(f"Fibo hesaplama hatası ({sym}): {e}")
+        return None
+# -----------------------------------------
 
 def save_trades():
     try:
@@ -369,7 +408,6 @@ async def track_kosan(sym, df5, df_1h):
         record_exit("TP" if "TP" in reason else "SL", trade["tp_pct"] if "TP" in reason else 0); return
         
     if df_1h is not None:
-        # YENİ: 1H Aktif Mum Kullanımı (closed_only kaldırıldı)
         if len(df_1h) > 20:
             rsi_series = get_rsi(df_1h['close'], 8); last_idx = len(df_1h) - 1
             
@@ -478,7 +516,12 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
             else:
                 pnl_trk = ((entry - trk["entry"]) / trk["entry"]) * 100 * (1 if trk["direction"] == "LONG" else -1)
                 old_dir = trk["direction"]
-                trend_msg = f"\n\n🔄 <b>TREND DÖNÜŞÜ ({old_dir} -> {direction} #1)</b>\n• {old_dir} Kârı: %{pnl_trk:+.2f} (Giriş: {trk['entry']:,.2f} | Çıkış: {entry:,.2f})\n• Yeni {direction} Giriş: {entry:,.2f}"
+                
+                # YENİ: Haftalık Fibo Seviyesi Hesabı (Sadece Yön Değiştiğinde)
+                fib_level_str = await get_nearest_weekly_fibo(sym, entry, direction)
+                fib_msg = f"\n• 🎯 <b>En Yakın Haftalık Fibo:</b> {fib_level_str}" if fib_level_str else ""
+                
+                trend_msg = f"\n\n🔄 <b>TREND DÖNÜŞÜ ({old_dir} -> {direction} #1)</b>\n• {old_dir} Kârı: %{pnl_trk:+.2f} (Giriş: {trk['entry']:,.2f} | Çıkış: {entry:,.2f})\n• Yeni {direction} Giriş: {entry:,.2f}" + fib_msg
                 TREND_TRACKERS[sym] = {"direction": direction, "count": 1, "entry": entry, "time": datetime.now(TIMEZONE)}
         
         msg += trend_msg
@@ -560,7 +603,7 @@ async def track_rsi_ema_trades(df_1h_cache):
                         await send_all(f"🛑 <b>{sym} - RSI EMA STOP OLDU</b>\nFiyat {trade['sl']:,.2f} seviyesine değdi.\nİşlem kapatıldı.\n🔎 <b>Tarama:</b> {scan_txt()}", ids); continue
             
             if df_1h is not None and len(df_1h) > 20:
-                rsi_series = get_rsi(df_1h['close'], 8); last_idx = len(df_1h) - 1 # AKTİF MUM KULLANIMI
+                rsi_series = get_rsi(df_1h['close'], 8); last_idx = len(df_1h) - 1
                 
                 if not trade.get("zb_teyit_sent", False):
                     if check_zeki_bey_series(rsi_series, last_idx, trade["direction"], ZB_LOOKBACK, ZB_ORDER):
@@ -1061,7 +1104,7 @@ async def main():
     sched.add_job(task_haber, CronTrigger(hour="8-23", minute="*/10", timezone=TIMEZONE))
     
     sched.start()
-    logger.info("✅ Bot çalışıyor. Vadeli + Trend Takip + Haber modülü entegre edildi. (5M kapalı, 1H ve 15M aktif mum)")
+    logger.info("✅ Bot çalışıyor. Vadeli + Trend Takip + Haftalık Fibo + Haber modülü entegre edildi.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
