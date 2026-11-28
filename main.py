@@ -133,35 +133,28 @@ def closed_only(df, tf):
     now = datetime.now(TIMEZONE); close_t = df.index + pd.Timedelta(minutes=TF_MINUTES[tf]); mask = close_t <= now
     after_close = (df.index.date == now.date()) & (now.time() >= dt_time(18, 5)); return df[mask | after_close]
 
-# --- YENİ: HAFTALIK FIBO SEVİYE HESABI ---
+# --- HAFTALIK FIBO SEVİYE HESABI ---
 async def get_nearest_weekly_fibo(sym, current_price, direction):
     try:
-        # 1. Haftalık veriyi çek
         df_w = await fetch_ohlc_async(sym, "1w", limit=10)
         if df_w is None or len(df_w) < 2: return None
         
-        # 2. Bir önceki kapanmış haftalık mumun HLC değerlerini al
         prev_w = df_w.iloc[-2]
         pp = (prev_w['high'] + prev_w['low'] + prev_w['close']) / 3
         rng = prev_w['high'] - prev_w['low']
         
-        # 3. Pine Script standartlarındaki Fibo seviyeleri
         levels = [0.382, 0.5, 0.618, 1.0, 1.272, 1.618, 2.618]
         fib_prices = []
         for lvl in levels:
-            # Dirençler (PP üstü)
             fib_prices.append({"name": f"PP {lvl}", "price": pp + (rng * lvl)})
-            # Destekler (PP altı)
             fib_prices.append({"name": f"PP {lvl}", "price": pp - (rng * lvl)})
             
         if direction == "LONG":
-            # Fiyatın altındaki en yakın desteği bul
             supports = [x for x in fib_prices if x["price"] < current_price]
             if supports:
                 nearest = max(supports, key=lambda x: x["price"])
                 return f"{nearest['name']} ({nearest['price']:.2f})"
         else:
-            # Fiyatın üstündeki en yakın direnci bul
             resistances = [x for x in fib_prices if x["price"] > current_price]
             if resistances:
                 nearest = min(resistances, key=lambda x: x["price"])
@@ -170,7 +163,6 @@ async def get_nearest_weekly_fibo(sym, current_price, direction):
     except Exception as e:
         logger.error(f"Fibo hesaplama hatası ({sym}): {e}")
         return None
-# -----------------------------------------
 
 def save_trades():
     try:
@@ -434,7 +426,7 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
     try:
         has_trade = sym in KOSAN_AT_TRADES
         df_5m = await fetch_ohlc_async(sym, "5m", limit=500 if has_trade else 150)
-        df_5m = closed_only(df_5m, "5m") # Sadece 5M mum kapanmış olacak
+        df_5m = closed_only(df_5m, "5m")
         if df_5m is None or len(df_5m) < 60: return
         df_5m = df_5m.copy(); df_5m['rsi'] = get_rsi(df_5m['close'], KOSAN_RSI_PERIOD); df_5m['ema50'] = df_5m['close'].ewm(span=50, adjust=False).mean()
         
@@ -443,13 +435,13 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
             await track_kosan(sym, df_5m, df_1h_raw); return
             
         if df_1h_raw is None or len(df_1h_raw) < 20: return
-        df_1h = df_1h_raw.copy(); df_1h['rsi_1h'] = get_rsi(df_1h['close'], 14) # 1H Aktif mum
+        df_1h = df_1h_raw.copy(); df_1h['rsi_1h'] = get_rsi(df_1h['close'], 14)
         
         df_15m = None
         if not is_white(sym):
             df_15m_raw = await fetch_ohlc_async(sym, "15m", limit=150)
             if df_15m_raw is not None and not df_15m_raw.empty:
-                df_15m = df_15m_raw.copy() # 15M Aktif mum
+                df_15m = df_15m_raw.copy()
                 df_15m['rsi15_8'] = get_rsi(df_15m['close'], 8)
         
         df = pd.merge_asof(df_5m[['open', 'high', 'low', 'close', 'rsi', 'ema50']].sort_index(), df_1h[['rsi_1h']].sort_index(), left_index=True, right_index=True, direction='backward')
@@ -495,7 +487,6 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
                f"🔎 <b>Tarama:</b> {scan_txt()} | <b>Sinyal mumu (5M):</b> {bar_txt(bar_time, '5m')}")
         
         zeki_sent = False
-        # YENİ: Aktif 1H mumuna göre ZB kontrolü
         if df_1h_raw is not None and len(df_1h_raw) > 20:
             rsi_series = get_rsi(df_1h_raw['close'], 8); last_idx = len(df_1h_raw) - 1
             zb_signal = check_zeki_bey_series(rsi_series, last_idx, direction, ZB_LOOKBACK, ZB_ORDER)
@@ -517,9 +508,15 @@ async def check_kosan_at(sym, xu_trend, df_1h_raw):
                 pnl_trk = ((entry - trk["entry"]) / trk["entry"]) * 100 * (1 if trk["direction"] == "LONG" else -1)
                 old_dir = trk["direction"]
                 
-                # YENİ: Haftalık Fibo Seviyesi Hesabı (Sadece Yön Değiştiğinde)
+                # HAFTALIK FİBO HESABI VE SNIPER KONTROLÜ
                 fib_level_str = await get_nearest_weekly_fibo(sym, entry, direction)
-                fib_msg = f"\n• 🎯 <b>En Yakın Haftalık Fibo:</b> {fib_level_str}" if fib_level_str else ""
+                fib_msg = ""
+                if fib_level_str:
+                    # 0.5 veya 0.618 seviyesi mi kontrol et
+                    if "0.5 " in fib_level_str or "0.618" in fib_level_str:
+                        fib_msg = f"\n• 🎯 <b>SNIPER SEVİYE:</b> <b>{fib_level_str}</b> 🔥 (Yüksek Başarı)"
+                    else:
+                        fib_msg = f"\n• 🎯 <b>En Yakın Fibo:</b> {fib_level_str}"
                 
                 trend_msg = f"\n\n🔄 <b>TREND DÖNÜŞÜ ({old_dir} -> {direction} #1)</b>\n• {old_dir} Kârı: %{pnl_trk:+.2f} (Giriş: {trk['entry']:,.2f} | Çıkış: {entry:,.2f})\n• Yeni {direction} Giriş: {entry:,.2f}" + fib_msg
                 TREND_TRACKERS[sym] = {"direction": direction, "count": 1, "entry": entry, "time": datetime.now(TIMEZONE)}
@@ -1104,7 +1101,7 @@ async def main():
     sched.add_job(task_haber, CronTrigger(hour="8-23", minute="*/10", timezone=TIMEZONE))
     
     sched.start()
-    logger.info("✅ Bot çalışıyor. Vadeli + Trend Takip + Haftalık Fibo + Haber modülü entegre edildi.")
+    logger.info("✅ Bot çalışıyor. Vadeli + Trend Takip + Haftalık Fibo (Sniper Seviyeli) + Haber modülü entegre edildi.")
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
